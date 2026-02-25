@@ -396,6 +396,15 @@ app.post('/api/auth/google', async (req, res, next) => {
   }
 });
 
+app.get('/api/auth/config', async (req, res) => {
+  return res.status(200).json({
+    googleClientId: GOOGLE_CLIENT_ID,
+    googleEnabled: Boolean(GOOGLE_CLIENT_ID),
+    devAuthEnabled: DEV_AUTH_ENABLED,
+    authRequired: AUTH_REQUIRED,
+  });
+});
+
 app.post('/api/auth/dev-login', async (req, res, next) => {
   try {
     if (!DEV_AUTH_ENABLED) {

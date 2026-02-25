@@ -13,6 +13,7 @@ async function connectDB() {
   const productionMongoUri = String(process.env.MONGO_URI || '').trim();
   const hasLocal = !isProduction && localMongoUri.length > 0;
   const hasDefault = productionMongoUri.length > 0;
+  const allowLocalFallback = String(process.env.ALLOW_LOCAL_DB_FALLBACK || '').toLowerCase() === 'true';
 
   if (!hasLocal && !hasDefault) {
     throw new Error(
@@ -28,6 +29,12 @@ async function connectDB() {
       return;
     } catch (localError) {
       console.warn(`[db] local Mongo is unavailable: ${localError.message}`);
+      if (!allowLocalFallback) {
+        console.error(
+          '[db] fallback to MONGO_URI is disabled. Set ALLOW_LOCAL_DB_FALLBACK=true only if you really want to use production DB from local run.',
+        );
+        process.exit(1);
+      }
       if (hasDefault) {
         console.warn('[db] falling back to MONGO_URI');
       } else {
