@@ -1,6 +1,9 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
+const cookieParser = require('cookie-parser');
+const jwt = require('jsonwebtoken');
+const { OAuth2Client } = require('google-auth-library');
 
 const connectDB = require('./config/db');
 const Entity = require('./models/Entity');
@@ -10,8 +13,58 @@ dotenv.config();
 const app = express();
 const PORT = Number(process.env.PORT) || 3001;
 const LEGACY_SHAPE_NAME_PATTERN = /^Пуст(?:ой|ая|ые)(?:\s*-\s*(\d+))?$/i;
+const SESSION_COOKIE_NAME = 'synapse12_session';
+const SESSION_TTL_SECONDS = Number(process.env.SESSION_TTL_SECONDS) || 60 * 60 * 24 * 7;
+const GOOGLE_CLIENT_ID = String(process.env.GOOGLE_CLIENT_ID || '').trim();
+const SESSION_SECRET = String(process.env.SESSION_SECRET || process.env.GOOGLE_CLIENT_SECRET || '').trim();
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+const AUTH_REQUIRED = String(process.env.AUTH_REQUIRED || '').toLowerCase() === 'true';
+const DEFAULT_ALLOWED_ORIGINS = ['http://localhost:5173', 'http://localhost:3000'];
 
-app.use(cors());
+function parseAllowedOrigins() {
+  const raw = [
+    process.env.FRONTEND_ORIGIN,
+    process.env.FRONTEND_ORIGINS,
+    process.env.CORS_ORIGIN,
+    process.env.CORS_ORIGINS,
+  ]
+    .filter((value) => typeof value === 'string' && value.trim().length > 0)
+    .join(',');
+
+  const normalized = raw
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+  if (normalized.length) {
+    return new Set(normalized);
+  }
+
+  return new Set(DEFAULT_ALLOWED_ORIGINS);
+}
+
+const allowedOrigins = parseAllowedOrigins();
+const googleClient = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : null;
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+
+      if (!allowedOrigins.size || allowedOrigins.has(origin)) {
+        callback(null, true);
+        return;
+      }
+
+      callback(Object.assign(new Error(`CORS blocked for origin: ${origin}`), { status: 403 }));
+    },
+    credentials: true,
+  }),
+);
+app.use(cookieParser());
 app.use(express.json({ limit: '10mb' }));
 
 function normalizeShapeName(name) {
@@ -97,6 +150,129 @@ function normalizeProjectCanvasData(canvasData) {
     ...(viewport ? { viewport } : {}),
     ...(rawBackground ? { background: rawBackground } : {}),
   };
+}
+
+function getSessionCookieOptions() {
+  return {
+    httpOnly: true,
+    secure: IS_PRODUCTION,
+    sameSite: IS_PRODUCTION ? 'none' : 'lax',
+    maxAge: SESSION_TTL_SECONDS * 1000,
+    path: '/',
+  };
+}
+
+function toPublicUserFromSessionPayload(payload) {
+  return {
+    id: payload.sub,
+    email: payload.email,
+    name: payload.name || payload.email,
+    picture: payload.picture || '',
+    givenName: payload.givenName || '',
+    familyName: payload.familyName || '',
+  };
+}
+
+function getSessionTokenFromRequest(req) {
+  const authHeader = req.headers.authorization;
+  if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.slice('Bearer '.length).trim();
+    if (token) return token;
+  }
+
+  const cookieToken = req.cookies?.[SESSION_COOKIE_NAME];
+  if (typeof cookieToken === 'string' && cookieToken.trim()) {
+    return cookieToken.trim();
+  }
+
+  return '';
+}
+
+function createSessionToken(user) {
+  if (!SESSION_SECRET) {
+    throw Object.assign(new Error('SESSION_SECRET is not configured'), { status: 503 });
+  }
+
+  return jwt.sign(
+    {
+      sub: user.sub,
+      email: user.email,
+      name: user.name,
+      picture: user.picture || '',
+      givenName: user.givenName || '',
+      familyName: user.familyName || '',
+    },
+    SESSION_SECRET,
+    {
+      algorithm: 'HS256',
+      expiresIn: SESSION_TTL_SECONDS,
+    },
+  );
+}
+
+function verifySessionToken(sessionToken) {
+  if (!SESSION_SECRET) {
+    throw Object.assign(new Error('SESSION_SECRET is not configured'), { status: 503 });
+  }
+
+  return jwt.verify(sessionToken, SESSION_SECRET, {
+    algorithms: ['HS256'],
+  });
+}
+
+function setSessionCookie(res, sessionToken) {
+  res.cookie(SESSION_COOKIE_NAME, sessionToken, getSessionCookieOptions());
+}
+
+function clearSessionCookie(res) {
+  res.clearCookie(SESSION_COOKIE_NAME, {
+    ...getSessionCookieOptions(),
+    maxAge: undefined,
+  });
+}
+
+async function verifyGoogleCredential(credential) {
+  if (!GOOGLE_CLIENT_ID || !googleClient) {
+    throw Object.assign(new Error('Google OAuth is not configured'), { status: 503 });
+  }
+
+  const ticket = await googleClient.verifyIdToken({
+    idToken: credential,
+    audience: GOOGLE_CLIENT_ID,
+  });
+
+  const payload = ticket.getPayload();
+  if (!payload || !payload.sub) {
+    throw Object.assign(new Error('Invalid Google token payload'), { status: 401 });
+  }
+
+  if (!payload.email || payload.email_verified !== true) {
+    throw Object.assign(new Error('Google account email is not verified'), { status: 401 });
+  }
+
+  return {
+    sub: payload.sub,
+    email: payload.email,
+    name: payload.name || payload.email,
+    picture: payload.picture || '',
+    givenName: payload.given_name || '',
+    familyName: payload.family_name || '',
+  };
+}
+
+function requireAuth(req, res, next) {
+  try {
+    const sessionToken = getSessionTokenFromRequest(req);
+    if (!sessionToken) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+
+    const sessionPayload = verifySessionToken(sessionToken);
+    req.authUser = toPublicUserFromSessionPayload(sessionPayload);
+    return next();
+  } catch (error) {
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
 }
 
 async function removeEntityFromProjectCanvases(entityId) {
@@ -197,6 +373,42 @@ async function migrateLegacyShapeNames() {
   console.log(`[migration] shape names renamed to "Элемент": ${operations.length}`);
 }
 
+app.post('/api/auth/google', async (req, res, next) => {
+  try {
+    const credential = typeof req.body?.credential === 'string' ? req.body.credential.trim() : '';
+    if (!credential) {
+      return res.status(400).json({ message: 'Google credential is required' });
+    }
+
+    const verifiedUser = await verifyGoogleCredential(credential);
+    const sessionToken = createSessionToken(verifiedUser);
+    setSessionCookie(res, sessionToken);
+
+    return res.status(200).json({
+      user: toPublicUserFromSessionPayload(verifiedUser),
+      sessionToken,
+      expiresIn: SESSION_TTL_SECONDS,
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.get('/api/auth/me', requireAuth, async (req, res) => {
+  return res.status(200).json({
+    user: req.authUser,
+  });
+});
+
+app.post('/api/auth/logout', async (req, res) => {
+  clearSessionCookie(res);
+  return res.status(204).send();
+});
+
+if (AUTH_REQUIRED) {
+  app.use('/api/entities', requireAuth);
+}
+
 app.get('/api/entities', async (req, res, next) => {
   try {
     const filter = {};
@@ -276,6 +488,10 @@ app.delete('/api/entities/:id', async (req, res, next) => {
 app.use((err, req, res, next) => {
   console.error(err);
 
+  if (typeof err?.status === 'number' && err.status >= 400 && err.status < 600) {
+    return res.status(err.status).json({ message: err.message || 'Request failed' });
+  }
+
   if (err.name === 'ValidationError') {
     return res.status(400).json({ message: err.message });
   }
@@ -290,6 +506,18 @@ app.use((err, req, res, next) => {
 async function startServer() {
   await connectDB();
   await migrateLegacyShapeNames();
+
+  if (!GOOGLE_CLIENT_ID) {
+    console.warn('[auth] GOOGLE_CLIENT_ID is not set. /api/auth/google will be unavailable.');
+  }
+  if (!SESSION_SECRET) {
+    console.warn('[auth] SESSION_SECRET is not set. Session endpoints will be unavailable.');
+  }
+  if (AUTH_REQUIRED && (!GOOGLE_CLIENT_ID || !SESSION_SECRET)) {
+    console.warn(
+      '[auth] AUTH_REQUIRED=true but auth config is incomplete. Check GOOGLE_CLIENT_ID and SESSION_SECRET.',
+    );
+  }
 
   app.listen(PORT, () => {
     console.log(`Backend server started on port ${PORT}`);
