@@ -275,10 +275,20 @@ async function verifyGoogleCredential(credential) {
     throw Object.assign(new Error('Google OAuth is not configured'), { status: 503 });
   }
 
-  const ticket = await googleClient.verifyIdToken({
-    idToken: credential,
-    audience: GOOGLE_CLIENT_ID,
-  });
+  let ticket;
+  try {
+    ticket = await googleClient.verifyIdToken({
+      idToken: credential,
+      audience: GOOGLE_CLIENT_ID,
+    });
+  } catch (error) {
+    throw Object.assign(
+      new Error('Invalid Google credential. Check OAuth origin and client configuration.'),
+      {
+        status: 401,
+      },
+    );
+  }
 
   const payload = ticket.getPayload();
   if (!payload || !payload.sub) {
