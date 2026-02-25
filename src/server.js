@@ -19,6 +19,8 @@ const GOOGLE_CLIENT_ID = String(process.env.GOOGLE_CLIENT_ID || '').trim();
 const SESSION_SECRET = String(process.env.SESSION_SECRET || process.env.GOOGLE_CLIENT_SECRET || '').trim();
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 const AUTH_REQUIRED = String(process.env.AUTH_REQUIRED || '').toLowerCase() === 'true';
+const DEV_AUTH_ENABLED =
+  !IS_PRODUCTION && String(process.env.DEV_AUTH_ENABLED || 'true').toLowerCase() !== 'false';
 const DEFAULT_ALLOWED_ORIGINS = ['http://localhost:5173', 'http://localhost:3000'];
 
 function parseAllowedOrigins() {
@@ -394,6 +396,44 @@ app.post('/api/auth/google', async (req, res, next) => {
   }
 });
 
+app.post('/api/auth/dev-login', async (req, res, next) => {
+  try {
+    if (!DEV_AUTH_ENABLED) {
+      return res.status(404).json({ message: 'Not found' });
+    }
+
+    const rawEmail =
+      typeof req.body?.email === 'string' && req.body.email.trim()
+        ? req.body.email.trim().toLowerCase()
+        : 'local.dev@synapse12.local';
+    const rawName =
+      typeof req.body?.name === 'string' && req.body.name.trim()
+        ? req.body.name.trim()
+        : 'Local Developer';
+
+    const devUser = {
+      sub: `dev:${rawEmail}`,
+      email: rawEmail,
+      name: rawName,
+      picture: '',
+      givenName: rawName,
+      familyName: '',
+    };
+
+    const sessionToken = createSessionToken(devUser);
+    setSessionCookie(res, sessionToken);
+
+    return res.status(200).json({
+      user: toPublicUserFromSessionPayload(devUser),
+      sessionToken,
+      expiresIn: SESSION_TTL_SECONDS,
+      mode: 'dev',
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
 app.get('/api/auth/me', requireAuth, async (req, res) => {
   return res.status(200).json({
     user: req.authUser,
@@ -512,6 +552,9 @@ async function startServer() {
   }
   if (!SESSION_SECRET) {
     console.warn('[auth] SESSION_SECRET is not set. Session endpoints will be unavailable.');
+  }
+  if (DEV_AUTH_ENABLED) {
+    console.warn('[auth] DEV_AUTH_ENABLED=true. /api/auth/dev-login is available (development only).');
   }
   if (AUTH_REQUIRED && (!GOOGLE_CLIENT_ID || !SESSION_SECRET)) {
     console.warn(
