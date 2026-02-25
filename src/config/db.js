@@ -1,12 +1,20 @@
 const mongoose = require('mongoose');
 
+async function connectWithLabel(uri, label, timeoutMs) {
+  await mongoose.connect(uri, {
+    serverSelectionTimeoutMS: timeoutMs,
+  });
+  console.log(`MongoDB connected (${label})`);
+}
+
 async function connectDB() {
   const isProduction = process.env.NODE_ENV === 'production';
   const localMongoUri = String(process.env.MONGO_URI_LOCAL || '').trim();
   const productionMongoUri = String(process.env.MONGO_URI || '').trim();
-  const mongoUri = !isProduction && localMongoUri ? localMongoUri : productionMongoUri;
+  const hasLocal = !isProduction && localMongoUri.length > 0;
+  const hasDefault = productionMongoUri.length > 0;
 
-  if (!mongoUri) {
+  if (!hasLocal && !hasDefault) {
     throw new Error(
       isProduction
         ? 'MONGO_URI is not defined in environment variables'
@@ -14,13 +22,29 @@ async function connectDB() {
     );
   }
 
-  try {
-    await mongoose.connect(mongoUri);
-    const mode = !isProduction && localMongoUri ? 'local' : 'default';
-    console.log(`MongoDB connected (${mode})`);
-  } catch (error) {
-    console.error('MongoDB connection error:', error.message);
-    process.exit(1);
+  if (hasLocal) {
+    try {
+      await connectWithLabel(localMongoUri, 'local', 3000);
+      return;
+    } catch (localError) {
+      console.warn(`[db] local Mongo is unavailable: ${localError.message}`);
+      if (hasDefault) {
+        console.warn('[db] falling back to MONGO_URI');
+      } else {
+        console.error('MongoDB connection error:', localError.message);
+        process.exit(1);
+      }
+    }
+  }
+
+  if (hasDefault) {
+    try {
+      await connectWithLabel(productionMongoUri, 'default', 10000);
+      return;
+    } catch (defaultError) {
+      console.error('MongoDB connection error:', defaultError.message);
+      process.exit(1);
+    }
   }
 }
 
