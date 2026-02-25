@@ -80,6 +80,11 @@ function resolveTypeFromValidationContext(ctx) {
 
 const entitySchema = new mongoose.Schema(
   {
+    owner_id: {
+      type: String,
+      trim: true,
+      index: true,
+    },
     type: {
       type: String,
       required: true,

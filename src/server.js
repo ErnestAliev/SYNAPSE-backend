@@ -7,6 +7,7 @@ const { OAuth2Client } = require('google-auth-library');
 
 const connectDB = require('./config/db');
 const Entity = require('./models/Entity');
+const User = require('./models/User');
 
 dotenv.config();
 
@@ -164,15 +165,45 @@ function getSessionCookieOptions() {
   };
 }
 
-function toPublicUserFromSessionPayload(payload) {
+function toPublicUser(user) {
+  const id =
+    (user && (user._id || user.id || user.uid || user.sub) && String(user._id || user.id || user.uid || user.sub)) ||
+    '';
+  const email = (user && typeof user.email === 'string' && user.email.trim()) || '';
+  const name = (user && typeof user.name === 'string' && user.name.trim()) || email;
+  const picture = (user && typeof user.picture === 'string' && user.picture.trim()) || '';
+  const givenName = (user && typeof user.givenName === 'string' && user.givenName.trim()) || '';
+  const familyName = (user && typeof user.familyName === 'string' && user.familyName.trim()) || '';
+  const provider = (user && typeof user.provider === 'string' && user.provider.trim()) || '';
+  const settings =
+    user && user.settings && typeof user.settings === 'object' && !Array.isArray(user.settings)
+      ? user.settings
+      : {};
+
   return {
-    id: payload.sub,
-    email: payload.email,
-    name: payload.name || payload.email,
-    picture: payload.picture || '',
-    givenName: payload.givenName || '',
-    familyName: payload.familyName || '',
+    id,
+    email,
+    name,
+    picture,
+    givenName,
+    familyName,
+    provider,
+    settings,
   };
+}
+
+function normalizeSettingsUpdate(rawSettings) {
+  if (!rawSettings || typeof rawSettings !== 'object' || Array.isArray(rawSettings)) {
+    return {};
+  }
+
+  return Object.entries(rawSettings).reduce((acc, [key, value]) => {
+    const normalizedKey = String(key || '').trim();
+    if (!normalizedKey) return acc;
+    if (value === undefined) return acc;
+    acc[normalizedKey] = value;
+    return acc;
+  }, {});
 }
 
 function getSessionTokenFromRequest(req) {
@@ -195,9 +226,15 @@ function createSessionToken(user) {
     throw Object.assign(new Error('SESSION_SECRET is not configured'), { status: 503 });
   }
 
+  const userId = String(user?._id || user?.id || user?.uid || '').trim();
+  if (!userId) {
+    throw Object.assign(new Error('User id is missing for session token'), { status: 500 });
+  }
+
   return jwt.sign(
     {
-      sub: user.sub,
+      sub: userId,
+      uid: userId,
       email: user.email,
       name: user.name,
       picture: user.picture || '',
@@ -253,7 +290,8 @@ async function verifyGoogleCredential(credential) {
   }
 
   return {
-    sub: payload.sub,
+    provider: 'google',
+    providerId: payload.sub,
     email: payload.email,
     name: payload.name || payload.email,
     picture: payload.picture || '',
@@ -262,26 +300,89 @@ async function verifyGoogleCredential(credential) {
   };
 }
 
-function requireAuth(req, res, next) {
+async function upsertUserFromIdentity(identity) {
+  const provider = String(identity?.provider || '').trim();
+  const providerId = String(identity?.providerId || '').trim();
+  const email = String(identity?.email || '')
+    .trim()
+    .toLowerCase();
+  const name = String(identity?.name || email).trim() || email;
+
+  if (!provider || !providerId || !email) {
+    throw Object.assign(new Error('Invalid user identity payload'), { status: 400 });
+  }
+
+  const update = {
+    provider,
+    providerId,
+    email,
+    name,
+    picture: String(identity?.picture || '').trim(),
+    givenName: String(identity?.givenName || '').trim(),
+    familyName: String(identity?.familyName || '').trim(),
+    lastLoginAt: new Date(),
+  };
+
+  const user = await User.findOneAndUpdate(
+    { provider, providerId },
+    {
+      $set: update,
+      $setOnInsert: {
+        settings: {
+          locale: 'ru',
+          onboardingCompleted: false,
+        },
+      },
+    },
+    {
+      upsert: true,
+      new: true,
+      setDefaultsOnInsert: true,
+    },
+  );
+
+  return user;
+}
+
+async function resolveAuthUserFromSessionToken(sessionToken) {
+  const sessionPayload = verifySessionToken(sessionToken);
+  const userId = String(sessionPayload?.uid || sessionPayload?.sub || '').trim();
+  if (!userId) {
+    throw Object.assign(new Error('Unauthorized'), { status: 401 });
+  }
+
+  const user = await User.findById(userId).lean();
+  if (!user) {
+    throw Object.assign(new Error('Unauthorized'), { status: 401 });
+  }
+
+  return user;
+}
+
+async function requireAuth(req, res, next) {
   try {
     const sessionToken = getSessionTokenFromRequest(req);
     if (!sessionToken) {
       return res.status(401).json({ message: 'Unauthorized' });
     }
 
-    const sessionPayload = verifySessionToken(sessionToken);
-    req.authUser = toPublicUserFromSessionPayload(sessionPayload);
+    const user = await resolveAuthUserFromSessionToken(sessionToken);
+    req.authUser = toPublicUser(user);
     return next();
   } catch (error) {
     return res.status(401).json({ message: 'Unauthorized' });
   }
 }
 
-async function removeEntityFromProjectCanvases(entityId) {
-  return removeEntitiesFromProjectCanvases([entityId]);
+function getOwnerIdFromRequest(req) {
+  return String(req?.authUser?.id || '').trim();
 }
 
-async function removeEntitiesFromProjectCanvases(entityIds) {
+async function removeEntityFromProjectCanvases(entityId, ownerId) {
+  return removeEntitiesFromProjectCanvases([entityId], ownerId);
+}
+
+async function removeEntitiesFromProjectCanvases(entityIds, ownerId) {
   const normalizedIds = Array.from(
     new Set(
       (Array.isArray(entityIds) ? entityIds : [entityIds])
@@ -295,7 +396,11 @@ async function removeEntitiesFromProjectCanvases(entityIds) {
   }
 
   const projects = await Entity.find(
-    { type: 'project', 'canvas_data.nodes.entityId': { $in: normalizedIds } },
+    {
+      type: 'project',
+      ...(ownerId ? { owner_id: ownerId } : {}),
+      'canvas_data.nodes.entityId': { $in: normalizedIds },
+    },
     { _id: 1, canvas_data: 1 },
   ).lean();
 
@@ -325,7 +430,7 @@ async function removeEntitiesFromProjectCanvases(entityIds) {
 
     operations.push({
       updateOne: {
-        filter: { _id: project._id },
+        filter: { _id: project._id, ...(ownerId ? { owner_id: ownerId } : {}) },
         update: {
           $set: {
             canvas_data: {
@@ -382,14 +487,16 @@ app.post('/api/auth/google', async (req, res, next) => {
       return res.status(400).json({ message: 'Google credential is required' });
     }
 
-    const verifiedUser = await verifyGoogleCredential(credential);
-    const sessionToken = createSessionToken(verifiedUser);
+    const verifiedIdentity = await verifyGoogleCredential(credential);
+    const user = await upsertUserFromIdentity(verifiedIdentity);
+    const sessionToken = createSessionToken(user);
     setSessionCookie(res, sessionToken);
 
     return res.status(200).json({
-      user: toPublicUserFromSessionPayload(verifiedUser),
+      user: toPublicUser(user),
       sessionToken,
       expiresIn: SESSION_TTL_SECONDS,
+      mode: 'google',
     });
   } catch (error) {
     return next(error);
@@ -420,8 +527,9 @@ app.post('/api/auth/dev-login', async (req, res, next) => {
         ? req.body.name.trim()
         : 'Local Developer';
 
-    const devUser = {
-      sub: `dev:${rawEmail}`,
+    const devIdentity = {
+      provider: 'dev',
+      providerId: rawEmail,
       email: rawEmail,
       name: rawName,
       picture: '',
@@ -429,11 +537,12 @@ app.post('/api/auth/dev-login', async (req, res, next) => {
       familyName: '',
     };
 
-    const sessionToken = createSessionToken(devUser);
+    const user = await upsertUserFromIdentity(devIdentity);
+    const sessionToken = createSessionToken(user);
     setSessionCookie(res, sessionToken);
 
     return res.status(200).json({
-      user: toPublicUserFromSessionPayload(devUser),
+      user: toPublicUser(user),
       sessionToken,
       expiresIn: SESSION_TTL_SECONDS,
       mode: 'dev',
@@ -449,6 +558,48 @@ app.get('/api/auth/me', requireAuth, async (req, res) => {
   });
 });
 
+app.put('/api/auth/settings', requireAuth, async (req, res, next) => {
+  try {
+    const settingsPatch = normalizeSettingsUpdate(req.body?.settings);
+    if (!Object.keys(settingsPatch).length) {
+      return res.status(400).json({ message: 'settings payload is required' });
+    }
+
+    const currentSettings =
+      req.authUser && req.authUser.settings && typeof req.authUser.settings === 'object'
+        ? req.authUser.settings
+        : {};
+    const nextSettings = {
+      ...currentSettings,
+      ...settingsPatch,
+    };
+
+    const user = await User.findByIdAndUpdate(
+      req.authUser.id,
+      {
+        $set: {
+          settings: nextSettings,
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      },
+    ).lean();
+
+    if (!user) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+
+    req.authUser = toPublicUser(user);
+    return res.status(200).json({
+      user: req.authUser,
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
 app.post('/api/auth/logout', async (req, res) => {
   clearSessionCookie(res);
   return res.status(204).send();
@@ -461,6 +612,11 @@ if (AUTH_REQUIRED) {
 app.get('/api/entities', async (req, res, next) => {
   try {
     const filter = {};
+    const ownerId = getOwnerIdFromRequest(req);
+
+    if (ownerId) {
+      filter.owner_id = ownerId;
+    }
 
     if (req.query.type) {
       filter.type = req.query.type;
@@ -475,7 +631,14 @@ app.get('/api/entities', async (req, res, next) => {
 
 app.post('/api/entities', async (req, res, next) => {
   try {
-    const entity = await Entity.create(req.body);
+    const ownerId = getOwnerIdFromRequest(req);
+    const payload = req.body && typeof req.body === 'object' ? { ...req.body } : {};
+
+    if (ownerId) {
+      payload.owner_id = ownerId;
+    }
+
+    const entity = await Entity.create(payload);
     res.status(201).json(entity);
   } catch (error) {
     next(error);
@@ -484,10 +647,23 @@ app.post('/api/entities', async (req, res, next) => {
 
 app.put('/api/entities/:id', async (req, res, next) => {
   try {
-    const updatedEntity = await Entity.findByIdAndUpdate(req.params.id, req.body, {
+    const ownerId = getOwnerIdFromRequest(req);
+    const payload = req.body && typeof req.body === 'object' ? { ...req.body } : {};
+    if (ownerId) {
+      payload.owner_id = ownerId;
+    }
+
+    const updatedEntity = await Entity.findOneAndUpdate(
+      {
+        _id: req.params.id,
+        ...(ownerId ? { owner_id: ownerId } : {}),
+      },
+      payload,
+      {
       new: true,
       runValidators: true,
-    });
+      },
+    );
 
     if (!updatedEntity) {
       return res.status(404).json({ message: 'Entity not found' });
@@ -501,7 +677,14 @@ app.put('/api/entities/:id', async (req, res, next) => {
 
 app.delete('/api/entities/:id', async (req, res, next) => {
   try {
-    const entityToDelete = await Entity.findById(req.params.id, { _id: 1, type: 1, canvas_data: 1 }).lean();
+    const ownerId = getOwnerIdFromRequest(req);
+    const entityToDelete = await Entity.findOne(
+      {
+        _id: req.params.id,
+        ...(ownerId ? { owner_id: ownerId } : {}),
+      },
+      { _id: 1, type: 1, canvas_data: 1 },
+    ).lean();
     if (!entityToDelete) {
       return res.status(404).json({ message: 'Entity not found' });
     }
@@ -518,15 +701,21 @@ app.delete('/api/entities/:id', async (req, res, next) => {
         ),
       );
 
-      await removeEntitiesFromProjectCanvases([entityId, ...nodeEntityIds]);
+      await removeEntitiesFromProjectCanvases([entityId, ...nodeEntityIds], ownerId);
       if (nodeEntityIds.length) {
-        await Entity.deleteMany({ _id: { $in: nodeEntityIds } });
+        await Entity.deleteMany({
+          _id: { $in: nodeEntityIds },
+          ...(ownerId ? { owner_id: ownerId } : {}),
+        });
       }
     } else {
-      await removeEntityFromProjectCanvases(entityId);
+      await removeEntityFromProjectCanvases(entityId, ownerId);
     }
 
-    await Entity.deleteOne({ _id: entityToDelete._id });
+    await Entity.deleteOne({
+      _id: entityToDelete._id,
+      ...(ownerId ? { owner_id: ownerId } : {}),
+    });
 
     return res.status(204).send();
   } catch (error) {
