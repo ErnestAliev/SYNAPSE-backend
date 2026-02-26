@@ -19,7 +19,7 @@ const SESSION_TTL_SECONDS = Number(process.env.SESSION_TTL_SECONDS) || 60 * 60 *
 const GOOGLE_CLIENT_ID = String(process.env.GOOGLE_CLIENT_ID || '').trim();
 const SESSION_SECRET = String(process.env.SESSION_SECRET || process.env.GOOGLE_CLIENT_SECRET || '').trim();
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
-const AUTH_REQUIRED = String(process.env.AUTH_REQUIRED || '').toLowerCase() === 'true';
+const AUTH_REQUIRED = String(process.env.AUTH_REQUIRED || 'true').toLowerCase() !== 'false';
 const DEV_AUTH_ENABLED =
   !IS_PRODUCTION && String(process.env.DEV_AUTH_ENABLED || 'true').toLowerCase() !== 'false';
 const DEFAULT_ALLOWED_ORIGINS = ['http://localhost:5173', 'http://localhost:3000'];
@@ -388,11 +388,24 @@ function getOwnerIdFromRequest(req) {
   return String(req?.authUser?.id || '').trim();
 }
 
+function requireOwnerId(req) {
+  const ownerId = getOwnerIdFromRequest(req);
+  if (!ownerId) {
+    throw Object.assign(new Error('Unauthorized'), { status: 401 });
+  }
+  return ownerId;
+}
+
 async function removeEntityFromProjectCanvases(entityId, ownerId) {
   return removeEntitiesFromProjectCanvases([entityId], ownerId);
 }
 
 async function removeEntitiesFromProjectCanvases(entityIds, ownerId) {
+  const normalizedOwnerId = String(ownerId || '').trim();
+  if (!normalizedOwnerId) {
+    throw Object.assign(new Error('Unauthorized'), { status: 401 });
+  }
+
   const normalizedIds = Array.from(
     new Set(
       (Array.isArray(entityIds) ? entityIds : [entityIds])
@@ -408,7 +421,7 @@ async function removeEntitiesFromProjectCanvases(entityIds, ownerId) {
   const projects = await Entity.find(
     {
       type: 'project',
-      ...(ownerId ? { owner_id: ownerId } : {}),
+      owner_id: normalizedOwnerId,
       'canvas_data.nodes.entityId': { $in: normalizedIds },
     },
     { _id: 1, canvas_data: 1 },
@@ -440,7 +453,7 @@ async function removeEntitiesFromProjectCanvases(entityIds, ownerId) {
 
     operations.push({
       updateOne: {
-        filter: { _id: project._id, ...(ownerId ? { owner_id: ownerId } : {}) },
+        filter: { _id: project._id, owner_id: normalizedOwnerId },
         update: {
           $set: {
             canvas_data: {
@@ -615,18 +628,13 @@ app.post('/api/auth/logout', async (req, res) => {
   return res.status(204).send();
 });
 
-if (AUTH_REQUIRED) {
-  app.use('/api/entities', requireAuth);
-}
+app.use('/api/entities', requireAuth);
 
 app.get('/api/entities', async (req, res, next) => {
   try {
     const filter = {};
-    const ownerId = getOwnerIdFromRequest(req);
-
-    if (ownerId) {
-      filter.owner_id = ownerId;
-    }
+    const ownerId = requireOwnerId(req);
+    filter.owner_id = ownerId;
 
     if (req.query.type) {
       filter.type = req.query.type;
@@ -641,12 +649,9 @@ app.get('/api/entities', async (req, res, next) => {
 
 app.post('/api/entities', async (req, res, next) => {
   try {
-    const ownerId = getOwnerIdFromRequest(req);
+    const ownerId = requireOwnerId(req);
     const payload = req.body && typeof req.body === 'object' ? { ...req.body } : {};
-
-    if (ownerId) {
-      payload.owner_id = ownerId;
-    }
+    payload.owner_id = ownerId;
 
     const entity = await Entity.create(payload);
     res.status(201).json(entity);
@@ -657,16 +662,14 @@ app.post('/api/entities', async (req, res, next) => {
 
 app.put('/api/entities/:id', async (req, res, next) => {
   try {
-    const ownerId = getOwnerIdFromRequest(req);
+    const ownerId = requireOwnerId(req);
     const payload = req.body && typeof req.body === 'object' ? { ...req.body } : {};
-    if (ownerId) {
-      payload.owner_id = ownerId;
-    }
+    payload.owner_id = ownerId;
 
     const updatedEntity = await Entity.findOneAndUpdate(
       {
         _id: req.params.id,
-        ...(ownerId ? { owner_id: ownerId } : {}),
+        owner_id: ownerId,
       },
       payload,
       {
@@ -687,11 +690,11 @@ app.put('/api/entities/:id', async (req, res, next) => {
 
 app.delete('/api/entities/:id', async (req, res, next) => {
   try {
-    const ownerId = getOwnerIdFromRequest(req);
+    const ownerId = requireOwnerId(req);
     const entityToDelete = await Entity.findOne(
       {
         _id: req.params.id,
-        ...(ownerId ? { owner_id: ownerId } : {}),
+        owner_id: ownerId,
       },
       { _id: 1, type: 1, canvas_data: 1 },
     ).lean();
@@ -715,7 +718,7 @@ app.delete('/api/entities/:id', async (req, res, next) => {
       if (nodeEntityIds.length) {
         await Entity.deleteMany({
           _id: { $in: nodeEntityIds },
-          ...(ownerId ? { owner_id: ownerId } : {}),
+          owner_id: ownerId,
         });
       }
     } else {
@@ -724,7 +727,7 @@ app.delete('/api/entities/:id', async (req, res, next) => {
 
     await Entity.deleteOne({
       _id: entityToDelete._id,
-      ...(ownerId ? { owner_id: ownerId } : {}),
+      owner_id: ownerId,
     });
 
     return res.status(204).send();
@@ -764,9 +767,12 @@ async function startServer() {
   if (DEV_AUTH_ENABLED) {
     console.warn('[auth] DEV_AUTH_ENABLED=true. /api/auth/dev-login is available (development only).');
   }
-  if (AUTH_REQUIRED && (!GOOGLE_CLIENT_ID || !SESSION_SECRET)) {
+  if (!AUTH_REQUIRED) {
+    console.warn('[auth] AUTH_REQUIRED=false is ignored. /api/entities is always protected.');
+  }
+  if (!GOOGLE_CLIENT_ID || !SESSION_SECRET) {
     console.warn(
-      '[auth] AUTH_REQUIRED=true but auth config is incomplete. Check GOOGLE_CLIENT_ID and SESSION_SECRET.',
+      '[auth] Auth config is incomplete. Check GOOGLE_CLIENT_ID and SESSION_SECRET.',
     );
   }
 
