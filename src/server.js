@@ -144,7 +144,32 @@ const ENTITY_ANALYZER_FIELDS = Object.freeze({
   project: ['tags', 'stage', 'priority', 'risks', 'owners', 'links', 'importance'],
   shape: ['tags', 'markers', 'status', 'links', 'importance'],
 });
-const ENTITY_IMPORTANCE_VALUES = ['low', 'medium', 'high', 'critical'];
+const ENTITY_IMPORTANCE_VALUES = ['Низкая', 'Средняя', 'Высокая'];
+const IMPORTANCE_AUTO_WEIGHTS = Object.freeze({
+  resources: 2.4,
+  skills: 2.2,
+  knowledge: 2.1,
+  experience: 2.1,
+  contacts: 1.9,
+  roles: 1.8,
+  owners: 1.8,
+  phones: 1.7,
+  participants: 1.6,
+  industry: 1.5,
+  departments: 1.4,
+  outcomes: 1.4,
+  metrics: 1.4,
+  tags: 1.2,
+  markers: 1.1,
+  links: 1.0,
+  status: 1.0,
+  stage: 1.0,
+  risks: 0.9,
+  priority: 0.9,
+  location: 0.8,
+  date: 0.7,
+});
+const IMPORTANCE_AUTO_FIELD_CAP = 3;
 const ENTITY_VECTOR_WEIGHTS = Object.freeze({
   description: 0.45,
   roles: 0.15,
@@ -374,24 +399,123 @@ function normalizeEntityFieldArray(value, options = {}) {
 }
 
 function normalizeImportanceValue(value) {
-  const direct = toTrimmedString(value, 24).toLowerCase();
-  if (ENTITY_IMPORTANCE_VALUES.includes(direct)) return direct;
+  const directRaw = toTrimmedString(value, 24);
+  if (ENTITY_IMPORTANCE_VALUES.includes(directRaw)) return directRaw;
+  const direct = directRaw.toLowerCase();
 
   const map = {
-    низкая: 'low',
-    low: 'low',
-    medium: 'medium',
-    med: 'medium',
-    средняя: 'medium',
-    высокая: 'high',
-    high: 'high',
-    критично: 'critical',
-    критическая: 'critical',
-    критическаяя: 'critical',
-    critical: 'critical',
+    низкая: 'Низкая',
+    low: 'Низкая',
+    l: 'Низкая',
+    средняя: 'Средняя',
+    medium: 'Средняя',
+    med: 'Средняя',
+    m: 'Средняя',
+    высокая: 'Высокая',
+    high: 'Высокая',
+    h: 'Высокая',
+    критично: 'Высокая',
+    критическая: 'Высокая',
+    критическаяя: 'Высокая',
+    critical: 'Высокая',
   };
 
   return map[direct] || '';
+}
+
+function normalizeImportanceArray(value) {
+  const normalized = normalizeEntityFieldArray(value, { maxItems: 1, itemMaxLength: 24 })
+    .map((item) => normalizeImportanceValue(item))
+    .find(Boolean);
+  return normalized ? [normalized] : [];
+}
+
+function normalizeImportanceSource(value) {
+  return toTrimmedString(value, 16).toLowerCase() === 'manual' ? 'manual' : 'auto';
+}
+
+function countSignalItems(value, cap = IMPORTANCE_AUTO_FIELD_CAP) {
+  const maxItems = Math.max(1, Math.floor(cap));
+
+  if (Array.isArray(value)) {
+    const uniq = new Set(
+      value
+        .map((item) => toTrimmedString(item, 120).toLowerCase())
+        .filter(Boolean),
+    );
+    return Math.min(maxItems, uniq.size);
+  }
+
+  const asString = toTrimmedString(value, 240);
+  if (!asString) return 0;
+
+  const chunks = asString
+    .split(/[,;\n|]+/g)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  if (!chunks.length) return 1;
+  return Math.min(maxItems, chunks.length);
+}
+
+function computeAutomaticImportance(aiMetadata) {
+  const metadata = toProfile(aiMetadata);
+  let score = 0;
+  let maxScore = 0;
+
+  for (const [field, weight] of Object.entries(IMPORTANCE_AUTO_WEIGHTS)) {
+    maxScore += weight * IMPORTANCE_AUTO_FIELD_CAP;
+    score += countSignalItems(metadata[field], IMPORTANCE_AUTO_FIELD_CAP) * weight;
+  }
+
+  if (!maxScore || score <= 0) return ['Низкая'];
+  const ratio = score / maxScore;
+  if (ratio >= 0.4) return ['Высокая'];
+  if (ratio >= 0.17) return ['Средняя'];
+  return ['Низкая'];
+}
+
+function applyImportancePolicy(rawMetadata) {
+  const metadata = {
+    ...toProfile(rawMetadata),
+  };
+
+  const hasDescription = toTrimmedString(metadata.description, 2200).length > 0;
+  if (!hasDescription) {
+    metadata.importance = [];
+    metadata.importance_source = 'auto';
+    return metadata;
+  }
+
+  const source = normalizeImportanceSource(metadata.importance_source);
+  const manualImportance = normalizeImportanceArray(metadata.importance);
+  if (source === 'manual' && manualImportance.length) {
+    metadata.importance = manualImportance;
+    metadata.importance_source = 'manual';
+    return metadata;
+  }
+
+  metadata.importance = computeAutomaticImportance(metadata);
+  metadata.importance_source = 'auto';
+  return metadata;
+}
+
+function normalizeIncomingEntityPayload(rawPayload) {
+  const payload = rawPayload && typeof rawPayload === 'object' ? { ...rawPayload } : {};
+  if (!payload.ai_metadata || typeof payload.ai_metadata !== 'object' || Array.isArray(payload.ai_metadata)) {
+    return payload;
+  }
+
+  const metadata = {
+    ...toProfile(payload.ai_metadata),
+  };
+
+  if (Object.prototype.hasOwnProperty.call(metadata, 'importance') && !metadata.importance_source) {
+    metadata.importance_source = 'manual';
+  }
+
+  payload.ai_metadata = applyImportancePolicy(metadata);
+  return payload;
 }
 
 function normalizeEntityAnalysisFields(entityType, rawFields) {
@@ -401,12 +525,7 @@ function normalizeEntityAnalysisFields(entityType, rawFields) {
 
   for (const field of allowed) {
     if (field === 'importance') {
-      const direct = normalizeImportanceValue(source.importance);
-      const fromArray = normalizeEntityFieldArray(source.importance, { maxItems: 1, itemMaxLength: 24 })
-        .map((item) => normalizeImportanceValue(item))
-        .find(Boolean);
-      const importance = direct || fromArray || '';
-      normalized.importance = importance ? [importance] : [];
+      normalized.importance = normalizeImportanceArray(source.importance);
       continue;
     }
 
@@ -529,7 +648,7 @@ function buildEntityAnalyzerSystemPrompt(entityType) {
     'Твоя задача: интерпретировать сырые пользовательские данные и вернуть структурированный JSON.',
     'Нельзя превращать весь текст в теги. Добавляй только осмысленные признаки.',
     `Разрешенные поля для fields: ${allowedFields.join(', ')}.`,
-    'importance: только одно из [low, medium, high, critical], вернуть как массив из 0..1 элементов.',
+    'importance: только одно из [Низкая, Средняя, Высокая], вернуть как массив из 0..1 элементов.',
     'links: только валидные URL.',
     'description: 3-6 предложений, емко и без воды.',
     'Если данных мало, status=need_clarification и до 3 уточняющих вопросов.',
@@ -700,6 +819,7 @@ function buildEntityMetadataPatch(entityType, existingMetadata, analysis) {
   const nextMetadata = {
     ...toProfile(existingMetadata),
   };
+  const manualImportanceWasSet = normalizeImportanceSource(nextMetadata.importance_source) === 'manual';
 
   if (typeof analysis.description === 'string') {
     nextMetadata.description = analysis.description;
@@ -708,6 +828,9 @@ function buildEntityMetadataPatch(entityType, existingMetadata, analysis) {
   const allowedFields = getEntityAnalyzerFields(entityType);
   const normalizedFields = normalizeEntityAnalysisFields(entityType, analysis.fields);
   for (const field of allowedFields) {
+    if (field === 'importance' && manualImportanceWasSet) {
+      continue;
+    }
     nextMetadata[field] = normalizedFields[field] || [];
   }
 
@@ -725,7 +848,7 @@ function buildEntityMetadataPatch(entityType, existingMetadata, analysis) {
     updatedAt: new Date().toISOString(),
   };
 
-  return nextMetadata;
+  return applyImportancePolicy(nextMetadata);
 }
 
 function normalizeAgentHistory(rawHistory) {
@@ -774,7 +897,7 @@ function summarizeEntityForAgent(entity) {
     markers: toStringArray(aiMetadata.markers, 6),
     skills: toStringArray(aiMetadata.skills, 8),
     roles: toStringArray(aiMetadata.roles, 8),
-    importance: toStringArray(aiMetadata.importance, 4),
+    importance: toStringArray(aiMetadata.importance, 1, 24),
     status: toStringArray(aiMetadata.status, 4),
     stage: toStringArray(aiMetadata.stage, 4),
     owners: toStringArray(aiMetadata.owners, 6),
@@ -3990,7 +4113,7 @@ app.get('/api/entities', async (req, res, next) => {
 app.post('/api/entities', async (req, res, next) => {
   try {
     const ownerId = requireOwnerId(req);
-    const payload = req.body && typeof req.body === 'object' ? { ...req.body } : {};
+    const payload = normalizeIncomingEntityPayload(req.body);
     payload.owner_id = ownerId;
 
     const entity = await Entity.create(payload);
@@ -4003,7 +4126,7 @@ app.post('/api/entities', async (req, res, next) => {
 app.put('/api/entities/:id', async (req, res, next) => {
   try {
     const ownerId = requireOwnerId(req);
-    const payload = req.body && typeof req.body === 'object' ? { ...req.body } : {};
+    const payload = normalizeIncomingEntityPayload(req.body);
     payload.owner_id = ownerId;
 
     const updatedEntity = await Entity.findOneAndUpdate(
