@@ -69,6 +69,7 @@ const AI_ATTACHMENT_LIMIT = Math.max(1, Number(process.env.AI_ATTACHMENT_LIMIT) 
 const AI_DEBUG_ECHO = String(process.env.AI_DEBUG_ECHO || '').toLowerCase() === 'true';
 const WHATSAPP_CONTACT_IMPORT_LIMIT = Math.max(1, Number(process.env.WHATSAPP_CONTACT_IMPORT_LIMIT) || 2500);
 const WHATSAPP_IMPORT_CONCURRENCY = Math.max(1, Number(process.env.WHATSAPP_IMPORT_CONCURRENCY) || 4);
+const WHATSAPP_IMPORT_BATCH_SIZE = Math.max(1, Number(process.env.WHATSAPP_IMPORT_BATCH_SIZE) || 80);
 const WHATSAPP_IMAGE_MAX_BYTES = Math.max(40_000, Number(process.env.WHATSAPP_IMAGE_MAX_BYTES) || 260_000);
 const WHATSAPP_MEDIA_TIMEOUT_MS = Math.max(5_000, Number(process.env.WHATSAPP_MEDIA_TIMEOUT_MS) || 15_000);
 const WHATSAPP_SESSION_IDLE_TIMEOUT_MS = Math.max(
@@ -2801,6 +2802,9 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
     const ownerId = requireOwnerId(req);
     const sessionId = toTrimmedString(req.body?.sessionId, 120);
     const includeImages = req.body?.includeImages === true;
+    const requestedCursor = Math.max(0, Number(req.body?.cursor) || 0);
+    const requestedBatchSize = Math.max(1, Number(req.body?.batchSize) || WHATSAPP_IMPORT_BATCH_SIZE);
+    const batchSize = Math.min(requestedBatchSize, WHATSAPP_CONTACT_IMPORT_LIMIT);
     const session = getOwnerWhatsappSession(ownerId);
 
     if (!session || (sessionId && session.id !== sessionId)) {
@@ -2836,6 +2840,8 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
       connector: session.connector,
       sessionId: session.id,
       includeImages,
+      cursor: requestedCursor,
+      batchSize,
       receivedPendingNotifications: session.receivedPendingNotifications,
       mirroredContacts: session?.contactsMirror instanceof Map ? session.contactsMirror.size : 0,
       mirroredChats: session?.chatsMirror instanceof Map ? session.chatsMirror.size : 0,
@@ -2896,10 +2902,23 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
       count: importCandidates.length,
       limit: WHATSAPP_CONTACT_IMPORT_LIMIT,
     });
-    setImportProgress('scan', 30, importCandidates.length, importCandidates.length, 'Контакты подготовлены');
+    const totalCandidates = importCandidates.length;
+    const cursor = Math.min(requestedCursor, totalCandidates);
+    const nextCursor = Math.min(totalCandidates, cursor + batchSize);
+    const hasMore = nextCursor < totalCandidates;
+    const batchCandidates = importCandidates.slice(cursor, nextCursor);
+    appendWhatsappSessionLog(session, 'import.batch', {
+      cursor,
+      nextCursor,
+      hasMore,
+      batchSize,
+      batchCount: batchCandidates.length,
+      totalCandidates,
+    });
+    setImportProgress('scan', 30, cursor, totalCandidates, 'Контакты подготовлены');
 
     const preparedContactsMap = (
-      await mapWithConcurrency(importCandidates, WHATSAPP_IMPORT_CONCURRENCY, async (contact, index) => {
+      await mapWithConcurrency(batchCandidates, WHATSAPP_IMPORT_CONCURRENCY, async (contact, index) => {
         const about =
           session.connector === 'baileys'
             ? toTrimmedString(contact.status, 1200)
@@ -2929,7 +2948,7 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
             statuses: [contact.isBlocked ? 'blocked' : '', contact.isBusiness ? 'business' : ''].filter(Boolean),
             image: '',
           },
-          index,
+          cursor + index,
         );
 
         if (!normalized) {
@@ -2944,8 +2963,8 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
         setImportProgress(
           'normalize',
           30 + Math.round((Math.max(0, Math.min(1, total ? completed / total : 1))) * 30),
-          completed,
-          total,
+          cursor + completed,
+          totalCandidates,
           'Нормализация контактов',
         );
       })
@@ -2960,25 +2979,33 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
     appendWhatsappSessionLog(session, 'import.normalized', {
       count: uniqueContacts.length,
     });
-    setImportProgress('dedupe', 65, uniqueContacts.length, uniqueContacts.length, 'Удаление дубликатов');
+    setImportProgress('dedupe', 65, nextCursor, totalCandidates, 'Удаление дубликатов');
 
     if (!uniqueContacts.length) {
       appendWhatsappSessionLog(session, 'import.result', {
         imported: 0,
         matched: 0,
-        total: 0,
-        reason: 'normalized_contacts_empty',
+        total: totalCandidates,
+        cursor,
+        nextCursor,
+        hasMore,
+        reason: 'normalized_contacts_empty_batch',
       });
       session.status = 'ready';
       session.error = '';
-      setImportProgress('done', 100, 0, 0, 'Контакты не найдены');
+      setImportProgress('done', 100, nextCursor, totalCandidates, 'Батч обработан');
       session.importProgress = null;
       touchWhatsappSession(session, ownerId);
       return res.status(200).json({
         source: 'whatsapp',
         imported: 0,
         skipped: 0,
-        total: 0,
+        total: totalCandidates,
+        cursor,
+        nextCursor,
+        hasMore,
+        batchSize,
+        batchCount: batchCandidates.length,
         matched: 0,
         matchedByPhone: 0,
         matchedByImportKey: 0,
@@ -3069,7 +3096,7 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
         { _id: 1, name: 1 },
       ).lean();
     }
-    setImportProgress('match', 75, 0, uniqueContacts.length, 'Сопоставление с базой');
+    setImportProgress('match', 75, cursor, totalCandidates, 'Сопоставление с базой');
 
     const existingKeySet = new Set();
     const existingJidSet = new Set();
@@ -3165,7 +3192,7 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
       newWithoutName,
       toCreate: toCreate.length,
     });
-    setImportProgress('match', 82, uniqueContacts.length, uniqueContacts.length, 'Сопоставление завершено');
+    setImportProgress('match', 82, nextCursor, totalCandidates, 'Сопоставление завершено');
 
     let createdEntities = [];
     let importedWithImage = 0;
@@ -3197,15 +3224,15 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
           setImportProgress(
             'enrich',
             82 + Math.round((Math.max(0, Math.min(1, total ? completed / total : 1))) * 10),
-            completed,
-            total,
+            cursor + completed,
+            totalCandidates,
             'Подготовка к записи',
           );
         },
       );
       importedWithImage = contactsWithImages.reduce((total, row) => total + (row.image ? 1 : 0), 0);
 
-      setImportProgress('save', 95, contactsWithImages.length, contactsWithImages.length, 'Сохранение в базу');
+      setImportProgress('save', 95, nextCursor, totalCandidates, 'Сохранение в базу');
       createdEntities = await Entity.insertMany(
         contactsWithImages.map((item) => ({
           owner_id: ownerId,
@@ -3239,7 +3266,7 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
       });
     }
 
-    setImportProgress('done', 100, createdEntities.length, uniqueContacts.length, 'Импорт завершен');
+    setImportProgress('done', 100, nextCursor, totalCandidates, 'Батч импортирован');
     session.status = 'ready';
     session.error = '';
     session.lastImportedAt = new Date().toISOString();
@@ -3247,7 +3274,7 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
     appendWhatsappSessionLog(session, 'import.result', {
       imported: createdEntities.length,
       matched: matchedTotal,
-      total: uniqueContacts.length,
+      total: totalCandidates,
       matchedByPhone,
       matchedByImportKey,
       matchedByJid,
@@ -3256,6 +3283,11 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
       newWithName,
       newWithoutName,
       importedWithImage,
+      cursor,
+      nextCursor,
+      hasMore,
+      batchSize,
+      batchCount: batchCandidates.length,
     });
     touchWhatsappSession(session, ownerId);
 
@@ -3263,7 +3295,12 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
       source: 'whatsapp',
       imported: createdEntities.length,
       skipped: matchedTotal,
-      total: uniqueContacts.length,
+      total: totalCandidates,
+      cursor,
+      nextCursor,
+      hasMore,
+      batchSize,
+      batchCount: batchCandidates.length,
       matched: matchedTotal,
       matchedByPhone,
       matchedByImportKey,
