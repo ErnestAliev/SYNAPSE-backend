@@ -76,9 +76,9 @@ const ENTITY_TYPES = new Set([
   'shape',
 ]);
 const ENTITY_ANALYZER_FIELDS = Object.freeze({
-  connection: ['tags', 'markers', 'roles', 'links', 'status', 'importance'],
+  connection: ['tags', 'markers', 'roles', 'links', 'phones', 'status', 'importance'],
   person: ['tags', 'markers', 'roles', 'skills', 'links', 'importance'],
-  company: ['tags', 'industry', 'departments', 'stage', 'risks', 'links', 'importance'],
+  company: ['tags', 'industry', 'departments', 'stage', 'risks', 'links', 'phones', 'importance'],
   event: ['tags', 'date', 'location', 'participants', 'outcomes', 'links', 'importance'],
   resource: ['tags', 'resources', 'status', 'owners', 'links', 'importance'],
   goal: ['tags', 'priority', 'metrics', 'owners', 'status', 'links', 'importance'],
@@ -1313,6 +1313,26 @@ function normalizePhone(value) {
   return hasPlus ? `+${digits}` : digits;
 }
 
+function extractNormalizedPhonesFromProfile(rawProfile) {
+  const profile = toProfile(rawProfile);
+  const phones = new Set();
+
+  const directPhone = normalizePhone(toTrimmedString(profile.phone, 80));
+  if (directPhone) {
+    phones.add(directPhone);
+  }
+
+  const rawPhoneList = Array.isArray(profile.phones) ? profile.phones : [];
+  for (const value of rawPhoneList) {
+    const normalized = normalizePhone(toTrimmedString(value, 80));
+    if (normalized) {
+      phones.add(normalized);
+    }
+  }
+
+  return Array.from(phones);
+}
+
 function sanitizeOwnerSessionKey(ownerId) {
   return toTrimmedString(String(ownerId || '').replace(/[^a-zA-Z0-9_-]/g, '_'), 64) || 'owner';
 }
@@ -1808,12 +1828,26 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
         imported: 0,
         skipped: 0,
         total: 0,
+        matched: 0,
+        matchedByPhone: 0,
+        matchedByImportKey: 0,
+        newAvailable: 0,
         entities: [],
+        session: toWhatsappSessionStatus(session),
       });
     }
 
     const importKeys = uniqueContacts.map((item) => item.importKey);
-    const existingConnections = await Entity.find(
+    const importPhones = Array.from(
+      new Set(
+        uniqueContacts
+          .map((item) => normalizePhone(item.phone))
+          .filter(Boolean),
+      ),
+    );
+    const importPhoneSet = new Set(importPhones);
+
+    const existingImportKeyEntities = await Entity.find(
       {
         owner_id: ownerId,
         type: 'connection',
@@ -1822,13 +1856,60 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
       { _id: 1, profile: 1 },
     ).lean();
 
-    const existingKeySet = new Set(
-      existingConnections
-        .map((entity) => toTrimmedString(toProfile(entity.profile).import_key, 180))
-        .filter(Boolean),
-    );
+    let existingPhoneEntities = [];
+    if (importPhones.length) {
+      existingPhoneEntities = await Entity.find(
+        {
+          owner_id: ownerId,
+          type: { $in: ['connection', 'person', 'company'] },
+          $or: [{ 'profile.phone': { $exists: true, $ne: '' } }, { 'profile.phones.0': { $exists: true } }],
+        },
+        { _id: 1, profile: 1 },
+      ).lean();
+    }
 
-    const toCreate = uniqueContacts.filter((item) => !existingKeySet.has(item.importKey));
+    const existingKeySet = new Set();
+    const existingPhoneSet = new Set();
+    for (const entity of existingImportKeyEntities) {
+      const profile = toProfile(entity.profile);
+      const importKey = toTrimmedString(profile.import_key, 180);
+      if (importKey) {
+        existingKeySet.add(importKey);
+      }
+    }
+
+    for (const entity of existingPhoneEntities) {
+      const profile = toProfile(entity.profile);
+      for (const phone of extractNormalizedPhonesFromProfile(profile)) {
+        if (importPhoneSet.has(phone)) {
+          existingPhoneSet.add(phone);
+        }
+      }
+    }
+
+    let matchedByImportKey = 0;
+    let matchedByPhone = 0;
+    let matchedTotal = 0;
+    const toCreate = [];
+
+    for (const item of uniqueContacts) {
+      const normalizedPhone = normalizePhone(item.phone);
+      const hasImportKeyMatch = existingKeySet.has(item.importKey);
+      const hasPhoneMatch = normalizedPhone ? existingPhoneSet.has(normalizedPhone) : false;
+
+      if (hasImportKeyMatch || hasPhoneMatch) {
+        matchedTotal += 1;
+        if (hasImportKeyMatch) {
+          matchedByImportKey += 1;
+        }
+        if (hasPhoneMatch) {
+          matchedByPhone += 1;
+        }
+        continue;
+      }
+
+      toCreate.push(item);
+    }
 
     let createdEntities = [];
     if (toCreate.length) {
@@ -1842,6 +1923,7 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
             source: 'whatsapp',
             import_key: item.importKey,
             phone: item.phone,
+            phones: item.phone ? [item.phone] : [],
             image: item.image || '',
             categoryLocked: false,
             imported_at: new Date().toISOString(),
@@ -1852,6 +1934,7 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
             markers: item.markers,
             roles: item.roles,
             links: item.links,
+            phones: item.phone ? [item.phone] : [],
             status: item.status,
           },
         })),
@@ -1867,8 +1950,12 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
     return res.status(200).json({
       source: 'whatsapp',
       imported: createdEntities.length,
-      skipped: uniqueContacts.length - createdEntities.length,
+      skipped: matchedTotal,
       total: uniqueContacts.length,
+      matched: matchedTotal,
+      matchedByPhone,
+      matchedByImportKey,
+      newAvailable: toCreate.length,
       entities: createdEntities,
       session: toWhatsappSessionStatus(session),
     });
