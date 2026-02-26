@@ -180,6 +180,78 @@ const ENTITY_VECTOR_WEIGHTS = Object.freeze({
   nameType: 0.05,
 });
 const whatsappSessionsByOwner = new Map();
+const entityEventStreamsByOwner = new Map();
+let entityEventStreamSeq = 0;
+
+function sanitizeSsePayload(payload) {
+  try {
+    return JSON.stringify(payload ?? {});
+  } catch {
+    return JSON.stringify({ message: 'serialization_failed' });
+  }
+}
+
+function writeSseEvent(res, event, payload) {
+  if (!res || res.writableEnded || res.destroyed) return;
+  const eventName = String(event || '').trim();
+  if (!eventName) return;
+
+  res.write(`event: ${eventName}\n`);
+  res.write(`data: ${sanitizeSsePayload(payload)}\n\n`);
+}
+
+function broadcastEntityEvent(ownerId, event, payload) {
+  const normalizedOwnerId = String(ownerId || '').trim();
+  if (!normalizedOwnerId) return;
+
+  const ownerStreams = entityEventStreamsByOwner.get(normalizedOwnerId);
+  if (!ownerStreams || !ownerStreams.size) return;
+
+  for (const stream of ownerStreams.values()) {
+    writeSseEvent(stream.res, event, payload);
+  }
+}
+
+function registerEntityEventStream(ownerId, req, res) {
+  const normalizedOwnerId = String(ownerId || '').trim();
+  if (!normalizedOwnerId) return () => {};
+
+  const streamId = `stream_${Date.now()}_${entityEventStreamSeq++}`;
+  const keepAliveTimer = setInterval(() => {
+    if (!res.writableEnded && !res.destroyed) {
+      res.write(': ping\n\n');
+    }
+  }, 25000);
+
+  const ownerStreams = entityEventStreamsByOwner.get(normalizedOwnerId) || new Map();
+  ownerStreams.set(streamId, {
+    res,
+    keepAliveTimer,
+  });
+  entityEventStreamsByOwner.set(normalizedOwnerId, ownerStreams);
+
+  const cleanup = () => {
+    clearInterval(keepAliveTimer);
+    const streams = entityEventStreamsByOwner.get(normalizedOwnerId);
+    if (!streams) return;
+    streams.delete(streamId);
+    if (!streams.size) {
+      entityEventStreamsByOwner.delete(normalizedOwnerId);
+    }
+  };
+
+  req.on('close', cleanup);
+  req.on('aborted', cleanup);
+  res.on('close', cleanup);
+  res.on('error', cleanup);
+
+  writeSseEvent(res, 'connected', {
+    ownerId: normalizedOwnerId,
+    connectedAt: new Date().toISOString(),
+  });
+
+  return cleanup;
+}
 
 function parseAllowedOrigins() {
   const raw = [
@@ -1213,7 +1285,8 @@ function normalizeSettingsUpdate(rawSettings) {
   }, {});
 }
 
-function getSessionTokenFromRequest(req) {
+function getSessionTokenFromRequest(req, options = {}) {
+  const allowQueryToken = options?.allowQueryToken === true;
   const authHeader = req.headers.authorization;
   if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
     const token = authHeader.slice('Bearer '.length).trim();
@@ -1223,6 +1296,15 @@ function getSessionTokenFromRequest(req) {
   const cookieToken = req.cookies?.[SESSION_COOKIE_NAME];
   if (typeof cookieToken === 'string' && cookieToken.trim()) {
     return cookieToken.trim();
+  }
+
+  if (allowQueryToken) {
+    const queryValue = Array.isArray(req.query?.sessionToken)
+      ? req.query.sessionToken[0]
+      : req.query?.sessionToken;
+    if (typeof queryValue === 'string' && queryValue.trim()) {
+      return queryValue.trim().slice(0, 4096);
+    }
   }
 
   return '';
@@ -3807,6 +3889,44 @@ app.get('/api/auth/me', requireAuth, async (req, res) => {
   });
 });
 
+app.get('/api/events', async (req, res, next) => {
+  try {
+    const sessionToken = getSessionTokenFromRequest(req, { allowQueryToken: true });
+    if (!sessionToken) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+
+    const user = await resolveAuthUserFromSessionToken(sessionToken);
+    const ownerId = String(user?._id || user?.id || '').trim();
+    if (!ownerId) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    if (typeof res.flushHeaders === 'function') {
+      res.flushHeaders();
+    }
+
+    if (req.socket) {
+      req.socket.setTimeout(0);
+      req.socket.setNoDelay(true);
+      req.socket.setKeepAlive(true);
+    }
+
+    res.write('retry: 2500\n\n');
+    registerEntityEventStream(ownerId, req, res);
+    return undefined;
+  } catch (error) {
+    if (!res.headersSent) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+    return next(error);
+  }
+});
+
 app.put('/api/auth/settings', requireAuth, async (req, res, next) => {
   try {
     const settingsPatch = normalizeSettingsUpdate(req.body?.settings);
@@ -4061,6 +4181,9 @@ app.post('/api/ai/entity-apply', requireAuth, async (req, res, next) => {
     const nextMetadata = buildEntityMetadataPatch(entity.type, entity.ai_metadata, analysis);
     entity.ai_metadata = nextMetadata;
     await entity.save();
+    broadcastEntityEvent(ownerId, 'entity.updated', {
+      entity: entity.toObject(),
+    });
 
     let vector = null;
     let vectorWarning = '';
@@ -4138,6 +4261,9 @@ app.post('/api/entities', async (req, res, next) => {
     payload.owner_id = ownerId;
 
     const entity = await Entity.create(payload);
+    broadcastEntityEvent(ownerId, 'entity.created', {
+      entity: entity.toObject(),
+    });
     res.status(201).json(entity);
   } catch (error) {
     next(error);
@@ -4166,6 +4292,10 @@ app.put('/api/entities/:id', async (req, res, next) => {
       return res.status(404).json({ message: 'Entity not found' });
     }
 
+    broadcastEntityEvent(ownerId, 'entity.updated', {
+      entity: updatedEntity.toObject(),
+    });
+
     return res.json(updatedEntity);
   } catch (error) {
     return next(error);
@@ -4187,6 +4317,7 @@ app.delete('/api/entities/:id', async (req, res, next) => {
     }
 
     const entityId = String(entityToDelete._id);
+    const removedEntityIds = new Set([entityId]);
 
     if (entityToDelete.type === 'project') {
       const projectCanvas = normalizeProjectCanvasData(entityToDelete.canvas_data);
@@ -4197,6 +4328,9 @@ app.delete('/api/entities/:id', async (req, res, next) => {
             .filter((id) => id && id !== entityId),
         ),
       );
+      for (const nodeEntityId of nodeEntityIds) {
+        removedEntityIds.add(nodeEntityId);
+      }
 
       await removeEntitiesFromProjectCanvases([entityId, ...nodeEntityIds], ownerId);
       if (nodeEntityIds.length) {
@@ -4212,6 +4346,10 @@ app.delete('/api/entities/:id', async (req, res, next) => {
     await Entity.deleteOne({
       _id: entityToDelete._id,
       owner_id: ownerId,
+    });
+
+    broadcastEntityEvent(ownerId, 'entity.deleted', {
+      entityIds: Array.from(removedEntityIds),
     });
 
     return res.status(204).send();
