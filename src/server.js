@@ -1431,7 +1431,77 @@ function buildBaileysImportContacts(session) {
     }
   }
 
+  if (session?.contactsMirror instanceof Map) {
+    for (const mirror of session.contactsMirror.values()) {
+      const row = toProfile(mirror);
+      pushContact(row.jid || row.id, row.name || row.notify || row.verifiedName, row.status, row.phone || row.phoneNumber);
+    }
+  }
+
+  if (session?.chatsMirror instanceof Map) {
+    for (const mirror of session.chatsMirror.values()) {
+      const row = toProfile(mirror);
+      pushContact(row.jid || row.id, row.name || row.notify || row.subject, '', row.phone || row.phoneNumber);
+    }
+  }
+
   return Array.from(collected.values());
+}
+
+function getBaileysCollectionSize(collection) {
+  if (!collection) return 0;
+  if (collection instanceof Map) return collection.size;
+  if (Array.isArray(collection)) return collection.length;
+  if (typeof collection === 'object') return Object.keys(collection).length;
+  return 0;
+}
+
+function mergeBaileysContactMirror(session, rawContact) {
+  if (!(session?.contactsMirror instanceof Map)) return;
+  const row = toProfile(rawContact);
+  const jid = toTrimmedString(row.id || row.jid || row.lid || row.phoneNumber, 220);
+  if (!jid) return;
+
+  const existing = toProfile(session.contactsMirror.get(jid));
+  session.contactsMirror.set(jid, {
+    id: jid,
+    jid,
+    phoneNumber: toTrimmedString(row.phoneNumber || existing.phoneNumber, 80),
+    phone: toTrimmedString(row.phone || row.phoneNumber || existing.phone, 80),
+    name: toTrimmedString(row.name || existing.name, 120),
+    notify: toTrimmedString(row.notify || existing.notify, 120),
+    verifiedName: toTrimmedString(row.verifiedName || existing.verifiedName, 120),
+    status: toTrimmedString(row.status || existing.status, 1200),
+  });
+}
+
+function mergeBaileysChatMirror(session, rawChat) {
+  if (!(session?.chatsMirror instanceof Map)) return;
+  const row = toProfile(rawChat);
+  const jid = toTrimmedString(row.id || row.jid, 220);
+  if (!jid) return;
+
+  const existing = toProfile(session.chatsMirror.get(jid));
+  session.chatsMirror.set(jid, {
+    id: jid,
+    jid,
+    phone: toTrimmedString(row.phone || existing.phone, 80),
+    name: toTrimmedString(row.name || row.notify || row.subject || existing.name, 120),
+  });
+}
+
+async function waitForBaileysPendingNotifications(session, timeoutMs = 15_000, pollMs = 500) {
+  if (!session) return false;
+  if (session.receivedPendingNotifications) return true;
+
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (session.receivedPendingNotifications) {
+      return true;
+    }
+    await delay(pollMs);
+  }
+  return false;
 }
 
 async function syncBaileysContactsWithRetry(session, options = {}) {
@@ -1449,8 +1519,10 @@ async function syncBaileysContactsWithRetry(session, options = {}) {
     timeoutMs,
     pollMs,
     minContacts,
-    storeContacts: Object.keys(session?.store?.contacts || {}).length,
-    storeChats: Object.keys(session?.store?.chats || {}).length,
+    storeContacts: getBaileysCollectionSize(session?.store?.contacts),
+    storeChats: getBaileysCollectionSize(session?.store?.chats),
+    mirroredContacts: session?.contactsMirror instanceof Map ? session.contactsMirror.size : 0,
+    mirroredChats: session?.chatsMirror instanceof Map ? session.chatsMirror.size : 0,
   });
 
   if (typeof socket.resyncAppState === 'function') {
@@ -1481,13 +1553,22 @@ async function syncBaileysContactsWithRetry(session, options = {}) {
       appendWhatsappSessionLog(session, 'import.sync.poll', {
         polls,
         contacts: latest.length,
-        storeContacts: Object.keys(session?.store?.contacts || {}).length,
-        storeChats: Object.keys(session?.store?.chats || {}).length,
+        storeContacts: getBaileysCollectionSize(session?.store?.contacts),
+        storeChats: getBaileysCollectionSize(session?.store?.chats),
+        mirroredContacts: session?.contactsMirror instanceof Map ? session.contactsMirror.size : 0,
+        mirroredChats: session?.chatsMirror instanceof Map ? session.chatsMirror.size : 0,
       });
     }
   }
 
-  appendWhatsappSessionLog(session, 'import.sync.timeout', { contacts: latest.length, polls });
+  appendWhatsappSessionLog(session, 'import.sync.timeout', {
+    contacts: latest.length,
+    polls,
+    storeContacts: getBaileysCollectionSize(session?.store?.contacts),
+    storeChats: getBaileysCollectionSize(session?.store?.chats),
+    mirroredContacts: session?.contactsMirror instanceof Map ? session.contactsMirror.size : 0,
+    mirroredChats: session?.chatsMirror instanceof Map ? session.chatsMirror.size : 0,
+  });
   return latest;
 }
 
@@ -1610,11 +1691,14 @@ function toWhatsappSessionStatus(session) {
     sessionId: session.id,
     status: session.status,
     connector: session.connector || '',
+    receivedPendingNotifications: Boolean(session.receivedPendingNotifications),
     qrCodeDataUrl: session.qrCodeDataUrl || '',
     error: session.error || '',
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
     lastImportedAt: session.lastImportedAt || '',
+    mirroredContacts: session?.contactsMirror instanceof Map ? session.contactsMirror.size : 0,
+    mirroredChats: session?.chatsMirror instanceof Map ? session.chatsMirror.size : 0,
     debugLogCount: Array.isArray(session.debugLog) ? session.debugLog.length : 0,
     ...(Array.isArray(session.debugLog) && session.debugLog.length ? { lastLog: session.debugLog[session.debugLog.length - 1] } : {}),
     ...(importProgress ? { importProgress } : {}),
@@ -1721,6 +1805,38 @@ async function stopOwnerWhatsappSession(ownerId, reason = '') {
     }
   }
 
+  if (session.historyListener && session.client?.ev && typeof session.client.ev.off === 'function') {
+    try {
+      session.client.ev.off('messaging-history.set', session.historyListener);
+    } catch {
+      // Ignore listener cleanup errors.
+    }
+  }
+
+  if (session.contactsUpsertListener && session.client?.ev && typeof session.client.ev.off === 'function') {
+    try {
+      session.client.ev.off('contacts.upsert', session.contactsUpsertListener);
+    } catch {
+      // Ignore listener cleanup errors.
+    }
+  }
+
+  if (session.contactsUpdateListener && session.client?.ev && typeof session.client.ev.off === 'function') {
+    try {
+      session.client.ev.off('contacts.update', session.contactsUpdateListener);
+    } catch {
+      // Ignore listener cleanup errors.
+    }
+  }
+
+  if (session.chatsUpsertListener && session.client?.ev && typeof session.client.ev.off === 'function') {
+    try {
+      session.client.ev.off('chats.upsert', session.chatsUpsertListener);
+    } catch {
+      // Ignore listener cleanup errors.
+    }
+  }
+
   session.status = 'disconnected';
   session.error = reason || session.error || 'Session stopped';
   touchWhatsappSession(session);
@@ -1743,11 +1859,18 @@ function createBaseWhatsappSession(ownerId, connector) {
     restartAttempts: 0,
     importProgress: null,
     debugLog: [],
+    receivedPendingNotifications: false,
+    contactsMirror: new Map(),
+    chatsMirror: new Map(),
     client: null,
     store: null,
     authDir: '',
     connectionListener: null,
     credsListener: null,
+    historyListener: null,
+    contactsUpsertListener: null,
+    contactsUpdateListener: null,
+    chatsUpsertListener: null,
   };
 }
 
@@ -1898,6 +2021,7 @@ async function ensureOwnerWhatsappSessionBaileys(ownerId) {
     makeInMemoryStore,
     fetchLatestBaileysVersion,
     DisconnectReason,
+    Browsers,
   } = whatsappBaileys;
 
   const ownerSessionKey = sanitizeOwnerSessionKey(ownerId);
@@ -1934,8 +2058,13 @@ async function ensureOwnerWhatsappSessionBaileys(ownerId) {
       auth: state,
       printQRInTerminal: false,
       markOnlineOnConnect: false,
-      syncFullHistory: false,
-      browser: ['Synapse12', 'Chrome', '1.0.0'],
+      syncFullHistory: true,
+      fireInitQueries: true,
+      shouldSyncHistoryMessage: () => true,
+      browser:
+        Browsers && typeof Browsers.macOS === 'function'
+          ? Browsers.macOS('Desktop')
+          : ['Synapse12', 'Chrome', '1.0.0'],
       ...(Array.isArray(versionData?.version) ? { version: versionData.version } : {}),
     });
   }
@@ -1952,6 +2081,34 @@ async function ensureOwnerWhatsappSessionBaileys(ownerId) {
     if (session.credsListener) {
       try {
         socket.ev.off('creds.update', session.credsListener);
+      } catch {
+        // Ignore detach error.
+      }
+    }
+    if (session.historyListener) {
+      try {
+        socket.ev.off('messaging-history.set', session.historyListener);
+      } catch {
+        // Ignore detach error.
+      }
+    }
+    if (session.contactsUpsertListener) {
+      try {
+        socket.ev.off('contacts.upsert', session.contactsUpsertListener);
+      } catch {
+        // Ignore detach error.
+      }
+    }
+    if (session.contactsUpdateListener) {
+      try {
+        socket.ev.off('contacts.update', session.contactsUpdateListener);
+      } catch {
+        // Ignore detach error.
+      }
+    }
+    if (session.chatsUpsertListener) {
+      try {
+        socket.ev.off('chats.upsert', session.chatsUpsertListener);
       } catch {
         // Ignore detach error.
       }
@@ -2023,8 +2180,69 @@ async function ensureOwnerWhatsappSessionBaileys(ownerId) {
     };
     socket.ev.on('creds.update', session.credsListener);
 
+    session.historyListener = (historyPayload) => {
+      const payload = toProfile(historyPayload);
+      const contacts = Array.isArray(payload.contacts) ? payload.contacts : [];
+      const chats = Array.isArray(payload.chats) ? payload.chats : [];
+      for (const contact of contacts) {
+        mergeBaileysContactMirror(session, contact);
+      }
+      for (const chat of chats) {
+        mergeBaileysChatMirror(session, chat);
+      }
+      appendWhatsappSessionLog(session, 'session.history', {
+        contacts: contacts.length,
+        chats: chats.length,
+        isLatest: Boolean(payload.isLatest),
+        progress: Number(payload.progress) || 0,
+      });
+    };
+    socket.ev.on('messaging-history.set', session.historyListener);
+
+    session.contactsUpsertListener = (contacts) => {
+      const list = Array.isArray(contacts) ? contacts : [];
+      for (const contact of list) {
+        mergeBaileysContactMirror(session, contact);
+      }
+      appendWhatsappSessionLog(session, 'session.contacts.upsert', {
+        count: list.length,
+        mirroredContacts: session.contactsMirror.size,
+      });
+    };
+    socket.ev.on('contacts.upsert', session.contactsUpsertListener);
+
+    session.contactsUpdateListener = (contacts) => {
+      const list = Array.isArray(contacts) ? contacts : [];
+      for (const contact of list) {
+        mergeBaileysContactMirror(session, contact);
+      }
+      appendWhatsappSessionLog(session, 'session.contacts.update', {
+        count: list.length,
+        mirroredContacts: session.contactsMirror.size,
+      });
+    };
+    socket.ev.on('contacts.update', session.contactsUpdateListener);
+
+    session.chatsUpsertListener = (chats) => {
+      const list = Array.isArray(chats) ? chats : [];
+      for (const chat of list) {
+        mergeBaileysChatMirror(session, chat);
+      }
+      appendWhatsappSessionLog(session, 'session.chats.upsert', {
+        count: list.length,
+        mirroredChats: session.chatsMirror.size,
+      });
+    };
+    socket.ev.on('chats.upsert', session.chatsUpsertListener);
+
     session.connectionListener = async (update) => {
       const { connection, qr, lastDisconnect } = update || {};
+      if (Object.prototype.hasOwnProperty.call(update || {}, 'receivedPendingNotifications')) {
+        session.receivedPendingNotifications = Boolean(update?.receivedPendingNotifications);
+        appendWhatsappSessionLog(session, 'session.pending_notifications', {
+          value: session.receivedPendingNotifications,
+        });
+      }
 
       if (qr) {
         try {
@@ -2476,7 +2694,19 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
     appendWhatsappSessionLog(session, 'import.start', {
       connector: session.connector,
       sessionId: session.id,
+      receivedPendingNotifications: session.receivedPendingNotifications,
+      mirroredContacts: session?.contactsMirror instanceof Map ? session.contactsMirror.size : 0,
+      mirroredChats: session?.chatsMirror instanceof Map ? session.chatsMirror.size : 0,
     });
+
+    if (session.connector === 'baileys' && !session.receivedPendingNotifications) {
+      setImportProgress('prepare', 8, 0, 0, 'Ожидание синхронизации уведомлений');
+      const pendingReady = await waitForBaileysPendingNotifications(session, 15_000, 600);
+      appendWhatsappSessionLog(session, 'import.pending_notifications.wait', {
+        pendingReady,
+        receivedPendingNotifications: session.receivedPendingNotifications,
+      });
+    }
 
     const allContacts =
       session.connector === 'baileys'
@@ -2485,8 +2715,10 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
     appendWhatsappSessionLog(session, 'import.raw_contacts', {
       count: Array.isArray(allContacts) ? allContacts.length : 0,
       connector: session.connector,
-      storeContacts: Object.keys(session?.store?.contacts || {}).length,
-      storeChats: Object.keys(session?.store?.chats || {}).length,
+      storeContacts: getBaileysCollectionSize(session?.store?.contacts),
+      storeChats: getBaileysCollectionSize(session?.store?.chats),
+      mirroredContacts: session?.contactsMirror instanceof Map ? session.contactsMirror.size : 0,
+      mirroredChats: session?.chatsMirror instanceof Map ? session.chatsMirror.size : 0,
       sample: (Array.isArray(allContacts) ? allContacts : [])
         .slice(0, 5)
         .map((row) => ({
