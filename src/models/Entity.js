@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 
 const ALLOWED_TYPES = [
   'project',
+  'connection',
   'person',
   'company',
   'event',

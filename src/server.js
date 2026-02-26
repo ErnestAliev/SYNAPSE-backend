@@ -33,6 +33,7 @@ const AI_ATTACHMENT_LIMIT = Math.max(1, Number(process.env.AI_ATTACHMENT_LIMIT) 
 const AI_DEBUG_ECHO = String(process.env.AI_DEBUG_ECHO || '').toLowerCase() === 'true';
 const ENTITY_TYPES = new Set([
   'project',
+  'connection',
   'person',
   'company',
   'event',
@@ -43,6 +44,7 @@ const ENTITY_TYPES = new Set([
   'shape',
 ]);
 const ENTITY_ANALYZER_FIELDS = Object.freeze({
+  connection: ['tags', 'markers', 'roles', 'links', 'status', 'importance'],
   person: ['tags', 'markers', 'roles', 'skills', 'links', 'importance'],
   company: ['tags', 'industry', 'departments', 'stage', 'risks', 'links', 'importance'],
   event: ['tags', 'date', 'location', 'participants', 'outcomes', 'links', 'importance'],
@@ -1267,6 +1269,105 @@ async function removeEntitiesFromProjectCanvases(entityIds, ownerId) {
   await Entity.bulkWrite(operations, { ordered: false });
 }
 
+function normalizePhone(value) {
+  if (typeof value !== 'string') return '';
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+
+  const hasPlus = trimmed.startsWith('+');
+  const digits = trimmed.replace(/[^\d]/g, '');
+  if (!digits) return '';
+  return hasPlus ? `+${digits}` : digits;
+}
+
+function normalizeWhatsappContact(rawContact, index) {
+  const row = toProfile(rawContact);
+  const nameCandidates = [
+    row.name,
+    row.displayName,
+    row.fullName,
+    row.pushName,
+    row.shortName,
+    row.title,
+  ];
+  const name =
+    nameCandidates
+      .map((value) => toTrimmedString(value, 120))
+      .find(Boolean) || '';
+
+  const phone = normalizePhone(
+    toTrimmedString(
+      row.phone || row.number || row.waId || row.user || row.id || row.contact || row.mobile,
+      60,
+    ),
+  );
+
+  const description = toTrimmedString(
+    row.description || row.about || row.status || row.bio || row.note,
+    1200,
+  );
+  const tags = normalizeEntityFieldArray(row.tags, { maxItems: 12, itemMaxLength: 64 });
+  const markers = normalizeEntityFieldArray(row.markers, { maxItems: 12, itemMaxLength: 64 });
+  const roles = normalizeEntityFieldArray(row.roles, { maxItems: 8, itemMaxLength: 64 });
+  const links = normalizeEntityFieldArray(row.links, { maxItems: 12, itemMaxLength: 240 });
+  const status = normalizeEntityFieldArray(
+    Array.isArray(row.statuses) ? row.statuses : [row.status].filter(Boolean),
+    { maxItems: 4, itemMaxLength: 64 },
+  );
+
+  if (!name && !phone && !description) {
+    return null;
+  }
+
+  const fallbackName = phone ? `Контакт ${phone}` : `Контакт ${index + 1}`;
+  const normalizedName = name || fallbackName;
+  const importKeySource = phone || normalizedName.toLowerCase().replace(/\s+/g, '-');
+  const importKey = toTrimmedString(`whatsapp:${importKeySource}`, 180);
+
+  if (!importKey) {
+    return null;
+  }
+
+  return {
+    importKey,
+    name: normalizedName,
+    phone,
+    description,
+    tags,
+    markers,
+    roles,
+    links,
+    status,
+  };
+}
+
+function buildDemoWhatsappContacts() {
+  return [
+    {
+      name: 'Анна Литвинова',
+      phone: '+7 (701) 111-22-33',
+      description: 'Маркетинг, B2B продажи, запуск партнерств.',
+      tags: ['Маркетинг', 'B2B'],
+      roles: ['Партнер'],
+      links: ['https://www.linkedin.com'],
+    },
+    {
+      name: 'Илья Петров',
+      phone: '+7 (702) 222-33-44',
+      description: 'Разработка, интеграции, автоматизация процессов.',
+      tags: ['Технологии'],
+      roles: ['Разработчик'],
+    },
+    {
+      name: 'ООО "Вектор"',
+      phone: '+7 (703) 333-44-55',
+      description: 'Поставщик оборудования и логистических сервисов.',
+      tags: ['Поставщик'],
+      roles: ['Компания'],
+    },
+  ];
+}
+
 async function migrateLegacyShapeNames() {
   const legacyShapeEntities = await Entity.find(
     {
@@ -1294,6 +1395,87 @@ async function migrateLegacyShapeNames() {
   await Entity.bulkWrite(operations, { ordered: false });
   console.log(`[migration] shape names renamed to "Элемент": ${operations.length}`);
 }
+
+app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next) => {
+  try {
+    const ownerId = requireOwnerId(req);
+
+    const inputContacts = Array.isArray(req.body?.contacts) ? req.body.contacts : [];
+    const sourceContacts = inputContacts.length ? inputContacts : buildDemoWhatsappContacts();
+
+    const normalizedUnique = Array.from(
+      sourceContacts
+        .map((contact, index) => normalizeWhatsappContact(contact, index))
+        .filter(Boolean)
+        .reduce((map, item) => {
+          map.set(item.importKey, item);
+          return map;
+        }, new Map())
+        .values(),
+    ).slice(0, 2000);
+
+    if (!normalizedUnique.length) {
+      return res.status(400).json({ message: 'No valid contacts to import' });
+    }
+
+    const importKeys = normalizedUnique.map((item) => item.importKey);
+    const existingConnections = await Entity.find(
+      {
+        owner_id: ownerId,
+        type: 'connection',
+        'profile.import_key': { $in: importKeys },
+      },
+      { _id: 1, profile: 1 },
+    ).lean();
+
+    const existingKeySet = new Set(
+      existingConnections
+        .map((entity) => toTrimmedString(toProfile(entity.profile).import_key, 180))
+        .filter(Boolean),
+    );
+
+    const toCreate = normalizedUnique.filter((item) => !existingKeySet.has(item.importKey));
+
+    let createdEntities = [];
+    if (toCreate.length) {
+      createdEntities = await Entity.insertMany(
+        toCreate.map((item) => ({
+          owner_id: ownerId,
+          type: 'connection',
+          name: item.name,
+          profile: {
+            color: '#1058ff',
+            source: 'whatsapp',
+            import_key: item.importKey,
+            phone: item.phone,
+            categoryLocked: false,
+            imported_at: new Date().toISOString(),
+          },
+          ai_metadata: {
+            description: item.description,
+            tags: item.tags,
+            markers: item.markers,
+            roles: item.roles,
+            links: item.links,
+            status: item.status,
+          },
+        })),
+        { ordered: false },
+      );
+    }
+
+    return res.status(200).json({
+      source: 'whatsapp',
+      imported: createdEntities.length,
+      skipped: normalizedUnique.length - createdEntities.length,
+      total: normalizedUnique.length,
+      entities: createdEntities,
+      mode: inputContacts.length ? 'payload' : 'demo',
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
 
 app.post('/api/auth/google', async (req, res, next) => {
   try {
