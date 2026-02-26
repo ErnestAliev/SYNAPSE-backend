@@ -1411,6 +1411,40 @@ function buildBaileysImportContacts(session) {
   return Array.from(collected.values());
 }
 
+async function syncBaileysContactsWithRetry(session, options = {}) {
+  const timeoutMs = Math.max(3_000, Number(options.timeoutMs) || 18_000);
+  const pollMs = Math.max(250, Number(options.pollMs) || 900);
+  const minContacts = Math.max(1, Number(options.minContacts) || 1);
+
+  const socket = session?.client;
+  if (!socket) {
+    return [];
+  }
+
+  if (typeof socket.resyncAppState === 'function') {
+    try {
+      await socket.resyncAppState(
+        ['critical_block', 'critical_unblock_low', 'regular_high', 'regular_low', 'regular'],
+        false,
+      );
+    } catch {
+      // Ignore sync errors and fallback to store polling.
+    }
+  }
+
+  const startedAt = Date.now();
+  let latest = buildBaileysImportContacts(session);
+  while (Date.now() - startedAt < timeoutMs) {
+    if (latest.length >= minContacts) {
+      return latest;
+    }
+    await delay(pollMs);
+    latest = buildBaileysImportContacts(session);
+  }
+
+  return latest;
+}
+
 function extractNormalizedPhonesFromProfile(rawProfile) {
   const profile = toProfile(rawProfile);
   const phones = new Set();
@@ -1472,7 +1506,24 @@ function isWhatsappIntegrationAvailable() {
   return Boolean(resolveWhatsappConnector());
 }
 
+function delay(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, Math.max(0, Number(ms) || 0));
+  });
+}
+
 function toWhatsappSessionStatus(session) {
+  const importProgress =
+    session?.importProgress && typeof session.importProgress === 'object'
+      ? {
+          stage: toTrimmedString(session.importProgress.stage, 32),
+          note: toTrimmedString(session.importProgress.note, 220),
+          total: Number(session.importProgress.total) || 0,
+          processed: Number(session.importProgress.processed) || 0,
+          percent: Math.max(0, Math.min(100, Number(session.importProgress.percent) || 0)),
+        }
+      : null;
+
   return {
     sessionId: session.id,
     status: session.status,
@@ -1481,6 +1532,7 @@ function toWhatsappSessionStatus(session) {
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
     lastImportedAt: session.lastImportedAt || '',
+    ...(importProgress ? { importProgress } : {}),
   };
 }
 
@@ -1603,6 +1655,7 @@ function createBaseWhatsappSession(ownerId, connector) {
     initTimer: null,
     reconnectTimer: null,
     restartAttempts: 0,
+    importProgress: null,
     client: null,
     store: null,
     authDir: '',
@@ -1978,10 +2031,11 @@ async function ensureOwnerWhatsappSession(ownerId) {
   return ensureOwnerWhatsappSessionWebJs(ownerId);
 }
 
-async function mapWithConcurrency(items, limit, iterator) {
+async function mapWithConcurrency(items, limit, iterator, onProgress = null) {
   const maxWorkers = Math.max(1, Math.min(limit, items.length || 1));
   const results = new Array(items.length);
   let cursor = 0;
+  let completed = 0;
 
   async function worker() {
     while (true) {
@@ -1992,6 +2046,15 @@ async function mapWithConcurrency(items, limit, iterator) {
         results[index] = await iterator(items[index], index);
       } catch {
         results[index] = null;
+      } finally {
+        completed += 1;
+        if (typeof onProgress === 'function') {
+          try {
+            onProgress(completed, items.length);
+          } catch {
+            // Ignore progress callback errors.
+          }
+        }
       }
     }
   }
@@ -2256,14 +2319,27 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
       return res.status(500).json({ message: 'WhatsApp client is unavailable for this session.' });
     }
 
+    const setImportProgress = (stage, percent, processed, total, note = '') => {
+      session.importProgress = {
+        stage: toTrimmedString(stage, 32) || 'import',
+        percent: Math.max(0, Math.min(100, Number(percent) || 0)),
+        processed: Math.max(0, Number(processed) || 0),
+        total: Math.max(0, Number(total) || 0),
+        note: toTrimmedString(note, 220),
+      };
+      touchWhatsappSession(session, ownerId);
+    };
+
     session.status = 'importing';
     session.error = '';
-    touchWhatsappSession(session, ownerId);
+    setImportProgress('prepare', 5, 0, 0, 'Подготовка импорта');
 
     const allContacts =
       session.connector === 'baileys'
-        ? buildBaileysImportContacts(session)
+        ? await syncBaileysContactsWithRetry(session, { timeoutMs: 18_000, pollMs: 900, minContacts: 1 })
         : await session.client.getContacts();
+    setImportProgress('scan', 20, 0, allContacts.length || 0, 'Сканирование контактов');
+
     const importCandidates = allContacts
       .filter((contact) => {
         if (!contact || typeof contact !== 'object') return false;
@@ -2278,6 +2354,7 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
         return true;
       })
       .slice(0, WHATSAPP_CONTACT_IMPORT_LIMIT);
+    setImportProgress('scan', 30, importCandidates.length, importCandidates.length, 'Контакты подготовлены');
 
     const preparedContactsMap = (
       await mapWithConcurrency(importCandidates, WHATSAPP_IMPORT_CONCURRENCY, async (contact, index) => {
@@ -2321,6 +2398,14 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
           ...normalized,
           _contact: contact,
         };
+      }, (completed, total) => {
+        setImportProgress(
+          'normalize',
+          30 + Math.round((Math.max(0, Math.min(1, total ? completed / total : 1))) * 30),
+          completed,
+          total,
+          'Нормализация контактов',
+        );
       })
     )
       .filter(Boolean)
@@ -2330,10 +2415,13 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
       }, new Map());
 
     const uniqueContacts = Array.from(preparedContactsMap.values());
+    setImportProgress('dedupe', 65, uniqueContacts.length, uniqueContacts.length, 'Удаление дубликатов');
 
     if (!uniqueContacts.length) {
       session.status = 'ready';
       session.error = '';
+      setImportProgress('done', 100, 0, 0, 'Контакты не найдены');
+      session.importProgress = null;
       touchWhatsappSession(session, ownerId);
       setTimeout(() => {
         stopOwnerWhatsappSession(ownerId, 'No contacts to import').catch(() => {
@@ -2395,6 +2483,7 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
         { _id: 1, profile: 1 },
       ).lean();
     }
+    setImportProgress('match', 75, 0, uniqueContacts.length, 'Сопоставление с базой');
 
     const existingKeySet = new Set();
     const existingPhoneSet = new Set();
@@ -2443,6 +2532,7 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
 
       toCreate.push(item);
     }
+    setImportProgress('match', 82, uniqueContacts.length, uniqueContacts.length, 'Сопоставление завершено');
 
     let createdEntities = [];
     if (toCreate.length) {
@@ -2479,8 +2569,18 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
             image,
           };
         },
+        (completed, total) => {
+          setImportProgress(
+            'enrich',
+            82 + Math.round((Math.max(0, Math.min(1, total ? completed / total : 1))) * 10),
+            completed,
+            total,
+            'Подготовка к записи',
+          );
+        },
       );
 
+      setImportProgress('save', 95, contactsWithImages.length, contactsWithImages.length, 'Сохранение в базу');
       createdEntities = await Entity.insertMany(
         contactsWithImages.map((item) => ({
           owner_id: ownerId,
@@ -2510,9 +2610,11 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
       );
     }
 
+    setImportProgress('done', 100, createdEntities.length, uniqueContacts.length, 'Импорт завершен');
     session.status = 'ready';
     session.error = '';
     session.lastImportedAt = new Date().toISOString();
+    session.importProgress = null;
     touchWhatsappSession(session, ownerId);
     setTimeout(() => {
       stopOwnerWhatsappSession(ownerId, 'Import completed').catch(() => {
@@ -2538,6 +2640,7 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
     if (session) {
       session.status = 'error';
       session.error = toTrimmedString(error?.message, 260) || 'Import failed';
+      session.importProgress = null;
       touchWhatsappSession(session, ownerId);
     }
     return next(error);
