@@ -17,6 +17,7 @@ let whatsappWeb = null;
 let whatsappBaileys = null;
 let QRCode = null;
 let sharp = null;
+let mammoth = null;
 
 if (!process.env.PUPPETEER_CACHE_DIR) {
   process.env.PUPPETEER_CACHE_DIR = path.resolve(__dirname, '..', '.cache', 'puppeteer');
@@ -46,6 +47,12 @@ try {
   sharp = null;
 }
 
+try {
+  mammoth = require('mammoth');
+} catch {
+  mammoth = null;
+}
+
 dotenv.config();
 
 const app = express();
@@ -66,6 +73,15 @@ const OPENAI_EMBEDDING_MODEL = String(process.env.OPENAI_EMBEDDING_MODEL || 'tex
 const AI_CONTEXT_ENTITY_LIMIT = Math.max(1, Number(process.env.AI_CONTEXT_ENTITY_LIMIT) || 120);
 const AI_HISTORY_MESSAGE_LIMIT = Math.max(1, Number(process.env.AI_HISTORY_MESSAGE_LIMIT) || 12);
 const AI_ATTACHMENT_LIMIT = Math.max(1, Number(process.env.AI_ATTACHMENT_LIMIT) || 6);
+const AI_ATTACHMENT_TEXT_MAX_LENGTH = Math.max(400, Number(process.env.AI_ATTACHMENT_TEXT_MAX_LENGTH) || 12_000);
+const AI_ATTACHMENT_DATA_URL_MAX_LENGTH = Math.max(
+  2_000,
+  Number(process.env.AI_ATTACHMENT_DATA_URL_MAX_LENGTH) || 3_000_000,
+);
+const AI_ATTACHMENT_BINARY_MAX_BYTES = Math.max(
+  64_000,
+  Number(process.env.AI_ATTACHMENT_BINARY_MAX_BYTES) || 2_000_000,
+);
 const AI_DEBUG_ECHO = String(process.env.AI_DEBUG_ECHO || '').toLowerCase() === 'true';
 const WHATSAPP_CONTACT_IMPORT_LIMIT = Math.max(1, Number(process.env.WHATSAPP_CONTACT_IMPORT_LIMIT) || 2500);
 const WHATSAPP_IMPORT_CONCURRENCY = Math.max(1, Number(process.env.WHATSAPP_IMPORT_CONCURRENCY) || 4);
@@ -406,6 +422,14 @@ function toTrimmedString(value, maxLength = 240) {
   const trimmed = value.trim();
   if (!trimmed) return '';
   return trimmed.slice(0, maxLength);
+}
+
+function toTrimmedTailString(value, maxLength = 240) {
+  if (typeof value !== 'string') return '';
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  if (trimmed.length <= maxLength) return trimmed;
+  return trimmed.slice(trimmed.length - maxLength);
 }
 
 function toStringArray(value, maxItems = 8, itemMaxLength = 80) {
@@ -1327,22 +1351,145 @@ function normalizeAgentAttachments(rawAttachments) {
         typeof attachment.size === 'number' && Number.isFinite(attachment.size)
           ? Math.max(0, Math.floor(attachment.size))
           : 0;
-      return { name, mime, size };
+      const data = toTrimmedString(attachment.data, AI_ATTACHMENT_DATA_URL_MAX_LENGTH);
+      const text = toTrimmedString(attachment.text, AI_ATTACHMENT_TEXT_MAX_LENGTH);
+      return compactObject({ name, mime, size, data, text });
     })
     .filter(Boolean)
     .slice(0, AI_ATTACHMENT_LIMIT);
+}
+
+function parseDataUrl(value) {
+  const raw = toTrimmedString(value, AI_ATTACHMENT_DATA_URL_MAX_LENGTH);
+  if (!raw.startsWith('data:')) return null;
+
+  const commaIndex = raw.indexOf(',');
+  if (commaIndex <= 5) return null;
+
+  const meta = raw.slice(5, commaIndex);
+  const payload = raw.slice(commaIndex + 1);
+  const metaParts = meta.split(';').map((part) => part.trim()).filter(Boolean);
+  const mime = toTrimmedString(metaParts[0] || '', 160).toLowerCase();
+  const isBase64 = metaParts.includes('base64');
+  if (!payload) return null;
+
+  return { mime, isBase64, payload };
+}
+
+function shouldTreatAsTextAttachment(name, mime) {
+  const loweredMime = toTrimmedString(mime, 120).toLowerCase();
+  const loweredName = toTrimmedString(name, 160).toLowerCase();
+  if (loweredMime.startsWith('text/')) return true;
+  if (loweredMime === 'application/json') return true;
+  if (loweredMime === 'application/xml') return true;
+  if (loweredMime === 'application/x-yaml') return true;
+  return (
+    loweredName.endsWith('.txt') ||
+    loweredName.endsWith('.md') ||
+    loweredName.endsWith('.json') ||
+    loweredName.endsWith('.csv') ||
+    loweredName.endsWith('.yaml') ||
+    loweredName.endsWith('.yml') ||
+    loweredName.endsWith('.xml') ||
+    loweredName.endsWith('.log')
+  );
+}
+
+function isDocxAttachment(name, mime) {
+  const loweredMime = toTrimmedString(mime, 120).toLowerCase();
+  const loweredName = toTrimmedString(name, 160).toLowerCase();
+  return (
+    loweredMime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+    loweredName.endsWith('.docx')
+  );
+}
+
+function decodeAttachmentBuffer(attachment) {
+  const parsed = parseDataUrl(attachment?.data);
+  if (!parsed) return null;
+
+  let buffer = null;
+  try {
+    buffer = parsed.isBase64
+      ? Buffer.from(parsed.payload, 'base64')
+      : Buffer.from(decodeURIComponent(parsed.payload), 'utf8');
+  } catch {
+    return null;
+  }
+
+  if (!buffer || !buffer.length) return null;
+  if (buffer.length > AI_ATTACHMENT_BINARY_MAX_BYTES) return null;
+
+  return {
+    buffer,
+    mime: parsed.mime || toTrimmedString(attachment?.mime, 120).toLowerCase(),
+  };
+}
+
+async function extractAttachmentText(attachment) {
+  const directText = toTrimmedString(attachment?.text, AI_ATTACHMENT_TEXT_MAX_LENGTH);
+  if (directText) {
+    return directText;
+  }
+
+  const decoded = decodeAttachmentBuffer(attachment);
+  if (!decoded) return '';
+
+  const name = toTrimmedString(attachment?.name, 120);
+  const mime = toTrimmedString(attachment?.mime, 120).toLowerCase() || decoded.mime;
+
+  if (shouldTreatAsTextAttachment(name, mime)) {
+    return toTrimmedString(decoded.buffer.toString('utf8'), AI_ATTACHMENT_TEXT_MAX_LENGTH);
+  }
+
+  if (isDocxAttachment(name, mime) && mammoth) {
+    try {
+      const parsed = await mammoth.extractRawText({ buffer: decoded.buffer });
+      return toTrimmedString(parsed?.value, AI_ATTACHMENT_TEXT_MAX_LENGTH);
+    } catch {
+      return '';
+    }
+  }
+
+  return '';
+}
+
+async function prepareAgentAttachments(rawAttachments) {
+  const normalized = normalizeAgentAttachments(rawAttachments);
+  const prepared = [];
+
+  for (const attachment of normalized) {
+    const text = await extractAttachmentText(attachment);
+    prepared.push(
+      compactObject({
+        name: attachment.name,
+        mime: attachment.mime,
+        size: attachment.size,
+        text,
+        hasInlineData: Boolean(attachment.data),
+      }),
+    );
+  }
+
+  return prepared;
 }
 
 function summarizeEntityForAgent(entity) {
   const profile = toProfile(entity.profile);
   const aiMetadata = toProfile(entity.ai_metadata);
   const logo = toProfile(profile.logo);
+  const fullDescription = toTrimmedString(aiMetadata.description, 2400);
+  const descriptionHead = toTrimmedString(fullDescription, 900);
+  const descriptionTail =
+    fullDescription.length > 900 ? toTrimmedTailString(fullDescription, 520) : '';
 
   return compactObject({
     id: String(entity._id),
     type: entity.type,
     name: toTrimmedString(entity.name, 120) || '(без названия)',
-    description: toTrimmedString(aiMetadata.description, 260),
+    description: descriptionHead,
+    descriptionTail,
+    descriptionLength: fullDescription.length || undefined,
     tags: toStringArray(aiMetadata.tags, 8),
     markers: toStringArray(aiMetadata.markers, 6),
     skills: toStringArray(aiMetadata.skills, 8),
@@ -1361,6 +1508,7 @@ function summarizeEntityForAgent(entity) {
       logo: toTrimmedString(logo.name || logo.id, 64),
       hasImage: typeof profile.image === 'string' && profile.image.trim().length > 0,
     },
+    updatedAt: entity.updatedAt || '',
   });
 }
 
@@ -1515,7 +1663,9 @@ function buildAgentSystemPrompt(scopeContext) {
     scopeDescription,
     'Жесткое правило: используй ТОЛЬКО данные из переданного контекста.',
     'Нельзя подтягивать данные из других вкладок, проектов или внешних источников.',
-    'Если данных в контексте недостаточно, прямо напиши: "Недостаточно данных в текущем контексте".',
+    'Если пользователь просит "повторить анализ" или "обновить вывод", анализируй текущий контекст как есть и историю диалога.',
+    'Не отвечай "данные не предоставлены", если в контексте уже есть описание/теги/поля сущностей.',
+    'Фразу "Недостаточно данных в текущем контексте" используй только когда в контексте реально нет фактов для вывода.',
     'Отвечай по-русски, структурно и кратко.',
     'Формат ответа:',
     '1) Краткий вывод',
@@ -4362,7 +4512,7 @@ app.post('/api/ai/agent-chat', requireAuth, async (req, res, next) => {
     }
 
     const history = normalizeAgentHistory(req.body?.history);
-    const attachments = normalizeAgentAttachments(req.body?.attachments);
+    const attachments = await prepareAgentAttachments(req.body?.attachments);
     const scopeContext = await resolveAgentScopeContext(ownerId, req.body?.scope);
 
     const systemPrompt = buildAgentSystemPrompt(scopeContext);
@@ -4442,8 +4592,8 @@ app.post('/api/ai/entity-analyze', requireAuth, async (req, res, next) => {
     const message = toTrimmedString(req.body?.message, 4000);
     const voiceInput = toTrimmedString(req.body?.voiceInput, 4000);
     const history = normalizeAgentHistory(req.body?.history);
-    const attachments = normalizeAgentAttachments(req.body?.attachments);
-    const documents = normalizeAgentAttachments(req.body?.documents);
+    const attachments = await prepareAgentAttachments(req.body?.attachments);
+    const documents = await prepareAgentAttachments(req.body?.documents);
 
     if (!message && !voiceInput && !history.length && !attachments.length && !documents.length) {
       return res
