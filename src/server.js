@@ -77,6 +77,14 @@ const WHATSAPP_IMAGE_IMPORT_CONCURRENCY = Math.max(
   1,
   Number(process.env.WHATSAPP_IMAGE_IMPORT_CONCURRENCY) || 2,
 );
+const WHATSAPP_INIT_TIMEOUT_MS = Math.max(
+  20_000,
+  Number(process.env.WHATSAPP_INIT_TIMEOUT_MS) || 60_000,
+);
+const WHATSAPP_MAX_CONCURRENT_SESSIONS = Math.max(
+  1,
+  Number(process.env.WHATSAPP_MAX_CONCURRENT_SESSIONS) || 1,
+);
 const ENTITY_TYPES = new Set([
   'project',
   'connection',
@@ -1374,6 +1382,13 @@ function toWhatsappSessionStatus(session) {
   };
 }
 
+function clearWhatsappSessionInitTimer(session) {
+  if (session?.initTimer) {
+    clearTimeout(session.initTimer);
+    session.initTimer = null;
+  }
+}
+
 function clearWhatsappSessionIdleTimer(session) {
   if (session?.idleTimer) {
     clearTimeout(session.idleTimer);
@@ -1407,10 +1422,21 @@ function getOwnerWhatsappSession(ownerId) {
   return whatsappSessionsByOwner.get(ownerId) || null;
 }
 
+function getActiveWhatsappSessionCount() {
+  let count = 0;
+  for (const session of whatsappSessionsByOwner.values()) {
+    if (session && ['initializing', 'qr', 'ready', 'importing'].includes(session.status)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
 async function stopOwnerWhatsappSession(ownerId, reason = '') {
   const session = getOwnerWhatsappSession(ownerId);
   if (!session) return;
 
+  clearWhatsappSessionInitTimer(session);
   clearWhatsappSessionIdleTimer(session);
   whatsappSessionsByOwner.delete(ownerId);
 
@@ -1444,6 +1470,14 @@ async function ensureOwnerWhatsappSession(ownerId) {
     await stopOwnerWhatsappSession(ownerId, 'Restarting session');
   }
 
+  const activeSessions = getActiveWhatsappSessionCount();
+  if (activeSessions >= WHATSAPP_MAX_CONCURRENT_SESSIONS) {
+    throw Object.assign(
+      new Error('WhatsApp is busy right now. Try again in 1-2 minutes.'),
+      { status: 429 },
+    );
+  }
+
   const { Client, LocalAuth } = whatsappWeb;
   const ownerSessionKey = sanitizeOwnerSessionKey(ownerId);
   const puppeteerOptions = {
@@ -1473,6 +1507,7 @@ async function ensureOwnerWhatsappSession(ownerId) {
     updatedAt: new Date().toISOString(),
     lastImportedAt: '',
     idleTimer: null,
+    initTimer: null,
     client: null,
   };
 
@@ -1485,9 +1520,28 @@ async function ensureOwnerWhatsappSession(ownerId) {
 
   session.client = client;
   whatsappSessionsByOwner.set(ownerId, session);
+  session.initTimer = setTimeout(() => {
+    if (session.status !== 'initializing') {
+      return;
+    }
+
+    session.status = 'error';
+    session.error = 'Initialization timed out. Chrome did not return QR in time.';
+    touchWhatsappSession(session, ownerId);
+
+    if (session.client) {
+      session.client.destroy().catch(() => {
+        // Ignore cleanup error.
+      });
+    }
+  }, WHATSAPP_INIT_TIMEOUT_MS);
+  if (typeof session.initTimer?.unref === 'function') {
+    session.initTimer.unref();
+  }
 
   client.on('qr', async (qr) => {
     try {
+      clearWhatsappSessionInitTimer(session);
       session.qrCodeDataUrl = await QRCode.toDataURL(qr, {
         width: 300,
         margin: 1,
@@ -1503,6 +1557,7 @@ async function ensureOwnerWhatsappSession(ownerId) {
   });
 
   client.on('ready', () => {
+    clearWhatsappSessionInitTimer(session);
     session.status = 'ready';
     session.qrCodeDataUrl = '';
     session.error = '';
@@ -1510,12 +1565,14 @@ async function ensureOwnerWhatsappSession(ownerId) {
   });
 
   client.on('auth_failure', (message) => {
+    clearWhatsappSessionInitTimer(session);
     session.status = 'error';
     session.error = toTrimmedString(String(message || 'Authentication failed'), 260);
     touchWhatsappSession(session, ownerId);
   });
 
   client.on('disconnected', (reason) => {
+    clearWhatsappSessionInitTimer(session);
     session.status = 'disconnected';
     session.error = toTrimmedString(String(reason || 'Disconnected'), 260);
     touchWhatsappSession(session, ownerId);
@@ -1524,6 +1581,7 @@ async function ensureOwnerWhatsappSession(ownerId) {
   client
     .initialize()
     .catch((error) => {
+      clearWhatsappSessionInitTimer(session);
       session.status = 'error';
       session.error = toTrimmedString(error?.message, 260) || 'Failed to initialize WhatsApp client';
       touchWhatsappSession(session, ownerId);
@@ -1875,6 +1933,11 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
       session.status = 'ready';
       session.error = '';
       touchWhatsappSession(session, ownerId);
+      setTimeout(() => {
+        stopOwnerWhatsappSession(ownerId, 'No contacts to import').catch(() => {
+          // Ignore background cleanup errors.
+        });
+      }, 800);
       return res.status(200).json({
         source: 'whatsapp',
         imported: 0,
@@ -2048,6 +2111,11 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
     session.error = '';
     session.lastImportedAt = new Date().toISOString();
     touchWhatsappSession(session, ownerId);
+    setTimeout(() => {
+      stopOwnerWhatsappSession(ownerId, 'Import completed').catch(() => {
+        // Ignore background cleanup errors.
+      });
+    }, 1200);
 
     return res.status(200).json({
       source: 'whatsapp',
@@ -2584,7 +2652,7 @@ async function startServer() {
     );
   } else {
     console.warn(
-      `[integrations] WhatsApp settings: contactsLimit=${WHATSAPP_CONTACT_IMPORT_LIMIT}, imageFetch=${WHATSAPP_IMAGE_FETCH_ENABLED}, imageMaxCount=${WHATSAPP_IMAGE_IMPORT_MAX_COUNT}, sessionIdleMs=${WHATSAPP_SESSION_IDLE_TIMEOUT_MS}`,
+      `[integrations] WhatsApp settings: contactsLimit=${WHATSAPP_CONTACT_IMPORT_LIMIT}, imageFetch=${WHATSAPP_IMAGE_FETCH_ENABLED}, imageMaxCount=${WHATSAPP_IMAGE_IMPORT_MAX_COUNT}, sessionIdleMs=${WHATSAPP_SESSION_IDLE_TIMEOUT_MS}, initTimeoutMs=${WHATSAPP_INIT_TIMEOUT_MS}, maxSessions=${WHATSAPP_MAX_CONCURRENT_SESSIONS}`,
     );
   }
   if (!sharp) {
