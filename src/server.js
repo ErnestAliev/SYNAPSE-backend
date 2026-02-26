@@ -85,6 +85,9 @@ const WHATSAPP_MAX_CONCURRENT_SESSIONS = Math.max(
   1,
   Number(process.env.WHATSAPP_MAX_CONCURRENT_SESSIONS) || 1,
 );
+const PUPPETEER_BROWSER_WS_ENDPOINT = String(process.env.PUPPETEER_BROWSER_WS_ENDPOINT || '').trim().slice(0, 2048);
+const WHATSAPP_ALLOW_LOCAL_CHROME =
+  String(process.env.WHATSAPP_ALLOW_LOCAL_CHROME || (!IS_PRODUCTION ? 'true' : 'false')).toLowerCase() === 'true';
 const ENTITY_TYPES = new Set([
   'project',
   'connection',
@@ -1470,6 +1473,15 @@ async function ensureOwnerWhatsappSession(ownerId) {
     await stopOwnerWhatsappSession(ownerId, 'Restarting session');
   }
 
+  if (IS_PRODUCTION && !PUPPETEER_BROWSER_WS_ENDPOINT && !WHATSAPP_ALLOW_LOCAL_CHROME) {
+    throw Object.assign(
+      new Error(
+        'WhatsApp connector is disabled on this backend instance. Configure PUPPETEER_BROWSER_WS_ENDPOINT (remote browser) or set WHATSAPP_ALLOW_LOCAL_CHROME=true on a high-memory instance.',
+      ),
+      { status: 503 },
+    );
+  }
+
   const activeSessions = getActiveWhatsappSessionCount();
   if (activeSessions >= WHATSAPP_MAX_CONCURRENT_SESSIONS) {
     throw Object.assign(
@@ -1493,13 +1505,12 @@ async function ensureOwnerWhatsappSession(ownerId) {
       '--no-zygote',
     ],
   };
-  const puppeteerBrowserWSEndpoint = toTrimmedString(process.env.PUPPETEER_BROWSER_WS_ENDPOINT, 2048);
-  if (puppeteerBrowserWSEndpoint) {
-    puppeteerOptions.browserWSEndpoint = puppeteerBrowserWSEndpoint;
+  if (PUPPETEER_BROWSER_WS_ENDPOINT) {
+    puppeteerOptions.browserWSEndpoint = PUPPETEER_BROWSER_WS_ENDPOINT;
     delete puppeteerOptions.executablePath;
     delete puppeteerOptions.args;
   }
-  if (!puppeteerBrowserWSEndpoint && toTrimmedString(process.env.PUPPETEER_EXECUTABLE_PATH, 2048)) {
+  if (!PUPPETEER_BROWSER_WS_ENDPOINT && toTrimmedString(process.env.PUPPETEER_EXECUTABLE_PATH, 2048)) {
     puppeteerOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
   }
 
@@ -2660,8 +2671,12 @@ async function startServer() {
     console.warn(
       `[integrations] WhatsApp settings: contactsLimit=${WHATSAPP_CONTACT_IMPORT_LIMIT}, imageFetch=${WHATSAPP_IMAGE_FETCH_ENABLED}, imageMaxCount=${WHATSAPP_IMAGE_IMPORT_MAX_COUNT}, sessionIdleMs=${WHATSAPP_SESSION_IDLE_TIMEOUT_MS}, initTimeoutMs=${WHATSAPP_INIT_TIMEOUT_MS}, maxSessions=${WHATSAPP_MAX_CONCURRENT_SESSIONS}`,
     );
-    if (toTrimmedString(process.env.PUPPETEER_BROWSER_WS_ENDPOINT, 2048)) {
+    if (PUPPETEER_BROWSER_WS_ENDPOINT) {
       console.warn('[integrations] WhatsApp uses remote browser via PUPPETEER_BROWSER_WS_ENDPOINT.');
+    } else if (IS_PRODUCTION && !WHATSAPP_ALLOW_LOCAL_CHROME) {
+      console.warn(
+        '[integrations] Local Chromium is disabled in production. Set PUPPETEER_BROWSER_WS_ENDPOINT for stable WhatsApp QR.',
+      );
     }
   }
   if (!sharp) {
