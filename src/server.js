@@ -145,6 +145,16 @@ const ENTITY_ANALYZER_FIELDS = Object.freeze({
   shape: ['tags', 'markers', 'status', 'links', 'importance'],
 });
 const ENTITY_IMPORTANCE_VALUES = ['Низкая', 'Средняя', 'Высокая'];
+const DESCRIPTION_CHANGE_TYPES = new Set(['initial', 'addition', 'update']);
+const IMPORTANCE_SIGNAL_TYPES = new Set(['increase', 'decrease', 'neutral']);
+const DESCRIPTION_HISTORY_LIMIT = Math.max(10, Number(process.env.DESCRIPTION_HISTORY_LIMIT) || 40);
+const IMPORTANCE_HISTORY_LIMIT = Math.max(20, Number(process.env.IMPORTANCE_HISTORY_LIMIT) || 80);
+const IMPORTANCE_SCORE_BY_LABEL = Object.freeze({
+  Низкая: 0,
+  Средняя: 1,
+  Высокая: 2,
+});
+const IMPORTANCE_LABEL_BY_SCORE = ['Низкая', 'Средняя', 'Высокая'];
 const IMPORTANCE_AUTO_WEIGHTS = Object.freeze({
   resources: 2.4,
   skills: 2.2,
@@ -506,6 +516,173 @@ function normalizeImportanceSource(value) {
   return toTrimmedString(value, 16).toLowerCase() === 'manual' ? 'manual' : 'auto';
 }
 
+function normalizeHistorySource(value) {
+  const source = toTrimmedString(value, 16).toLowerCase();
+  if (source === 'llm' || source === 'manual') return source;
+  return 'system';
+}
+
+function normalizeDescriptionChangeType(value) {
+  const changeType = toTrimmedString(value, 24).toLowerCase();
+  return DESCRIPTION_CHANGE_TYPES.has(changeType) ? changeType : '';
+}
+
+function normalizeImportanceSignal(value) {
+  const signal = toTrimmedString(value, 24).toLowerCase();
+  return IMPORTANCE_SIGNAL_TYPES.has(signal) ? signal : '';
+}
+
+function normalizeIsoTimestamp(value) {
+  const raw = toTrimmedString(value, 64);
+  if (!raw) return '';
+  const parsed = Date.parse(raw);
+  if (!Number.isFinite(parsed)) return '';
+  return new Date(parsed).toISOString();
+}
+
+function normalizeDescriptionHistory(rawHistory) {
+  if (!Array.isArray(rawHistory)) return [];
+
+  return rawHistory
+    .map((item) => {
+      const row = toProfile(item);
+      const at = normalizeIsoTimestamp(row.at || row.updatedAt || row.createdAt);
+      const changeType = normalizeDescriptionChangeType(row.changeType || row.type);
+      const source = normalizeHistorySource(row.source);
+      const previousDescription = toTrimmedString(
+        row.previousDescription || row.previous || row.before,
+        2200,
+      );
+      const nextDescription = toTrimmedString(row.nextDescription || row.next || row.after, 2200);
+      const reason = toTrimmedString(row.reason || row.note, 240);
+      const versionRaw = Number(row.version);
+      const version = Number.isFinite(versionRaw) ? Math.max(1, Math.floor(versionRaw)) : 0;
+
+      if (!at || !changeType) return null;
+      if (!previousDescription && !nextDescription) return null;
+
+      return compactObject({
+        at,
+        version: version || undefined,
+        changeType,
+        source,
+        previousDescription,
+        nextDescription,
+        reason,
+      });
+    })
+    .filter(Boolean)
+    .slice(-DESCRIPTION_HISTORY_LIMIT);
+}
+
+function normalizeImportanceHistory(rawHistory) {
+  if (!Array.isArray(rawHistory)) return [];
+
+  return rawHistory
+    .map((item) => {
+      const row = toProfile(item);
+      const at = normalizeIsoTimestamp(row.at || row.updatedAt || row.createdAt);
+      const before = normalizeImportanceValue(row.before || row.previous || row.previousImportance);
+      const after = normalizeImportanceValue(row.after || row.next || row.nextImportance);
+      const signal = normalizeImportanceSignal(row.signal);
+      const source = normalizeHistorySource(row.source);
+      const reason = toTrimmedString(row.reason || row.note, 240);
+      if (!at) return null;
+      if (!before && !after && !signal && !reason) return null;
+
+      return compactObject({
+        at,
+        before,
+        after,
+        signal,
+        source,
+        reason,
+      });
+    })
+    .filter(Boolean)
+    .slice(-IMPORTANCE_HISTORY_LIMIT);
+}
+
+function resolveDescriptionChangeType(previousDescription, nextDescription, requestedChangeType) {
+  const explicitType = normalizeDescriptionChangeType(requestedChangeType);
+  if (explicitType) return explicitType;
+
+  if (!previousDescription && nextDescription) return 'initial';
+  if (previousDescription && !nextDescription) return 'update';
+  if (!previousDescription && !nextDescription) return '';
+
+  const normalizedPrev = previousDescription.replace(/\s+/g, ' ').trim();
+  const normalizedNext = nextDescription.replace(/\s+/g, ' ').trim();
+  if (!normalizedPrev || !normalizedNext || normalizedPrev === normalizedNext) return '';
+
+  const growth = normalizedNext.length - normalizedPrev.length;
+  const prevPrefix = normalizedPrev.slice(0, Math.min(120, normalizedPrev.length));
+  const includesPrevious = normalizedNext.includes(normalizedPrev) || normalizedNext.startsWith(prevPrefix);
+  if (growth >= Math.max(40, Math.floor(normalizedPrev.length * 0.15)) && includesPrevious) {
+    return 'addition';
+  }
+
+  return 'update';
+}
+
+function importanceLabelToScore(label) {
+  const normalized = normalizeImportanceValue(label);
+  if (!normalized) return -1;
+  return IMPORTANCE_SCORE_BY_LABEL[normalized];
+}
+
+function deriveImportanceSignal(beforeLabel, afterLabel, requestedSignal) {
+  const explicit = normalizeImportanceSignal(requestedSignal);
+  if (explicit) return explicit;
+
+  const beforeScore = importanceLabelToScore(beforeLabel);
+  const afterScore = importanceLabelToScore(afterLabel);
+  if (beforeScore >= 0 && afterScore >= 0) {
+    if (afterScore > beforeScore) return 'increase';
+    if (afterScore < beforeScore) return 'decrease';
+    return 'neutral';
+  }
+  return '';
+}
+
+function computeImportanceTrendStep(history, pendingSignal = '') {
+  const normalizedHistory = normalizeImportanceHistory(history);
+  if (!normalizedHistory.length && !normalizeImportanceSignal(pendingSignal)) return 0;
+
+  let weightedSignal = 0;
+  let weightedTotal = 0;
+  const reversedHistory = normalizedHistory.slice(-14).reverse();
+  for (let index = 0; index < reversedHistory.length; index += 1) {
+    const row = reversedHistory[index];
+    const weight = Math.pow(0.86, index);
+    const signal =
+      row.signal ||
+      deriveImportanceSignal(row.before, row.after, '');
+
+    let signalValue = 0;
+    if (signal === 'increase') signalValue = 1;
+    if (signal === 'decrease') signalValue = -1;
+    if (!signalValue) continue;
+
+    weightedSignal += signalValue * weight;
+    weightedTotal += weight;
+  }
+
+  const pending = normalizeImportanceSignal(pendingSignal);
+  if (pending === 'increase' || pending === 'decrease') {
+    const pendingValue = pending === 'increase' ? 1 : -1;
+    weightedSignal += pendingValue * 1.2;
+    weightedTotal += 1.2;
+  }
+
+  if (!weightedTotal) return 0;
+
+  const trend = weightedSignal / weightedTotal;
+  if (trend >= 0.34) return 1;
+  if (trend <= -0.34) return -1;
+  return 0;
+}
+
 function countSignalItems(value, cap = IMPORTANCE_AUTO_FIELD_CAP) {
   const maxItems = Math.max(1, Math.floor(cap));
 
@@ -530,7 +707,7 @@ function countSignalItems(value, cap = IMPORTANCE_AUTO_FIELD_CAP) {
   return Math.min(maxItems, chunks.length);
 }
 
-function computeAutomaticImportance(aiMetadata) {
+function computeAutomaticImportance(aiMetadata, options = {}) {
   const metadata = toProfile(aiMetadata);
   let score = 0;
   let maxScore = 0;
@@ -540,39 +717,187 @@ function computeAutomaticImportance(aiMetadata) {
     score += countSignalItems(metadata[field], IMPORTANCE_AUTO_FIELD_CAP) * weight;
   }
 
-  if (!maxScore || score <= 0) return ['Низкая'];
+  if (!maxScore || score <= 0) {
+    const emptyBase = 0;
+    const trendStep = computeImportanceTrendStep(metadata.importance_history, options.pendingSignal);
+    const nextScore = Math.max(0, Math.min(2, emptyBase + trendStep));
+    return [IMPORTANCE_LABEL_BY_SCORE[nextScore]];
+  }
+
   const ratio = score / maxScore;
-  if (ratio >= 0.4) return ['Высокая'];
-  if (ratio >= 0.17) return ['Средняя'];
-  return ['Низкая'];
+  let baseScore = 0;
+  if (ratio >= 0.4) baseScore = 2;
+  else if (ratio >= 0.17) baseScore = 1;
+
+  const trendStep = computeImportanceTrendStep(metadata.importance_history, options.pendingSignal);
+  const adjustedScore = Math.max(0, Math.min(2, baseScore + trendStep));
+  return [IMPORTANCE_LABEL_BY_SCORE[adjustedScore]];
 }
 
-function applyImportancePolicy(rawMetadata) {
+function applyImportancePolicy(rawMetadata, options = {}) {
   const metadata = {
     ...toProfile(rawMetadata),
   };
+  const previousMetadata = toProfile(options.previousMetadata);
+  const nowIso = toTrimmedString(options.nowIso, 64) || new Date().toISOString();
+  const source = normalizeHistorySource(options.source);
+  const importanceReason = toTrimmedString(options.importanceReason, 240);
+  const requestedSignal = normalizeImportanceSignal(options.importanceSignal);
+
+  const previousImportance = normalizeImportanceArray(previousMetadata.importance)[0] || '';
+  const historySource = previousMetadata.importance_history || metadata.importance_history;
+  const importanceHistory = normalizeImportanceHistory(historySource);
 
   const hasDescription = toTrimmedString(metadata.description, 2200).length > 0;
   if (!hasDescription) {
     metadata.importance = [];
     metadata.importance_source = 'auto';
-    return metadata;
+  } else {
+    const sourceMode = normalizeImportanceSource(metadata.importance_source);
+    const manualImportance = normalizeImportanceArray(metadata.importance);
+    if (sourceMode === 'manual' && manualImportance.length) {
+      metadata.importance = manualImportance;
+      metadata.importance_source = 'manual';
+    } else {
+      metadata.importance = computeAutomaticImportance(
+        {
+          ...metadata,
+          importance_history: importanceHistory,
+        },
+        { pendingSignal: requestedSignal },
+      );
+      metadata.importance_source = 'auto';
+    }
   }
 
-  const source = normalizeImportanceSource(metadata.importance_source);
-  const manualImportance = normalizeImportanceArray(metadata.importance);
-  if (source === 'manual' && manualImportance.length) {
-    metadata.importance = manualImportance;
-    metadata.importance_source = 'manual';
-    return metadata;
+  const nextImportance = normalizeImportanceArray(metadata.importance)[0] || '';
+  const resolvedSignal = deriveImportanceSignal(previousImportance, nextImportance, requestedSignal);
+  const importanceChanged = previousImportance !== nextImportance;
+  if (resolvedSignal && (importanceChanged || requestedSignal || importanceReason)) {
+    importanceHistory.push(
+      compactObject({
+        at: nowIso,
+        before: previousImportance,
+        after: nextImportance,
+        signal: resolvedSignal,
+        source,
+        reason: importanceReason,
+      }),
+    );
   }
 
-  metadata.importance = computeAutomaticImportance(metadata);
-  metadata.importance_source = 'auto';
+  metadata.importance_history = importanceHistory.slice(-IMPORTANCE_HISTORY_LIMIT);
   return metadata;
 }
 
-function normalizeIncomingEntityPayload(rawPayload) {
+function enrichEntityMetadata(existingMetadata, incomingMetadata, options = {}) {
+  const previousMetadata = toProfile(existingMetadata);
+  const currentMetadata = toProfile(incomingMetadata);
+  const nextMetadata = {
+    ...previousMetadata,
+    ...currentMetadata,
+  };
+  const nowIso = new Date().toISOString();
+  const source = normalizeHistorySource(options.source);
+  const descriptionReason = toTrimmedString(options.descriptionReason, 240);
+  const requestedDescriptionChangeType = normalizeDescriptionChangeType(options.descriptionChangeType);
+
+  const previousDescription = toTrimmedString(previousMetadata.description, 2200);
+  const nextDescription = toTrimmedString(nextMetadata.description, 2200);
+  nextMetadata.description = nextDescription;
+
+  const descriptionHistory = normalizeDescriptionHistory(previousMetadata.description_history);
+  const previousDescriptionMeta = toProfile(previousMetadata.description_meta);
+  const previousVersionRaw = Number(previousDescriptionMeta.version);
+  let version = Number.isFinite(previousVersionRaw)
+    ? Math.max(0, Math.floor(previousVersionRaw))
+    : descriptionHistory.length;
+  let lastChangeType = normalizeDescriptionChangeType(
+    previousDescriptionMeta.lastChangeType || previousDescriptionMeta.changeType,
+  );
+  let lastSource = normalizeHistorySource(previousDescriptionMeta.lastSource || previousDescriptionMeta.source);
+  let lastUpdatedAt = normalizeIsoTimestamp(previousDescriptionMeta.lastUpdatedAt || previousDescriptionMeta.updatedAt);
+  let lastReason = toTrimmedString(previousDescriptionMeta.lastReason || previousDescriptionMeta.reason, 240);
+
+  if (nextDescription !== previousDescription) {
+    const resolvedChangeType =
+      resolveDescriptionChangeType(
+      previousDescription,
+      nextDescription,
+      requestedDescriptionChangeType,
+      ) || 'update';
+    const nowMs = Date.parse(nowIso);
+    const lastEntry = descriptionHistory[descriptionHistory.length - 1] || null;
+    const lastEntryAtMs = Date.parse(toTrimmedString(lastEntry?.at, 64));
+    const mergeWithLastManualEntry =
+      source === 'manual' &&
+      lastEntry &&
+      normalizeHistorySource(lastEntry.source) === 'manual' &&
+      Number.isFinite(lastEntryAtMs) &&
+      Number.isFinite(nowMs) &&
+      nowMs - lastEntryAtMs <= 90_000;
+
+    if (mergeWithLastManualEntry) {
+      lastEntry.at = nowIso;
+      lastEntry.changeType = resolvedChangeType;
+      lastEntry.nextDescription = nextDescription;
+      lastEntry.reason = descriptionReason;
+      version = Number.isFinite(Number(lastEntry.version)) ? Math.max(1, Math.floor(Number(lastEntry.version))) : version;
+    } else {
+      version += 1;
+      descriptionHistory.push(
+        compactObject({
+          at: nowIso,
+          version,
+          changeType: resolvedChangeType,
+          source: lastSource || source,
+          previousDescription,
+          nextDescription,
+          reason: descriptionReason,
+        }),
+      );
+    }
+
+    lastChangeType = resolvedChangeType;
+    lastSource = source;
+    lastUpdatedAt = nowIso;
+    lastReason = descriptionReason;
+  }
+
+  nextMetadata.description_history = descriptionHistory.slice(-DESCRIPTION_HISTORY_LIMIT);
+  nextMetadata.description_meta = compactObject({
+    version,
+    lastChangeType,
+    lastSource,
+    lastUpdatedAt,
+    lastReason,
+  });
+
+  const autoImportanceSignal =
+    normalizeImportanceSignal(options.importanceSignal) ||
+    normalizeImportanceSignal(currentMetadata.importance_signal) ||
+    normalizeImportanceSignal(toProfile(currentMetadata.ai_last_analysis).importanceSignal);
+  const autoImportanceReason =
+    toTrimmedString(options.importanceReason, 240) ||
+    toTrimmedString(currentMetadata.importance_reason, 240) ||
+    toTrimmedString(toProfile(currentMetadata.ai_last_analysis).importanceReason, 240);
+
+  const withImportance = applyImportancePolicy(nextMetadata, {
+    previousMetadata,
+    source,
+    importanceSignal: autoImportanceSignal,
+    importanceReason: autoImportanceReason,
+    nowIso,
+  });
+
+  delete withImportance.description_change_type;
+  delete withImportance.description_change_reason;
+  delete withImportance.importance_signal;
+  delete withImportance.importance_reason;
+  return withImportance;
+}
+
+function normalizeIncomingEntityPayload(rawPayload, options = {}) {
   const payload = rawPayload && typeof rawPayload === 'object' ? { ...rawPayload } : {};
   if (!payload.ai_metadata || typeof payload.ai_metadata !== 'object' || Array.isArray(payload.ai_metadata)) {
     return payload;
@@ -586,7 +911,9 @@ function normalizeIncomingEntityPayload(rawPayload) {
     metadata.importance_source = 'manual';
   }
 
-  payload.ai_metadata = applyImportancePolicy(metadata);
+  payload.ai_metadata = enrichEntityMetadata(options.existingMetadata, metadata, {
+    source: options.source,
+  });
   return payload;
 }
 
@@ -672,7 +999,11 @@ function normalizeEntityAnalysisOutput(entityType, rawResponse) {
   const parsed = toProfile(rawResponse);
   const status = toTrimmedString(parsed.status, 32) === 'need_clarification' ? 'need_clarification' : 'ready';
   const description = toTrimmedString(parsed.description, 2200);
+  const changeType = normalizeDescriptionChangeType(parsed.changeType);
+  const changeReason = toTrimmedString(parsed.changeReason, 240);
   const fields = normalizeEntityAnalysisFields(entityType, parsed.fields);
+  const importanceSignal = normalizeImportanceSignal(parsed.importanceSignal);
+  const importanceReason = toTrimmedString(parsed.importanceReason, 240);
   const clarifyingQuestions = normalizeEntityFieldArray(parsed.clarifyingQuestions, {
     maxItems: 3,
     itemMaxLength: 220,
@@ -686,7 +1017,11 @@ function normalizeEntityAnalysisOutput(entityType, rawResponse) {
   return {
     status,
     description,
+    changeType,
+    changeReason,
     fields,
+    importanceSignal,
+    importanceReason,
     clarifyingQuestions,
     ignoredNoise,
     confidence,
@@ -723,6 +1058,10 @@ function buildEntityAnalyzerSystemPrompt(entityType) {
     'importance: только одно из [Низкая, Средняя, Высокая], вернуть как массив из 0..1 элементов.',
     'links: только валидные URL.',
     'description: 3-6 предложений, емко и без воды.',
+    'changeType: одно из [initial, addition, update] относительно текущего описания.',
+    'changeReason: кратко (1-2 фразы), почему это initial/addition/update.',
+    'importanceSignal: одно из [increase, decrease, neutral] на основе новых фактов и истории.',
+    'importanceReason: кратко, почему важность нужно повысить/понизить/оставить.',
     'Если данных мало, status=need_clarification и до 3 уточняющих вопросов.',
     'Если данных хватает, status=ready.',
     'Верни СТРОГО JSON без markdown.',
@@ -730,7 +1069,11 @@ function buildEntityAnalyzerSystemPrompt(entityType) {
     '{',
     '  "status": "ready | need_clarification",',
     '  "description": "string",',
+    '  "changeType": "initial | addition | update",',
+    '  "changeReason": "string",',
     '  "fields": { "tags": [], "roles": [], ... },',
+    '  "importanceSignal": "increase | decrease | neutral",',
+    '  "importanceReason": "string",',
     '  "clarifyingQuestions": [],',
     '  "confidence": {},',
     '  "ignoredNoise": []',
@@ -752,6 +1095,25 @@ function buildEntityAnalyzerUserPrompt({
       id: String(entity._id),
       type: entity.type,
       name: toTrimmedString(entity.name, 120),
+    },
+    descriptionContext: {
+      currentDescription: toTrimmedString(toProfile(entity.ai_metadata).description, 2200),
+      recentDescriptionHistory: normalizeDescriptionHistory(toProfile(entity.ai_metadata).description_history)
+        .slice(-5)
+        .map((row) => ({
+          at: row.at,
+          changeType: row.changeType,
+          reason: row.reason,
+        })),
+      recentImportanceHistory: normalizeImportanceHistory(toProfile(entity.ai_metadata).importance_history)
+        .slice(-5)
+        .map((row) => ({
+          at: row.at,
+          before: row.before,
+          after: row.after,
+          signal: row.signal,
+          reason: row.reason,
+        })),
     },
     currentFields,
     message,
@@ -775,7 +1137,13 @@ function buildEntityAnalysisReplyText(analysis) {
   }
 
   if (analysis.description) {
-    return `Готово. Обновил описание и поля.\n\n${analysis.description}`;
+    const changeLabels = {
+      initial: 'Первичное описание',
+      addition: 'Описание дополнено',
+      update: 'Описание обновлено',
+    };
+    const changeLabel = changeLabels[analysis.changeType] || 'Описание обновлено';
+    return `Готово. ${changeLabel}.\n\n${analysis.description}`;
   }
 
   return 'Готово. Поля профиля обновлены.';
@@ -908,6 +1276,10 @@ function buildEntityMetadataPatch(entityType, existingMetadata, analysis) {
 
   nextMetadata.ai_last_analysis = {
     status: analysis.status,
+    changeType: normalizeDescriptionChangeType(analysis.changeType),
+    changeReason: toTrimmedString(analysis.changeReason, 240),
+    importanceSignal: normalizeImportanceSignal(analysis.importanceSignal),
+    importanceReason: toTrimmedString(analysis.importanceReason, 240),
     confidence: toProfile(analysis.confidence),
     clarifyingQuestions: normalizeEntityFieldArray(analysis.clarifyingQuestions, {
       maxItems: 3,
@@ -920,7 +1292,13 @@ function buildEntityMetadataPatch(entityType, existingMetadata, analysis) {
     updatedAt: new Date().toISOString(),
   };
 
-  return applyImportancePolicy(nextMetadata);
+  return enrichEntityMetadata(existingMetadata, nextMetadata, {
+    source: 'llm',
+    descriptionChangeType: analysis.changeType,
+    descriptionReason: analysis.changeReason,
+    importanceSignal: analysis.importanceSignal,
+    importanceReason: analysis.importanceReason,
+  });
 }
 
 function normalizeAgentHistory(rawHistory) {
@@ -4257,7 +4635,7 @@ app.get('/api/entities', async (req, res, next) => {
 app.post('/api/entities', async (req, res, next) => {
   try {
     const ownerId = requireOwnerId(req);
-    const payload = normalizeIncomingEntityPayload(req.body);
+    const payload = normalizeIncomingEntityPayload(req.body, { source: 'system' });
     payload.owner_id = ownerId;
 
     const entity = await Entity.create(payload);
@@ -4273,7 +4651,21 @@ app.post('/api/entities', async (req, res, next) => {
 app.put('/api/entities/:id', async (req, res, next) => {
   try {
     const ownerId = requireOwnerId(req);
-    const payload = normalizeIncomingEntityPayload(req.body);
+    const existingEntity = await Entity.findOne(
+      {
+        _id: req.params.id,
+        owner_id: ownerId,
+      },
+      { ai_metadata: 1 },
+    ).lean();
+    if (!existingEntity) {
+      return res.status(404).json({ message: 'Entity not found' });
+    }
+
+    const payload = normalizeIncomingEntityPayload(req.body, {
+      existingMetadata: existingEntity.ai_metadata,
+      source: 'manual',
+    });
     payload.owner_id = ownerId;
 
     const updatedEntity = await Entity.findOneAndUpdate(
