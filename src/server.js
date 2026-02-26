@@ -8,6 +8,7 @@ const { OAuth2Client } = require('google-auth-library');
 const connectDB = require('./config/db');
 const Entity = require('./models/Entity');
 const User = require('./models/User');
+const EntityVector = require('./models/EntityVector');
 
 dotenv.config();
 
@@ -25,9 +26,11 @@ const DEV_AUTH_ENABLED =
 const DEFAULT_ALLOWED_ORIGINS = ['http://localhost:5173', 'http://localhost:3000'];
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
 const OPENAI_MODEL = String(process.env.OPENAI_MODEL || 'gpt-4.1-mini').trim();
+const OPENAI_EMBEDDING_MODEL = String(process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small').trim();
 const AI_CONTEXT_ENTITY_LIMIT = Math.max(1, Number(process.env.AI_CONTEXT_ENTITY_LIMIT) || 120);
 const AI_HISTORY_MESSAGE_LIMIT = Math.max(1, Number(process.env.AI_HISTORY_MESSAGE_LIMIT) || 12);
 const AI_ATTACHMENT_LIMIT = Math.max(1, Number(process.env.AI_ATTACHMENT_LIMIT) || 6);
+const AI_DEBUG_ECHO = String(process.env.AI_DEBUG_ECHO || '').toLowerCase() === 'true';
 const ENTITY_TYPES = new Set([
   'project',
   'person',
@@ -39,6 +42,27 @@ const ENTITY_TYPES = new Set([
   'task',
   'shape',
 ]);
+const ENTITY_ANALYZER_FIELDS = Object.freeze({
+  person: ['tags', 'markers', 'roles', 'skills', 'links', 'importance'],
+  company: ['tags', 'industry', 'departments', 'stage', 'risks', 'links', 'importance'],
+  event: ['tags', 'date', 'location', 'participants', 'outcomes', 'links', 'importance'],
+  resource: ['tags', 'resources', 'status', 'owners', 'links', 'importance'],
+  goal: ['tags', 'priority', 'metrics', 'owners', 'status', 'links', 'importance'],
+  result: ['tags', 'outcomes', 'metrics', 'owners', 'links', 'importance'],
+  task: ['tags', 'priority', 'status', 'owners', 'date', 'links', 'importance'],
+  project: ['tags', 'stage', 'priority', 'risks', 'owners', 'links', 'importance'],
+  shape: ['tags', 'markers', 'status', 'links', 'importance'],
+});
+const ENTITY_IMPORTANCE_VALUES = ['low', 'medium', 'high', 'critical'];
+const ENTITY_VECTOR_WEIGHTS = Object.freeze({
+  description: 0.45,
+  roles: 0.15,
+  skills: 0.15,
+  tags: 0.1,
+  markers: 0.05,
+  links: 0.05,
+  nameType: 0.05,
+});
 
 function parseAllowedOrigins() {
   const raw = [
@@ -220,6 +244,396 @@ function compactObject(value) {
   }
 
   return value;
+}
+
+function getEntityAnalyzerFields(entityType) {
+  const fields = ENTITY_ANALYZER_FIELDS[entityType];
+  if (!Array.isArray(fields)) return ENTITY_ANALYZER_FIELDS.shape;
+  return fields;
+}
+
+function normalizeEntityFieldArray(value, options = {}) {
+  const maxItems = Number.isFinite(options.maxItems) ? Math.max(1, Math.floor(options.maxItems)) : 12;
+  const itemMaxLength = Number.isFinite(options.itemMaxLength)
+    ? Math.max(1, Math.floor(options.itemMaxLength))
+    : 64;
+
+  if (!Array.isArray(value)) {
+    if (typeof value === 'string') {
+      const trimmed = toTrimmedString(value, itemMaxLength);
+      return trimmed ? [trimmed] : [];
+    }
+    return [];
+  }
+
+  const dedup = new Set();
+  const result = [];
+  for (const item of value) {
+    const trimmed = toTrimmedString(item, itemMaxLength);
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (dedup.has(key)) continue;
+    dedup.add(key);
+    result.push(trimmed);
+    if (result.length >= maxItems) break;
+  }
+
+  return result;
+}
+
+function normalizeImportanceValue(value) {
+  const direct = toTrimmedString(value, 24).toLowerCase();
+  if (ENTITY_IMPORTANCE_VALUES.includes(direct)) return direct;
+
+  const map = {
+    низкая: 'low',
+    low: 'low',
+    medium: 'medium',
+    med: 'medium',
+    средняя: 'medium',
+    высокая: 'high',
+    high: 'high',
+    критично: 'critical',
+    критическая: 'critical',
+    критическаяя: 'critical',
+    critical: 'critical',
+  };
+
+  return map[direct] || '';
+}
+
+function normalizeEntityAnalysisFields(entityType, rawFields) {
+  const source = toProfile(rawFields);
+  const allowed = new Set(getEntityAnalyzerFields(entityType));
+  const normalized = {};
+
+  for (const field of allowed) {
+    if (field === 'importance') {
+      const direct = normalizeImportanceValue(source.importance);
+      const fromArray = normalizeEntityFieldArray(source.importance, { maxItems: 1, itemMaxLength: 24 })
+        .map((item) => normalizeImportanceValue(item))
+        .find(Boolean);
+      const importance = direct || fromArray || '';
+      normalized.importance = importance ? [importance] : [];
+      continue;
+    }
+
+    if (field === 'links') {
+      const rawLinks = Array.isArray(source.links) ? source.links : [];
+      const links = rawLinks
+        .map((item) => {
+          if (typeof item === 'string') return toTrimmedString(item, 240);
+          const row = toProfile(item);
+          return toTrimmedString(row.url || row.link || row.href || row.value, 240);
+        })
+        .filter(Boolean)
+        .slice(0, 12);
+      normalized.links = Array.from(new Set(links));
+      continue;
+    }
+
+    normalized[field] = normalizeEntityFieldArray(source[field], { maxItems: 12, itemMaxLength: 64 });
+  }
+
+  return normalized;
+}
+
+function normalizeConfidence(rawConfidence) {
+  const source = toProfile(rawConfidence);
+  const confidence = {};
+  const keys = ['description', ...ENTITY_IMPORTANCE_VALUES, ...Object.values(ENTITY_ANALYZER_FIELDS).flat()];
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value !== 'number' || !Number.isFinite(value)) continue;
+    confidence[key] = Math.min(1, Math.max(0, value));
+  }
+  return confidence;
+}
+
+function extractJsonObjectFromText(text) {
+  const trimmed = toTrimmedString(text, 80_000);
+  if (!trimmed) {
+    throw Object.assign(new Error('AI response is empty'), { status: 502 });
+  }
+
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    // continue
+  }
+
+  const fencedMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fencedMatch?.[1]) {
+    try {
+      return JSON.parse(fencedMatch[1].trim());
+    } catch {
+      // continue
+    }
+  }
+
+  const firstBrace = trimmed.indexOf('{');
+  const lastBrace = trimmed.lastIndexOf('}');
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    const candidate = trimmed.slice(firstBrace, lastBrace + 1);
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // continue
+    }
+  }
+
+  throw Object.assign(new Error('AI response is not valid JSON'), { status: 502 });
+}
+
+function normalizeEntityAnalysisOutput(entityType, rawResponse) {
+  const parsed = toProfile(rawResponse);
+  const status = toTrimmedString(parsed.status, 32) === 'need_clarification' ? 'need_clarification' : 'ready';
+  const description = toTrimmedString(parsed.description, 2200);
+  const fields = normalizeEntityAnalysisFields(entityType, parsed.fields);
+  const clarifyingQuestions = normalizeEntityFieldArray(parsed.clarifyingQuestions, {
+    maxItems: 3,
+    itemMaxLength: 220,
+  });
+  const ignoredNoise = normalizeEntityFieldArray(parsed.ignoredNoise, {
+    maxItems: 20,
+    itemMaxLength: 120,
+  });
+  const confidence = normalizeConfidence(parsed.confidence);
+
+  return {
+    status,
+    description,
+    fields,
+    clarifyingQuestions,
+    ignoredNoise,
+    confidence,
+  };
+}
+
+function buildEntityAnalyzerCurrentFields(entityType, aiMetadata) {
+  const allowed = getEntityAnalyzerFields(entityType);
+  const current = {};
+  for (const field of allowed) {
+    if (field === 'importance') {
+      current.importance = normalizeEntityAnalysisFields(entityType, { importance: aiMetadata.importance }).importance;
+      continue;
+    }
+    current[field] = normalizeEntityFieldArray(aiMetadata[field], {
+      maxItems: field === 'links' ? 12 : 8,
+      itemMaxLength: field === 'links' ? 240 : 64,
+    });
+  }
+
+  return current;
+}
+
+function buildEntityAnalyzerSystemPrompt(entityType) {
+  const allowedFields = getEntityAnalyzerFields(entityType);
+
+  return [
+    'Ты Synapse12 Entity Analyst.',
+    `Текущий тип сущности: ${entityType}.`,
+    'Работай только на данных из входного JSON.',
+    'Твоя задача: интерпретировать сырые пользовательские данные и вернуть структурированный JSON.',
+    'Нельзя превращать весь текст в теги. Добавляй только осмысленные признаки.',
+    `Разрешенные поля для fields: ${allowedFields.join(', ')}.`,
+    'importance: только одно из [low, medium, high, critical], вернуть как массив из 0..1 элементов.',
+    'links: только валидные URL.',
+    'description: 3-6 предложений, емко и без воды.',
+    'Если данных мало, status=need_clarification и до 3 уточняющих вопросов.',
+    'Если данных хватает, status=ready.',
+    'Верни СТРОГО JSON без markdown.',
+    'Формат:',
+    '{',
+    '  "status": "ready | need_clarification",',
+    '  "description": "string",',
+    '  "fields": { "tags": [], "roles": [], ... },',
+    '  "clarifyingQuestions": [],',
+    '  "confidence": {},',
+    '  "ignoredNoise": []',
+    '}',
+  ].join('\n');
+}
+
+function buildEntityAnalyzerUserPrompt({
+  entity,
+  message,
+  history,
+  attachments,
+  currentFields,
+  voiceInput,
+  documents,
+}) {
+  const contextPayload = {
+    entity: {
+      id: String(entity._id),
+      type: entity.type,
+      name: toTrimmedString(entity.name, 120),
+    },
+    currentFields,
+    message,
+    voiceInput,
+    history,
+    attachments,
+    documents,
+  };
+
+  return ['Контекст сущности (JSON):', JSON.stringify(contextPayload, null, 2)].join('\n');
+}
+
+function buildEntityAnalysisReplyText(analysis) {
+  if (analysis.status === 'need_clarification') {
+    if (analysis.clarifyingQuestions.length) {
+      return ['Нужны уточнения перед заполнением профиля:', ...analysis.clarifyingQuestions.map((q) => `- ${q}`)].join(
+        '\n',
+      );
+    }
+    return 'Нужны уточнения перед заполнением профиля.';
+  }
+
+  if (analysis.description) {
+    return `Готово. Обновил описание и поля.\n\n${analysis.description}`;
+  }
+
+  return 'Готово. Поля профиля обновлены.';
+}
+
+function buildEntityVectorContent(entity, analysis) {
+  const fields = analysis.fields || {};
+  const asText = (value) => (Array.isArray(value) ? value.filter(Boolean).join(', ') : '');
+  const chunks = [
+    toTrimmedString(entity.name, 160),
+    entity.type,
+    toTrimmedString(analysis.description, 4000),
+    asText(fields.roles),
+    asText(fields.skills),
+    asText(fields.tags),
+    asText(fields.markers),
+    asText(fields.links),
+  ].filter(Boolean);
+  return chunks.join('\n');
+}
+
+async function requestOpenAiEmbedding(text) {
+  if (!OPENAI_API_KEY) {
+    throw Object.assign(new Error('OPENAI_API_KEY is not configured'), { status: 503 });
+  }
+
+  const input = toTrimmedString(text, 12_000);
+  if (!input) return null;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+  let response;
+  let payload;
+
+  try {
+    response = await fetch('https://api.openai.com/v1/embeddings', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: OPENAI_EMBEDDING_MODEL,
+        input,
+      }),
+      signal: controller.signal,
+    });
+    payload = await response.json();
+  } catch (error) {
+    if (error && error.name === 'AbortError') {
+      throw Object.assign(new Error('Embedding request timeout'), { status: 504 });
+    }
+    throw Object.assign(new Error('Failed to call embedding provider'), { status: 502 });
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (!response.ok) {
+    const providerMessage =
+      toTrimmedString(payload?.error?.message, 300) || 'Embedding provider error';
+    throw Object.assign(new Error(providerMessage), { status: 502 });
+  }
+
+  const vector = Array.isArray(payload?.data?.[0]?.embedding) ? payload.data[0].embedding : [];
+  if (!vector.length) {
+    throw Object.assign(new Error('Embedding response is empty'), { status: 502 });
+  }
+
+  return vector;
+}
+
+async function upsertEntityVector(ownerId, entity, analysis) {
+  const content = buildEntityVectorContent(entity, analysis);
+  if (!content) {
+    return null;
+  }
+
+  const vector = await requestOpenAiEmbedding(content);
+  if (!vector) {
+    return null;
+  }
+
+  const saved = await EntityVector.findOneAndUpdate(
+    {
+      owner_id: ownerId,
+      entity_id: String(entity._id),
+    },
+    {
+      $set: {
+        owner_id: ownerId,
+        entity_id: String(entity._id),
+        entity_type: entity.type,
+        model: OPENAI_EMBEDDING_MODEL,
+        vector,
+        weights: ENTITY_VECTOR_WEIGHTS,
+        content: {
+          description: analysis.description,
+          fields: analysis.fields,
+        },
+      },
+    },
+    {
+      upsert: true,
+      new: true,
+      setDefaultsOnInsert: true,
+    },
+  ).lean();
+
+  return saved;
+}
+
+function buildEntityMetadataPatch(entityType, existingMetadata, analysis) {
+  const nextMetadata = {
+    ...toProfile(existingMetadata),
+  };
+
+  if (typeof analysis.description === 'string') {
+    nextMetadata.description = analysis.description;
+  }
+
+  const allowedFields = getEntityAnalyzerFields(entityType);
+  const normalizedFields = normalizeEntityAnalysisFields(entityType, analysis.fields);
+  for (const field of allowedFields) {
+    nextMetadata[field] = normalizedFields[field] || [];
+  }
+
+  nextMetadata.ai_last_analysis = {
+    status: analysis.status,
+    confidence: toProfile(analysis.confidence),
+    clarifyingQuestions: normalizeEntityFieldArray(analysis.clarifyingQuestions, {
+      maxItems: 3,
+      itemMaxLength: 220,
+    }),
+    ignoredNoise: normalizeEntityFieldArray(analysis.ignoredNoise, {
+      maxItems: 20,
+      itemMaxLength: 120,
+    }),
+    updatedAt: new Date().toISOString(),
+  };
+
+  return nextMetadata;
 }
 
 function normalizeAgentHistory(rawHistory) {
@@ -1032,6 +1446,32 @@ app.post('/api/ai/agent-chat', requireAuth, async (req, res, next) => {
       userPrompt,
     });
 
+    const includeDebug = AI_DEBUG_ECHO || req.body?.debug === true;
+    const debugPayload = includeDebug
+      ? {
+          scope: {
+            type: scopeContext.scopeType,
+            entityType: scopeContext.entityType,
+            projectId: scopeContext.projectId,
+            totalEntities: scopeContext.totalEntities,
+          },
+          input: {
+            message,
+            history,
+            attachments,
+          },
+          prompts: {
+            systemPrompt,
+            userPrompt,
+          },
+          response: {
+            reply: aiResponse.reply,
+            usage: aiResponse.usage,
+            model: OPENAI_MODEL,
+          },
+        }
+      : undefined;
+
     return res.status(200).json({
       reply: aiResponse.reply,
       usage: aiResponse.usage,
@@ -1043,6 +1483,174 @@ app.post('/api/ai/agent-chat', requireAuth, async (req, res, next) => {
         totalEntities: scopeContext.totalEntities,
         limitedTo: AI_CONTEXT_ENTITY_LIMIT,
       },
+      ...(debugPayload ? { debug: debugPayload } : {}),
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post('/api/ai/entity-analyze', requireAuth, async (req, res, next) => {
+  try {
+    const ownerId = requireOwnerId(req);
+    const entityId = toTrimmedString(req.body?.entityId, 80);
+    if (!entityId) {
+      return res.status(400).json({ message: 'entityId is required' });
+    }
+
+    const entity = await Entity.findOne({
+      _id: entityId,
+      owner_id: ownerId,
+    }).lean();
+
+    if (!entity) {
+      return res.status(404).json({ message: 'Entity not found' });
+    }
+
+    const message = toTrimmedString(req.body?.message, 4000);
+    const voiceInput = toTrimmedString(req.body?.voiceInput, 4000);
+    const history = normalizeAgentHistory(req.body?.history);
+    const attachments = normalizeAgentAttachments(req.body?.attachments);
+    const documents = normalizeAgentAttachments(req.body?.documents);
+
+    if (!message && !voiceInput && !history.length && !attachments.length && !documents.length) {
+      return res
+        .status(400)
+        .json({ message: 'message or at least one context item (history/attachments/documents) is required' });
+    }
+
+    const aiMetadata = toProfile(entity.ai_metadata);
+    const currentFields = buildEntityAnalyzerCurrentFields(entity.type, aiMetadata);
+    const systemPrompt = buildEntityAnalyzerSystemPrompt(entity.type);
+    const userPrompt = buildEntityAnalyzerUserPrompt({
+      entity,
+      message,
+      history,
+      attachments,
+      currentFields,
+      voiceInput,
+      documents,
+    });
+
+    const aiResponse = await requestOpenAiAgentReply({
+      systemPrompt,
+      userPrompt,
+    });
+
+    const parsedResponse = extractJsonObjectFromText(aiResponse.reply);
+    const analysis = normalizeEntityAnalysisOutput(entity.type, parsedResponse);
+    const reply = buildEntityAnalysisReplyText(analysis);
+
+    let vector = null;
+    let vectorWarning = '';
+    if (analysis.status === 'ready') {
+      try {
+        const vectorDoc = await upsertEntityVector(ownerId, entity, analysis);
+        if (vectorDoc) {
+          vector = {
+            id: String(vectorDoc._id),
+            model: vectorDoc.model,
+            dimensions: Array.isArray(vectorDoc.vector) ? vectorDoc.vector.length : 0,
+            updatedAt: vectorDoc.updatedAt,
+          };
+        }
+      } catch (error) {
+        vectorWarning = toTrimmedString(error?.message, 220) || 'Vector build failed';
+      }
+    }
+
+    const includeDebug = AI_DEBUG_ECHO || req.body?.debug === true;
+    const debugPayload = includeDebug
+      ? {
+          entity: {
+            id: String(entity._id),
+            type: entity.type,
+            name: entity.name || '',
+          },
+          input: {
+            message,
+            voiceInput,
+            history,
+            attachments,
+            documents,
+            currentFields,
+          },
+          prompts: {
+            systemPrompt,
+            userPrompt,
+          },
+          response: {
+            raw: aiResponse.reply,
+            parsed: parsedResponse,
+            normalized: analysis,
+            reply,
+            usage: aiResponse.usage,
+            model: OPENAI_MODEL,
+          },
+          vector: vector || null,
+          vectorWarning: vectorWarning || '',
+        }
+      : undefined;
+
+    return res.status(200).json({
+      reply,
+      suggestion: analysis,
+      usage: aiResponse.usage,
+      model: OPENAI_MODEL,
+      vector,
+      ...(vectorWarning ? { vectorWarning } : {}),
+      ...(debugPayload ? { debug: debugPayload } : {}),
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post('/api/ai/entity-apply', requireAuth, async (req, res, next) => {
+  try {
+    const ownerId = requireOwnerId(req);
+    const entityId = toTrimmedString(req.body?.entityId, 80);
+    if (!entityId) {
+      return res.status(400).json({ message: 'entityId is required' });
+    }
+
+    const entity = await Entity.findOne({
+      _id: entityId,
+      owner_id: ownerId,
+    });
+
+    if (!entity) {
+      return res.status(404).json({ message: 'Entity not found' });
+    }
+
+    const analysis = normalizeEntityAnalysisOutput(entity.type, req.body?.suggestion);
+    const nextMetadata = buildEntityMetadataPatch(entity.type, entity.ai_metadata, analysis);
+    entity.ai_metadata = nextMetadata;
+    await entity.save();
+
+    let vector = null;
+    let vectorWarning = '';
+    if (analysis.status === 'ready') {
+      try {
+        const vectorDoc = await upsertEntityVector(ownerId, entity, analysis);
+        if (vectorDoc) {
+          vector = {
+            id: String(vectorDoc._id),
+            model: vectorDoc.model,
+            dimensions: Array.isArray(vectorDoc.vector) ? vectorDoc.vector.length : 0,
+            updatedAt: vectorDoc.updatedAt,
+          };
+        }
+      } catch (error) {
+        vectorWarning = toTrimmedString(error?.message, 220) || 'Vector build failed';
+      }
+    }
+
+    return res.status(200).json({
+      entity,
+      suggestion: analysis,
+      vector,
+      ...(vectorWarning ? { vectorWarning } : {}),
     });
   } catch (error) {
     return next(error);
@@ -1186,7 +1794,11 @@ async function startServer() {
     console.warn('[auth] SESSION_SECRET is not set. Session endpoints will be unavailable.');
   }
   if (!OPENAI_API_KEY) {
-    console.warn('[ai] OPENAI_API_KEY is not set. /api/ai/agent-chat will be unavailable.');
+    console.warn('[ai] OPENAI_API_KEY is not set. /api/ai/* endpoints will be unavailable.');
+  } else {
+    console.warn(
+      `[ai] Enabled models: chat=${OPENAI_MODEL}, embedding=${OPENAI_EMBEDDING_MODEL}, debugEcho=${AI_DEBUG_ECHO}`,
+    );
   }
   if (DEV_AUTH_ENABLED) {
     console.warn('[auth] DEV_AUTH_ENABLED=true. /api/auth/dev-login is available (development only).');
