@@ -1498,6 +1498,13 @@ function clearWhatsappSessionIdleTimer(session) {
   }
 }
 
+function clearWhatsappSessionReconnectTimer(session) {
+  if (session?.reconnectTimer) {
+    clearTimeout(session.reconnectTimer);
+    session.reconnectTimer = null;
+  }
+}
+
 function scheduleWhatsappSessionIdleTimer(ownerId, session) {
   clearWhatsappSessionIdleTimer(session);
   if (!ownerId || !session) return;
@@ -1540,6 +1547,7 @@ async function stopOwnerWhatsappSession(ownerId, reason = '') {
 
   clearWhatsappSessionInitTimer(session);
   clearWhatsappSessionIdleTimer(session);
+  clearWhatsappSessionReconnectTimer(session);
   whatsappSessionsByOwner.delete(ownerId);
 
   if (session.client) {
@@ -1593,6 +1601,8 @@ function createBaseWhatsappSession(ownerId, connector) {
     lastImportedAt: '',
     idleTimer: null,
     initTimer: null,
+    reconnectTimer: null,
+    restartAttempts: 0,
     client: null,
     store: null,
     authDir: '',
@@ -1754,75 +1764,180 @@ async function ensureOwnerWhatsappSessionBaileys(ownerId) {
       : { version: undefined };
 
   const store = makeInMemoryStore ? makeInMemoryStore({}) : null;
-  const socket = makeWASocket({
-    auth: state,
-    printQRInTerminal: false,
-    markOnlineOnConnect: false,
-    syncFullHistory: false,
-    browser: ['Synapse12', 'Chrome', '1.0.0'],
-    ...(Array.isArray(versionData?.version) ? { version: versionData.version } : {}),
-  });
-
-  if (store && typeof store.bind === 'function') {
-    store.bind(socket.ev);
-  }
-
   const session = createBaseWhatsappSession(ownerId, 'baileys');
-  session.client = socket;
   session.store = store;
   session.authDir = authDir;
+  const retryableDisconnectCodes = new Set(
+    [
+      DisconnectReason?.connectionClosed,
+      DisconnectReason?.connectionLost,
+      DisconnectReason?.timedOut,
+      DisconnectReason?.restartRequired,
+    ]
+      .map((code) => Number(code))
+      .filter((code) => Number.isFinite(code) && code > 0),
+  );
 
-  session.credsListener = () => {
-    saveCreds().catch(() => {
-      // Ignore auth state persistence errors.
+  function createSocket() {
+    return makeWASocket({
+      auth: state,
+      printQRInTerminal: false,
+      markOnlineOnConnect: false,
+      syncFullHistory: false,
+      browser: ['Synapse12', 'Chrome', '1.0.0'],
+      ...(Array.isArray(versionData?.version) ? { version: versionData.version } : {}),
     });
-  };
-  socket.ev.on('creds.update', session.credsListener);
+  }
 
-  session.connectionListener = async (update) => {
-    const { connection, qr, lastDisconnect } = update || {};
-
-    if (qr) {
+  function detachSocketListeners(socket) {
+    if (!socket?.ev || typeof socket.ev.off !== 'function') return;
+    if (session.connectionListener) {
       try {
-        clearWhatsappSessionInitTimer(session);
-        session.qrCodeDataUrl = await QRCode.toDataURL(qr, {
-          width: 300,
-          margin: 1,
-        });
-        session.status = 'qr';
-        session.error = '';
-        touchWhatsappSession(session, ownerId);
-      } catch (error) {
-        session.status = 'error';
-        session.error = toTrimmedString(error?.message, 260) || 'Failed to render QR code';
-        touchWhatsappSession(session, ownerId);
+        socket.ev.off('connection.update', session.connectionListener);
+      } catch {
+        // Ignore detach error.
       }
     }
+    if (session.credsListener) {
+      try {
+        socket.ev.off('creds.update', session.credsListener);
+      } catch {
+        // Ignore detach error.
+      }
+    }
+  }
 
-    if (connection === 'open') {
-      clearWhatsappSessionInitTimer(session);
-      session.status = 'ready';
-      session.qrCodeDataUrl = '';
-      session.error = '';
-      touchWhatsappSession(session, ownerId);
+  async function closeSocket(socket, reason = 'Session reconnect') {
+    if (!socket) return;
+    try {
+      if (socket.ws && typeof socket.ws.close === 'function') {
+        socket.ws.close();
+      }
+    } catch {
+      // Ignore close errors.
+    }
+    try {
+      if (typeof socket.end === 'function') {
+        socket.end(new Error(reason));
+      }
+    } catch {
+      // Ignore close errors.
+    }
+  }
+
+  async function restartSocket(delayMs = 800) {
+    const activeSession = getOwnerWhatsappSession(ownerId);
+    if (!activeSession || activeSession.id !== session.id) {
       return;
     }
 
-    if (connection === 'close') {
-      clearWhatsappSessionInitTimer(session);
-      const statusCode = Number(lastDisconnect?.error?.output?.statusCode) || 0;
-
-      if (statusCode === DisconnectReason?.loggedOut) {
-        session.status = 'disconnected';
-        session.error = 'Logged out from WhatsApp. Scan QR again.';
-      } else {
-        session.status = 'error';
-        session.error = 'WhatsApp socket disconnected. Please retry QR.';
+    clearWhatsappSessionReconnectTimer(session);
+    session.reconnectTimer = setTimeout(async () => {
+      const latestSession = getOwnerWhatsappSession(ownerId);
+      if (!latestSession || latestSession.id !== session.id) {
+        return;
       }
+
+      const previousSocket = session.client;
+      detachSocketListeners(previousSocket);
+      await closeSocket(previousSocket);
+
+      const nextSocket = createSocket();
+      bindSocket(nextSocket);
+      clearWhatsappSessionInitTimer(session);
+      attachWhatsappInitTimeout(ownerId, session, 'Initialization timed out. Socket did not return QR in time.');
       touchWhatsappSession(session, ownerId);
+    }, Math.max(300, delayMs));
+
+    if (typeof session.reconnectTimer?.unref === 'function') {
+      session.reconnectTimer.unref();
     }
-  };
-  socket.ev.on('connection.update', session.connectionListener);
+  }
+
+  function bindSocket(socket) {
+    session.client = socket;
+
+    if (store && typeof store.bind === 'function') {
+      store.bind(socket.ev);
+    }
+
+    session.credsListener = () => {
+      saveCreds().catch(() => {
+        // Ignore auth state persistence errors.
+      });
+    };
+    socket.ev.on('creds.update', session.credsListener);
+
+    session.connectionListener = async (update) => {
+      const { connection, qr, lastDisconnect } = update || {};
+
+      if (qr) {
+        try {
+          clearWhatsappSessionInitTimer(session);
+          session.qrCodeDataUrl = await QRCode.toDataURL(qr, {
+            width: 300,
+            margin: 1,
+          });
+          session.status = 'qr';
+          session.error = '';
+          touchWhatsappSession(session, ownerId);
+        } catch (error) {
+          session.status = 'error';
+          session.error = toTrimmedString(error?.message, 260) || 'Failed to render QR code';
+          touchWhatsappSession(session, ownerId);
+        }
+      }
+
+      if (connection === 'open') {
+        clearWhatsappSessionInitTimer(session);
+        clearWhatsappSessionReconnectTimer(session);
+        session.restartAttempts = 0;
+        session.status = 'ready';
+        session.qrCodeDataUrl = '';
+        session.error = '';
+        touchWhatsappSession(session, ownerId);
+        return;
+      }
+
+      if (connection === 'close') {
+        clearWhatsappSessionInitTimer(session);
+        const statusCode = Number(lastDisconnect?.error?.output?.statusCode) || 0;
+        const isLoggedOut = statusCode === Number(DisconnectReason?.loggedOut || 0);
+        const shouldRetry =
+          !isLoggedOut && (statusCode === 0 || retryableDisconnectCodes.has(statusCode));
+
+        if (shouldRetry) {
+          if (session.restartAttempts < 6) {
+            session.restartAttempts += 1;
+            session.status = 'initializing';
+            session.qrCodeDataUrl = '';
+            session.error = '';
+            touchWhatsappSession(session, ownerId);
+            await restartSocket(Math.min(5000, 800 * session.restartAttempts));
+            return;
+          }
+
+          session.status = 'error';
+          session.error = `WhatsApp socket reconnect failed (code ${statusCode || 'unknown'}). Retry QR.`;
+          touchWhatsappSession(session, ownerId);
+          return;
+        }
+
+        if (isLoggedOut) {
+          session.status = 'disconnected';
+          session.error = 'Logged out from WhatsApp. Scan QR again.';
+        } else {
+          session.status = 'error';
+          session.error = `WhatsApp socket disconnected (code ${statusCode || 'unknown'}). Please retry QR.`;
+        }
+        touchWhatsappSession(session, ownerId);
+      }
+    };
+
+    socket.ev.on('connection.update', session.connectionListener);
+  }
+
+  bindSocket(createSocket());
 
   whatsappSessionsByOwner.set(ownerId, session);
   attachWhatsappInitTimeout(ownerId, session, 'Initialization timed out. Socket did not return QR in time.');
