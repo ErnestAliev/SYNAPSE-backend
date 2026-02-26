@@ -76,10 +76,10 @@ const WHATSAPP_SESSION_IDLE_TIMEOUT_MS = Math.max(
   Number(process.env.WHATSAPP_SESSION_IDLE_TIMEOUT_MS) || 5 * 60 * 1000,
 );
 const WHATSAPP_IMAGE_FETCH_ENABLED =
-  String(process.env.WHATSAPP_IMAGE_FETCH_ENABLED || (IS_PRODUCTION ? 'false' : 'true')).toLowerCase() !== 'false';
+  String(process.env.WHATSAPP_IMAGE_FETCH_ENABLED || 'true').toLowerCase() !== 'false';
 const WHATSAPP_IMAGE_IMPORT_MAX_COUNT = Math.max(
   0,
-  Number(process.env.WHATSAPP_IMAGE_IMPORT_MAX_COUNT) || 300,
+  Number(process.env.WHATSAPP_IMAGE_IMPORT_MAX_COUNT) || WHATSAPP_CONTACT_IMPORT_LIMIT,
 );
 const WHATSAPP_IMAGE_IMPORT_CONCURRENCY = Math.max(
   1,
@@ -2761,6 +2761,8 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
       receivedPendingNotifications: session.receivedPendingNotifications,
       mirroredContacts: session?.contactsMirror instanceof Map ? session.contactsMirror.size : 0,
       mirroredChats: session?.chatsMirror instanceof Map ? session.chatsMirror.size : 0,
+      imageFetchEnabled: WHATSAPP_IMAGE_FETCH_ENABLED,
+      imageMaxCount: WHATSAPP_IMAGE_IMPORT_MAX_COUNT,
     });
 
     if (session.connector === 'baileys' && !session.receivedPendingNotifications) {
@@ -3142,6 +3144,32 @@ app.post('/api/integrations/whatsapp/photos/backfill', requireAuth, async (req, 
     if (!session.client) {
       return res.status(500).json({ message: 'WhatsApp client is unavailable for this session.' });
     }
+
+    if (!WHATSAPP_IMAGE_FETCH_ENABLED) {
+      appendWhatsappSessionLog(session, 'photos.backfill.skip', {
+        reason: 'image_fetch_disabled',
+      });
+      return res.status(409).json({
+        message: 'WhatsApp image fetch is disabled on server (WHATSAPP_IMAGE_FETCH_ENABLED=false).',
+        session: toWhatsappSessionStatus(session),
+      });
+    }
+
+    const cleanupResult = await Entity.updateMany(
+      {
+        owner_id: ownerId,
+        type: 'connection',
+        'profile.source': 'whatsapp',
+      },
+      {
+        $pull: {
+          'ai_metadata.roles': 'Контакт',
+        },
+      },
+    );
+    appendWhatsappSessionLog(session, 'photos.backfill.roles.cleanup', {
+      modified: Number(cleanupResult?.modifiedCount) || 0,
+    });
 
     const query = {
       owner_id: ownerId,
