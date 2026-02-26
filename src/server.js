@@ -1493,7 +1493,13 @@ async function ensureOwnerWhatsappSession(ownerId) {
       '--no-zygote',
     ],
   };
-  if (toTrimmedString(process.env.PUPPETEER_EXECUTABLE_PATH, 2048)) {
+  const puppeteerBrowserWSEndpoint = toTrimmedString(process.env.PUPPETEER_BROWSER_WS_ENDPOINT, 2048);
+  if (puppeteerBrowserWSEndpoint) {
+    puppeteerOptions.browserWSEndpoint = puppeteerBrowserWSEndpoint;
+    delete puppeteerOptions.executablePath;
+    delete puppeteerOptions.args;
+  }
+  if (!puppeteerBrowserWSEndpoint && toTrimmedString(process.env.PUPPETEER_EXECUTABLE_PATH, 2048)) {
     puppeteerOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
   }
 
@@ -2654,6 +2660,9 @@ async function startServer() {
     console.warn(
       `[integrations] WhatsApp settings: contactsLimit=${WHATSAPP_CONTACT_IMPORT_LIMIT}, imageFetch=${WHATSAPP_IMAGE_FETCH_ENABLED}, imageMaxCount=${WHATSAPP_IMAGE_IMPORT_MAX_COUNT}, sessionIdleMs=${WHATSAPP_SESSION_IDLE_TIMEOUT_MS}, initTimeoutMs=${WHATSAPP_INIT_TIMEOUT_MS}, maxSessions=${WHATSAPP_MAX_CONCURRENT_SESSIONS}`,
     );
+    if (toTrimmedString(process.env.PUPPETEER_BROWSER_WS_ENDPOINT, 2048)) {
+      console.warn('[integrations] WhatsApp uses remote browser via PUPPETEER_BROWSER_WS_ENDPOINT.');
+    }
   }
   if (!sharp) {
     console.warn(
