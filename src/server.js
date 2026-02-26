@@ -3,12 +3,35 @@ const cors = require('cors');
 const dotenv = require('dotenv');
 const cookieParser = require('cookie-parser');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const { OAuth2Client } = require('google-auth-library');
 
 const connectDB = require('./config/db');
 const Entity = require('./models/Entity');
 const User = require('./models/User');
 const EntityVector = require('./models/EntityVector');
+
+let whatsappWeb = null;
+let QRCode = null;
+let sharp = null;
+
+try {
+  whatsappWeb = require('whatsapp-web.js');
+} catch {
+  whatsappWeb = null;
+}
+
+try {
+  QRCode = require('qrcode');
+} catch {
+  QRCode = null;
+}
+
+try {
+  sharp = require('sharp');
+} catch {
+  sharp = null;
+}
 
 dotenv.config();
 
@@ -31,6 +54,10 @@ const AI_CONTEXT_ENTITY_LIMIT = Math.max(1, Number(process.env.AI_CONTEXT_ENTITY
 const AI_HISTORY_MESSAGE_LIMIT = Math.max(1, Number(process.env.AI_HISTORY_MESSAGE_LIMIT) || 12);
 const AI_ATTACHMENT_LIMIT = Math.max(1, Number(process.env.AI_ATTACHMENT_LIMIT) || 6);
 const AI_DEBUG_ECHO = String(process.env.AI_DEBUG_ECHO || '').toLowerCase() === 'true';
+const WHATSAPP_CONTACT_IMPORT_LIMIT = Math.max(1, Number(process.env.WHATSAPP_CONTACT_IMPORT_LIMIT) || 2500);
+const WHATSAPP_IMPORT_CONCURRENCY = Math.max(1, Number(process.env.WHATSAPP_IMPORT_CONCURRENCY) || 4);
+const WHATSAPP_IMAGE_MAX_BYTES = Math.max(40_000, Number(process.env.WHATSAPP_IMAGE_MAX_BYTES) || 260_000);
+const WHATSAPP_MEDIA_TIMEOUT_MS = Math.max(5_000, Number(process.env.WHATSAPP_MEDIA_TIMEOUT_MS) || 15_000);
 const ENTITY_TYPES = new Set([
   'project',
   'connection',
@@ -65,6 +92,7 @@ const ENTITY_VECTOR_WEIGHTS = Object.freeze({
   links: 0.05,
   nameType: 0.05,
 });
+const whatsappSessionsByOwner = new Map();
 
 function parseAllowedOrigins() {
   const raw = [
@@ -1280,6 +1308,271 @@ function normalizePhone(value) {
   return hasPlus ? `+${digits}` : digits;
 }
 
+function sanitizeOwnerSessionKey(ownerId) {
+  return toTrimmedString(String(ownerId || '').replace(/[^a-zA-Z0-9_-]/g, '_'), 64) || 'owner';
+}
+
+function createWhatsappSessionId() {
+  if (typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `wa-${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
+}
+
+function isWhatsappIntegrationAvailable() {
+  return Boolean(whatsappWeb && QRCode);
+}
+
+function toWhatsappSessionStatus(session) {
+  return {
+    sessionId: session.id,
+    status: session.status,
+    qrCodeDataUrl: session.qrCodeDataUrl || '',
+    error: session.error || '',
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    lastImportedAt: session.lastImportedAt || '',
+  };
+}
+
+function touchWhatsappSession(session) {
+  session.updatedAt = new Date().toISOString();
+}
+
+function getOwnerWhatsappSession(ownerId) {
+  return whatsappSessionsByOwner.get(ownerId) || null;
+}
+
+async function stopOwnerWhatsappSession(ownerId, reason = '') {
+  const session = getOwnerWhatsappSession(ownerId);
+  if (!session) return;
+
+  whatsappSessionsByOwner.delete(ownerId);
+
+  if (session.client) {
+    try {
+      await session.client.destroy();
+    } catch {
+      // Ignore client destroy errors.
+    }
+  }
+
+  session.status = 'disconnected';
+  session.error = reason || session.error || 'Session stopped';
+  touchWhatsappSession(session);
+}
+
+async function ensureOwnerWhatsappSession(ownerId) {
+  if (!isWhatsappIntegrationAvailable()) {
+    throw Object.assign(
+      new Error('WhatsApp integration is unavailable. Install whatsapp-web.js and qrcode on backend.'),
+      { status: 503 },
+    );
+  }
+
+  const existing = getOwnerWhatsappSession(ownerId);
+  if (existing && ['initializing', 'qr', 'ready', 'importing'].includes(existing.status)) {
+    return existing;
+  }
+
+  if (existing) {
+    await stopOwnerWhatsappSession(ownerId, 'Restarting session');
+  }
+
+  const { Client, LocalAuth } = whatsappWeb;
+  const ownerSessionKey = sanitizeOwnerSessionKey(ownerId);
+  const session = {
+    id: createWhatsappSessionId(),
+    ownerId,
+    status: 'initializing',
+    qrCodeDataUrl: '',
+    error: '',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    lastImportedAt: '',
+    client: null,
+  };
+
+  const client = new Client({
+    authStrategy: new LocalAuth({
+      clientId: `synapse12_${ownerSessionKey}`,
+    }),
+    puppeteer: {
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+    },
+  });
+
+  session.client = client;
+  whatsappSessionsByOwner.set(ownerId, session);
+
+  client.on('qr', async (qr) => {
+    try {
+      session.qrCodeDataUrl = await QRCode.toDataURL(qr, {
+        width: 300,
+        margin: 1,
+      });
+      session.status = 'qr';
+      session.error = '';
+      touchWhatsappSession(session);
+    } catch (error) {
+      session.status = 'error';
+      session.error = toTrimmedString(error?.message, 260) || 'Failed to render QR code';
+      touchWhatsappSession(session);
+    }
+  });
+
+  client.on('ready', () => {
+    session.status = 'ready';
+    session.qrCodeDataUrl = '';
+    session.error = '';
+    touchWhatsappSession(session);
+  });
+
+  client.on('auth_failure', (message) => {
+    session.status = 'error';
+    session.error = toTrimmedString(String(message || 'Authentication failed'), 260);
+    touchWhatsappSession(session);
+  });
+
+  client.on('disconnected', (reason) => {
+    session.status = 'disconnected';
+    session.error = toTrimmedString(String(reason || 'Disconnected'), 260);
+    touchWhatsappSession(session);
+  });
+
+  client
+    .initialize()
+    .catch((error) => {
+      session.status = 'error';
+      session.error = toTrimmedString(error?.message, 260) || 'Failed to initialize WhatsApp client';
+      touchWhatsappSession(session);
+    });
+
+  return session;
+}
+
+async function mapWithConcurrency(items, limit, iterator) {
+  const maxWorkers = Math.max(1, Math.min(limit, items.length || 1));
+  const results = new Array(items.length);
+  let cursor = 0;
+
+  async function worker() {
+    while (true) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= items.length) break;
+      try {
+        results[index] = await iterator(items[index], index);
+      } catch {
+        results[index] = null;
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: maxWorkers }, () => worker()));
+  return results;
+}
+
+async function fetchWhatsappImageDataUrl(url) {
+  const sourceUrl = toTrimmedString(url, 2048);
+  if (!sourceUrl) return '';
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), WHATSAPP_MEDIA_TIMEOUT_MS);
+  let response;
+
+  try {
+    response = await fetch(sourceUrl, {
+      signal: controller.signal,
+    });
+  } catch {
+    clearTimeout(timeout);
+    return '';
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (!response || !response.ok) return '';
+
+  const contentType = toTrimmedString(response.headers.get('content-type') || '', 80).toLowerCase();
+  if (!contentType.startsWith('image/')) return '';
+
+  const rawBuffer = Buffer.from(await response.arrayBuffer());
+  if (!rawBuffer.length) return '';
+
+  if (sharp) {
+    try {
+      let compressed = await sharp(rawBuffer)
+        .resize(320, 320, { fit: 'cover' })
+        .jpeg({ quality: 72, mozjpeg: true })
+        .toBuffer();
+
+      if (compressed.length > WHATSAPP_IMAGE_MAX_BYTES) {
+        compressed = await sharp(rawBuffer)
+          .resize(256, 256, { fit: 'cover' })
+          .jpeg({ quality: 58, mozjpeg: true })
+          .toBuffer();
+      }
+
+      if (compressed.length <= WHATSAPP_IMAGE_MAX_BYTES) {
+        return `data:image/jpeg;base64,${compressed.toString('base64')}`;
+      }
+    } catch {
+      // Fallback to raw image if possible.
+    }
+  }
+
+  if (rawBuffer.length > WHATSAPP_IMAGE_MAX_BYTES) {
+    return '';
+  }
+
+  return `data:${contentType};base64,${rawBuffer.toString('base64')}`;
+}
+
+async function readWhatsappContactAbout(contact) {
+  if (!contact || typeof contact !== 'object') return '';
+
+  if (typeof contact.getAbout === 'function') {
+    try {
+      const about = await contact.getAbout();
+      if (typeof about === 'string') return toTrimmedString(about, 1200);
+      if (about && typeof about === 'object') {
+        return toTrimmedString(about.status || about.about || about.text, 1200);
+      }
+    } catch {
+      // Ignore unavailable about.
+    }
+  }
+
+  if (typeof contact.about === 'string') {
+    return toTrimmedString(contact.about, 1200);
+  }
+
+  if (typeof contact.status === 'string') {
+    return toTrimmedString(contact.status, 1200);
+  }
+
+  return '';
+}
+
+function normalizeWhatsappLinks(rawLinks) {
+  if (!Array.isArray(rawLinks)) return [];
+  const links = [];
+  for (const row of rawLinks) {
+    if (typeof row === 'string') {
+      const value = toTrimmedString(row, 240);
+      if (value) links.push(value);
+      continue;
+    }
+    if (row && typeof row === 'object') {
+      const value = toTrimmedString(row.url || row.link || row.website || row.href || row.value, 240);
+      if (value) links.push(value);
+    }
+  }
+  return Array.from(new Set(links)).slice(0, 12);
+}
+
 function normalizeWhatsappContact(rawContact, index) {
   const row = toProfile(rawContact);
   const nameCandidates = [
@@ -1309,11 +1602,12 @@ function normalizeWhatsappContact(rawContact, index) {
   const tags = normalizeEntityFieldArray(row.tags, { maxItems: 12, itemMaxLength: 64 });
   const markers = normalizeEntityFieldArray(row.markers, { maxItems: 12, itemMaxLength: 64 });
   const roles = normalizeEntityFieldArray(row.roles, { maxItems: 8, itemMaxLength: 64 });
-  const links = normalizeEntityFieldArray(row.links, { maxItems: 12, itemMaxLength: 240 });
+  const links = normalizeWhatsappLinks(Array.isArray(row.links) ? row.links : []);
   const status = normalizeEntityFieldArray(
     Array.isArray(row.statuses) ? row.statuses : [row.status].filter(Boolean),
     { maxItems: 4, itemMaxLength: 64 },
   );
+  const image = toTrimmedString(row.image, 10_000_000);
 
   if (!name && !phone && !description) {
     return null;
@@ -1338,34 +1632,8 @@ function normalizeWhatsappContact(rawContact, index) {
     roles,
     links,
     status,
+    image,
   };
-}
-
-function buildDemoWhatsappContacts() {
-  return [
-    {
-      name: 'Анна Литвинова',
-      phone: '+7 (701) 111-22-33',
-      description: 'Маркетинг, B2B продажи, запуск партнерств.',
-      tags: ['Маркетинг', 'B2B'],
-      roles: ['Партнер'],
-      links: ['https://www.linkedin.com'],
-    },
-    {
-      name: 'Илья Петров',
-      phone: '+7 (702) 222-33-44',
-      description: 'Разработка, интеграции, автоматизация процессов.',
-      tags: ['Технологии'],
-      roles: ['Разработчик'],
-    },
-    {
-      name: 'ООО "Вектор"',
-      phone: '+7 (703) 333-44-55',
-      description: 'Поставщик оборудования и логистических сервисов.',
-      tags: ['Поставщик'],
-      roles: ['Компания'],
-    },
-  ];
 }
 
 async function migrateLegacyShapeNames() {
@@ -1396,29 +1664,145 @@ async function migrateLegacyShapeNames() {
   console.log(`[migration] shape names renamed to "Элемент": ${operations.length}`);
 }
 
+app.post('/api/integrations/whatsapp/session/start', requireAuth, async (req, res, next) => {
+  try {
+    const ownerId = requireOwnerId(req);
+    const session = await ensureOwnerWhatsappSession(ownerId);
+    return res.status(200).json({
+      integration: 'whatsapp',
+      session: toWhatsappSessionStatus(session),
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.get('/api/integrations/whatsapp/session/:sessionId', requireAuth, async (req, res) => {
+  const ownerId = requireOwnerId(req);
+  const sessionId = toTrimmedString(req.params.sessionId, 120);
+  const session = getOwnerWhatsappSession(ownerId);
+
+  if (!session || session.id !== sessionId) {
+    return res.status(404).json({ message: 'WhatsApp session not found' });
+  }
+
+  return res.status(200).json({
+    integration: 'whatsapp',
+    session: toWhatsappSessionStatus(session),
+  });
+});
+
+app.delete('/api/integrations/whatsapp/session/:sessionId', requireAuth, async (req, res, next) => {
+  try {
+    const ownerId = requireOwnerId(req);
+    const sessionId = toTrimmedString(req.params.sessionId, 120);
+    const session = getOwnerWhatsappSession(ownerId);
+    if (!session || session.id !== sessionId) {
+      return res.status(404).json({ message: 'WhatsApp session not found' });
+    }
+    await stopOwnerWhatsappSession(ownerId, 'Closed by user');
+    return res.status(204).send();
+  } catch (error) {
+    return next(error);
+  }
+});
+
 app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next) => {
   try {
     const ownerId = requireOwnerId(req);
+    const sessionId = toTrimmedString(req.body?.sessionId, 120);
+    const session = getOwnerWhatsappSession(ownerId);
 
-    const inputContacts = Array.isArray(req.body?.contacts) ? req.body.contacts : [];
-    const sourceContacts = inputContacts.length ? inputContacts : buildDemoWhatsappContacts();
-
-    const normalizedUnique = Array.from(
-      sourceContacts
-        .map((contact, index) => normalizeWhatsappContact(contact, index))
-        .filter(Boolean)
-        .reduce((map, item) => {
-          map.set(item.importKey, item);
-          return map;
-        }, new Map())
-        .values(),
-    ).slice(0, 2000);
-
-    if (!normalizedUnique.length) {
-      return res.status(400).json({ message: 'No valid contacts to import' });
+    if (!session || (sessionId && session.id !== sessionId)) {
+      return res.status(404).json({ message: 'WhatsApp session not found. Start a session first.' });
     }
 
-    const importKeys = normalizedUnique.map((item) => item.importKey);
+    if (session.status !== 'ready') {
+      return res.status(409).json({
+        message: 'WhatsApp session is not ready. Scan QR and wait for connection.',
+        session: toWhatsappSessionStatus(session),
+      });
+    }
+
+    if (!session.client) {
+      return res.status(500).json({ message: 'WhatsApp client is unavailable for this session.' });
+    }
+
+    session.status = 'importing';
+    session.error = '';
+    touchWhatsappSession(session);
+
+    const allContacts = await session.client.getContacts();
+    const importCandidates = allContacts
+      .filter((contact) => {
+        if (!contact || typeof contact !== 'object') return false;
+        if (contact.isGroup || contact.isBroadcast || contact.isMe) return false;
+        const number = toTrimmedString(contact.number || contact.id?.user, 60);
+        if (!number) return false;
+        return true;
+      })
+      .slice(0, WHATSAPP_CONTACT_IMPORT_LIMIT);
+
+    const normalizedContacts = (
+      await mapWithConcurrency(importCandidates, WHATSAPP_IMPORT_CONCURRENCY, async (contact, index) => {
+        const about = await readWhatsappContactAbout(contact);
+
+        let image = '';
+        if (typeof contact.getProfilePicUrl === 'function') {
+          try {
+            const photoUrl = await contact.getProfilePicUrl();
+            image = await fetchWhatsappImageDataUrl(photoUrl);
+          } catch {
+            image = '';
+          }
+        }
+
+        const businessProfile = toProfile(contact.businessProfile);
+        const websites = Array.isArray(businessProfile.websites)
+          ? businessProfile.websites
+          : [businessProfile.websites].filter(Boolean);
+
+        return normalizeWhatsappContact(
+          {
+            name: contact.name,
+            displayName: contact.pushname,
+            fullName: contact.shortName,
+            phone: contact.number || contact.id?.user,
+            id: contact.id?._serialized,
+            description: about || businessProfile.description || '',
+            links: websites,
+            tags: ['WhatsApp'],
+            markers: [contact.isBusiness ? 'Бизнес' : '', contact.isMyContact ? 'Мой контакт' : ''],
+            roles: contact.isBusiness ? ['Компания'] : ['Контакт'],
+            statuses: [contact.isBlocked ? 'blocked' : '', contact.isBusiness ? 'business' : ''],
+            image,
+          },
+          index,
+        );
+      })
+    )
+      .filter(Boolean)
+      .reduce((map, item) => {
+        map.set(item.importKey, item);
+        return map;
+      }, new Map());
+
+    const uniqueContacts = Array.from(normalizedContacts.values());
+
+    if (!uniqueContacts.length) {
+      session.status = 'ready';
+      session.error = '';
+      touchWhatsappSession(session);
+      return res.status(200).json({
+        source: 'whatsapp',
+        imported: 0,
+        skipped: 0,
+        total: 0,
+        entities: [],
+      });
+    }
+
+    const importKeys = uniqueContacts.map((item) => item.importKey);
     const existingConnections = await Entity.find(
       {
         owner_id: ownerId,
@@ -1434,7 +1818,7 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
         .filter(Boolean),
     );
 
-    const toCreate = normalizedUnique.filter((item) => !existingKeySet.has(item.importKey));
+    const toCreate = uniqueContacts.filter((item) => !existingKeySet.has(item.importKey));
 
     let createdEntities = [];
     if (toCreate.length) {
@@ -1448,6 +1832,7 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
             source: 'whatsapp',
             import_key: item.importKey,
             phone: item.phone,
+            image: item.image || '',
             categoryLocked: false,
             imported_at: new Date().toISOString(),
           },
@@ -1464,15 +1849,27 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
       );
     }
 
+    session.status = 'ready';
+    session.error = '';
+    session.lastImportedAt = new Date().toISOString();
+    touchWhatsappSession(session);
+
     return res.status(200).json({
       source: 'whatsapp',
       imported: createdEntities.length,
-      skipped: normalizedUnique.length - createdEntities.length,
-      total: normalizedUnique.length,
+      skipped: uniqueContacts.length - createdEntities.length,
+      total: uniqueContacts.length,
       entities: createdEntities,
-      mode: inputContacts.length ? 'payload' : 'demo',
+      session: toWhatsappSessionStatus(session),
     });
   } catch (error) {
+    const ownerId = getOwnerIdFromRequest(req);
+    const session = getOwnerWhatsappSession(ownerId);
+    if (session) {
+      session.status = 'error';
+      session.error = toTrimmedString(error?.message, 260) || 'Import failed';
+      touchWhatsappSession(session);
+    }
     return next(error);
   }
 });
@@ -1980,6 +2377,16 @@ async function startServer() {
   } else {
     console.warn(
       `[ai] Enabled models: chat=${OPENAI_MODEL}, embedding=${OPENAI_EMBEDDING_MODEL}, debugEcho=${AI_DEBUG_ECHO}`,
+    );
+  }
+  if (!isWhatsappIntegrationAvailable()) {
+    console.warn(
+      '[integrations] WhatsApp integration is disabled. Install backend deps: whatsapp-web.js and qrcode.',
+    );
+  }
+  if (!sharp) {
+    console.warn(
+      '[integrations] sharp is not installed. WhatsApp avatars will be imported without compression fallback.',
     );
   }
   if (DEV_AUTH_ENABLED) {
