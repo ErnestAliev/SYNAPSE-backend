@@ -2453,6 +2453,70 @@ async function fetchWhatsappImageDataUrl(url) {
   return `data:${contentType};base64,${rawBuffer.toString('base64')}`;
 }
 
+function buildWhatsappJidFromPhone(phone) {
+  const normalized = normalizePhone(toTrimmedString(phone, 80));
+  if (!normalized) return '';
+  const digits = normalized.startsWith('+') ? normalized.slice(1) : normalized;
+  if (!digits) return '';
+  return `${digits}@s.whatsapp.net`;
+}
+
+function resolveWhatsappContactJid(contactLike) {
+  const row = toProfile(contactLike);
+  const direct = toTrimmedString(row.jid || row.id?._serialized || row.id || row.contactId, 220);
+  if (direct) return direct;
+  return buildWhatsappJidFromPhone(row.phone || row.number || row.phoneNumber || row.id?.user);
+}
+
+async function fetchWhatsappContactImage(session, contactLike) {
+  if (!WHATSAPP_IMAGE_FETCH_ENABLED || !session?.client) return '';
+
+  const jid = resolveWhatsappContactJid(contactLike);
+  if (!jid) return '';
+
+  if (session.connector === 'baileys') {
+    if (typeof session.client.profilePictureUrl !== 'function') return '';
+    let photoUrl = '';
+    try {
+      photoUrl = await session.client.profilePictureUrl(jid, 'image');
+    } catch {
+      photoUrl = '';
+    }
+    if (!photoUrl) {
+      try {
+        photoUrl = await session.client.profilePictureUrl(jid, 'preview');
+      } catch {
+        photoUrl = '';
+      }
+    }
+    return fetchWhatsappImageDataUrl(photoUrl);
+  }
+
+  const contact = toProfile(contactLike)._contact || contactLike;
+  if (contact && typeof contact.getProfilePicUrl === 'function') {
+    try {
+      const photoUrl = await contact.getProfilePicUrl();
+      return fetchWhatsappImageDataUrl(photoUrl);
+    } catch {
+      // Ignore photo fetch errors.
+    }
+  }
+
+  if (typeof session.client.getContactById === 'function') {
+    try {
+      const resolved = await session.client.getContactById(jid);
+      if (resolved && typeof resolved.getProfilePicUrl === 'function') {
+        const photoUrl = await resolved.getProfilePicUrl();
+        return fetchWhatsappImageDataUrl(photoUrl);
+      }
+    } catch {
+      // Ignore photo fetch errors.
+    }
+  }
+
+  return '';
+}
+
 async function readWhatsappContactAbout(contact) {
   if (!contact || typeof contact !== 'object') return '';
 
@@ -2781,7 +2845,7 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
             links: websites,
             tags: ['WhatsApp'],
             markers: [contact.isBusiness ? 'Бизнес' : '', contact.isMyContact ? 'Мой контакт' : ''].filter(Boolean),
-            roles: contact.isBusiness ? ['Компания'] : ['Контакт'],
+            roles: [],
             statuses: [contact.isBlocked ? 'blocked' : '', contact.isBusiness ? 'business' : ''].filter(Boolean),
             image: '',
           },
@@ -2949,23 +3013,13 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
         WHATSAPP_IMAGE_IMPORT_CONCURRENCY,
         async (item, index) => {
           let image = '';
-          if (
-            session.connector !== 'baileys' &&
-            WHATSAPP_IMAGE_FETCH_ENABLED &&
-            index < WHATSAPP_IMAGE_IMPORT_MAX_COUNT &&
-            item._contact &&
-            typeof item._contact.getProfilePicUrl === 'function'
-          ) {
-            try {
-              const photoUrl = await item._contact.getProfilePicUrl();
-              image = await fetchWhatsappImageDataUrl(photoUrl);
-            } catch {
-              image = '';
-            }
+          if (WHATSAPP_IMAGE_FETCH_ENABLED && index < WHATSAPP_IMAGE_IMPORT_MAX_COUNT) {
+            image = await fetchWhatsappContactImage(session, item);
           }
 
           return {
             importKey: item.importKey,
+            jid: resolveWhatsappContactJid(item),
             name: item.name,
             phone: item.phone,
             description: item.description,
@@ -2998,6 +3052,7 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
             color: '#1058ff',
             source: 'whatsapp',
             import_key: item.importKey,
+            import_jid: item.jid || '',
             phone: item.phone,
             phones: item.phone ? [item.phone] : [],
             image: item.image || '',
@@ -3060,6 +3115,178 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
       });
       touchWhatsappSession(session, ownerId);
     }
+    return next(error);
+  }
+});
+
+app.post('/api/integrations/whatsapp/photos/backfill', requireAuth, async (req, res, next) => {
+  try {
+    const ownerId = requireOwnerId(req);
+    const sessionId = toTrimmedString(req.body?.sessionId, 120);
+    const onlyMissing = req.body?.onlyMissing !== false;
+    const requestedLimit = Math.max(1, Number(req.body?.limit) || WHATSAPP_CONTACT_IMPORT_LIMIT);
+    const limit = Math.min(requestedLimit, WHATSAPP_CONTACT_IMPORT_LIMIT);
+    const session = getOwnerWhatsappSession(ownerId);
+
+    if (!session || (sessionId && session.id !== sessionId)) {
+      return res.status(404).json({ message: 'WhatsApp session not found. Start a session first.' });
+    }
+
+    if (session.status !== 'ready') {
+      return res.status(409).json({
+        message: 'WhatsApp session is not ready. Scan QR and wait for connection.',
+        session: toWhatsappSessionStatus(session),
+      });
+    }
+
+    if (!session.client) {
+      return res.status(500).json({ message: 'WhatsApp client is unavailable for this session.' });
+    }
+
+    const query = {
+      owner_id: ownerId,
+      type: 'connection',
+      'profile.source': 'whatsapp',
+      ...(onlyMissing ? { $or: [{ 'profile.image': { $exists: false } }, { 'profile.image': '' }] } : {}),
+    };
+
+    const candidates = await Entity.find(query, { _id: 1, profile: 1 })
+      .limit(limit)
+      .lean();
+
+    let scanned = 0;
+    let updated = 0;
+    let skippedNoIdentity = 0;
+    let failed = 0;
+
+    function setProgress(percent, processed, total, note) {
+      session.importProgress = {
+        stage: 'photos',
+        percent: Math.max(0, Math.min(100, Number(percent) || 0)),
+        processed: Math.max(0, Number(processed) || 0),
+        total: Math.max(0, Number(total) || 0),
+        note: toTrimmedString(note, 220),
+      };
+      touchWhatsappSession(session, ownerId);
+    }
+
+    appendWhatsappSessionLog(session, 'photos.backfill.start', {
+      onlyMissing,
+      limit,
+      candidates: candidates.length,
+    });
+
+    session.status = 'importing';
+    session.error = '';
+    setProgress(5, 0, candidates.length, 'Подготовка догрузки фото');
+
+    await mapWithConcurrency(
+      candidates,
+      WHATSAPP_IMAGE_IMPORT_CONCURRENCY,
+      async (entity) => {
+        scanned += 1;
+        const profile = toProfile(entity.profile);
+        const contactLike = {
+          jid: toTrimmedString(profile.import_jid, 220),
+          phone: toTrimmedString(profile.phone, 80) || toTrimmedString((Array.isArray(profile.phones) ? profile.phones[0] : ''), 80),
+        };
+
+        if (!contactLike.jid && !contactLike.phone) {
+          skippedNoIdentity += 1;
+          return null;
+        }
+
+        const image = await fetchWhatsappContactImage(session, contactLike);
+        if (!image) {
+          return null;
+        }
+
+        try {
+          await Entity.updateOne(
+            {
+              _id: entity._id,
+              owner_id: ownerId,
+            },
+            {
+              $set: {
+                'profile.image': image,
+                'profile.avatar_synced_at': new Date().toISOString(),
+              },
+              $pull: {
+                'ai_metadata.roles': 'Контакт',
+              },
+            },
+          );
+          updated += 1;
+        } catch {
+          failed += 1;
+        }
+        return null;
+      },
+      (processed, total) => {
+        const percent = 5 + Math.round((Math.max(0, Math.min(1, total ? processed / total : 1))) * 93);
+        setProgress(percent, processed, total, 'Догрузка фотографий');
+      },
+    );
+
+    setProgress(100, scanned, candidates.length, 'Догрузка фото завершена');
+    session.status = 'ready';
+    session.error = '';
+    session.importProgress = null;
+    touchWhatsappSession(session, ownerId);
+    appendWhatsappSessionLog(session, 'photos.backfill.result', {
+      scanned,
+      updated,
+      skippedNoIdentity,
+      failed,
+    });
+
+    return res.status(200).json({
+      scanned,
+      updated,
+      skippedNoIdentity,
+      failed,
+      session: toWhatsappSessionStatus(session),
+    });
+  } catch (error) {
+    const ownerId = getOwnerIdFromRequest(req);
+    const session = getOwnerWhatsappSession(ownerId);
+    if (session) {
+      session.status = 'error';
+      session.error = toTrimmedString(error?.message, 260) || 'Photo backfill failed';
+      session.importProgress = null;
+      appendWhatsappSessionLog(session, 'photos.backfill.error', { message: session.error });
+      touchWhatsappSession(session, ownerId);
+    }
+    return next(error);
+  }
+});
+
+app.delete('/api/integrations/whatsapp/imported', requireAuth, async (req, res, next) => {
+  try {
+    const ownerId = requireOwnerId(req);
+    const importedEntities = await Entity.find(
+      {
+        owner_id: ownerId,
+        type: 'connection',
+        'profile.source': 'whatsapp',
+      },
+      { _id: 1 },
+    ).lean();
+
+    const ids = importedEntities.map((row) => String(row._id)).filter(Boolean);
+    if (!ids.length) {
+      return res.status(200).json({ deleted: 0 });
+    }
+
+    await removeEntitiesFromProjectCanvases(ids, ownerId);
+    await Entity.deleteMany({
+      owner_id: ownerId,
+      _id: { $in: ids },
+    });
+
+    return res.status(200).json({ deleted: ids.length });
+  } catch (error) {
     return next(error);
   }
 });
