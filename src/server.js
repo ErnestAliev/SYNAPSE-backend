@@ -2609,6 +2609,26 @@ function normalizeWhatsappLinks(rawLinks) {
   return Array.from(new Set(links)).slice(0, 12);
 }
 
+function normalizeEntityNameForMatch(value) {
+  if (typeof value !== 'string') return '';
+  const lowered = value
+    .trim()
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return toTrimmedString(lowered, 160);
+}
+
+function isGeneratedWhatsappContactName(value) {
+  if (typeof value !== 'string') return false;
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return false;
+  return /^(контакт|contact)(?:\s+[+\d][\d\s\-()]*)?$/i.test(normalized);
+}
+
 function normalizeWhatsappContact(rawContact, index) {
   const row = toProfile(rawContact);
   const sourceId = toTrimmedString(
@@ -2617,10 +2637,17 @@ function normalizeWhatsappContact(rawContact, index) {
   );
   const nameCandidates = [
     row.name,
+    row.notify,
     row.displayName,
     row.fullName,
     row.pushName,
+    row.pushname,
     row.shortName,
+    row.verifiedName,
+    row.verified_name,
+    row.vname,
+    row.subject,
+    row.businessName,
     row.title,
   ];
   const name =
@@ -2955,13 +2982,36 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
         matched: 0,
         matchedByPhone: 0,
         matchedByImportKey: 0,
+        matchedByJid: 0,
+        matchedByName: 0,
         newAvailable: 0,
+        newWithName: 0,
+        newWithoutName: 0,
+        importedWithImage: 0,
         entities: [],
         session: toWhatsappSessionStatus(session),
       });
     }
 
     const importKeys = uniqueContacts.map((item) => item.importKey);
+    const importJids = Array.from(
+      new Set(
+        uniqueContacts
+          .map((item) => resolveWhatsappContactJid({ jid: item.id, phone: item.phone }))
+          .filter(Boolean),
+      ),
+    );
+    const importNameKeys = Array.from(
+      new Set(
+        uniqueContacts
+          .map((item) => ({
+            normalizedName: normalizeEntityNameForMatch(item.name),
+            generatedName: isGeneratedWhatsappContactName(item.name),
+          }))
+          .filter((item) => item.normalizedName && !item.generatedName && item.normalizedName.length >= 4)
+          .map((item) => item.normalizedName),
+      ),
+    );
     const importPhones = Array.from(
       new Set(
         uniqueContacts
@@ -2982,13 +3032,18 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
       ),
     );
 
-    const existingImportKeyEntities = await Entity.find(
+    const importIdentityFilters = [{ 'profile.import_key': { $in: importKeys } }];
+    if (importJids.length) {
+      importIdentityFilters.push({ 'profile.import_jid': { $in: importJids } });
+    }
+
+    const existingImportIdentityEntities = await Entity.find(
       {
         owner_id: ownerId,
         type: 'connection',
-        'profile.import_key': { $in: importKeys },
+        $or: importIdentityFilters,
       },
-      { _id: 1, profile: 1 },
+      { _id: 1, profile: 1, name: 1 },
     ).lean();
 
     let existingPhoneEntities = [];
@@ -3002,15 +3057,34 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
         { _id: 1, profile: 1 },
       ).lean();
     }
+
+    let existingNameEntities = [];
+    if (importNameKeys.length) {
+      existingNameEntities = await Entity.find(
+        {
+          owner_id: ownerId,
+          type: { $in: ['connection', 'person', 'company'] },
+          name: { $exists: true, $ne: '' },
+        },
+        { _id: 1, name: 1 },
+      ).lean();
+    }
     setImportProgress('match', 75, 0, uniqueContacts.length, 'Сопоставление с базой');
 
     const existingKeySet = new Set();
+    const existingJidSet = new Set();
     const existingPhoneSet = new Set();
-    for (const entity of existingImportKeyEntities) {
+    const existingNameSet = new Set();
+
+    for (const entity of existingImportIdentityEntities) {
       const profile = toProfile(entity.profile);
       const importKey = toTrimmedString(profile.import_key, 180);
+      const importJid = toTrimmedString(profile.import_jid, 220);
       if (importKey) {
         existingKeySet.add(importKey);
+      }
+      if (importJid) {
+        existingJidSet.add(importJid);
       }
     }
 
@@ -3023,43 +3097,78 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
       }
     }
 
+    for (const entity of existingNameEntities) {
+      const normalizedName = normalizeEntityNameForMatch(entity.name);
+      if (!normalizedName || normalizedName.length < 4) continue;
+      if (isGeneratedWhatsappContactName(entity.name)) continue;
+      existingNameSet.add(normalizedName);
+    }
+
     let matchedByImportKey = 0;
+    let matchedByJid = 0;
     let matchedByPhone = 0;
+    let matchedByName = 0;
     let matchedTotal = 0;
     const toCreate = [];
+    let newWithName = 0;
+    let newWithoutName = 0;
 
     for (const item of uniqueContacts) {
       const normalizedPhone = normalizePhone(item.phone);
+      const normalizedJid = resolveWhatsappContactJid({ jid: item.id, phone: item.phone });
+      const normalizedName = normalizeEntityNameForMatch(item.name);
+      const hasGeneratedName = isGeneratedWhatsappContactName(item.name);
       const hasImportKeyMatch = existingKeySet.has(item.importKey);
+      const hasJidMatch = normalizedJid ? existingJidSet.has(normalizedJid) : false;
       const hasPhoneMatch = normalizedPhone
         ? existingPhoneSet.has(normalizedPhone) ||
           (normalizedPhone.startsWith('+')
             ? existingPhoneSet.has(normalizedPhone.slice(1))
             : existingPhoneSet.has(`+${normalizedPhone}`))
         : false;
+      const hasNameMatch =
+        normalizedName && normalizedName.length >= 4 && !hasGeneratedName
+          ? existingNameSet.has(normalizedName)
+          : false;
 
-      if (hasImportKeyMatch || hasPhoneMatch) {
+      if (hasImportKeyMatch || hasJidMatch || hasPhoneMatch || hasNameMatch) {
         matchedTotal += 1;
         if (hasImportKeyMatch) {
           matchedByImportKey += 1;
         }
+        if (hasJidMatch) {
+          matchedByJid += 1;
+        }
         if (hasPhoneMatch) {
           matchedByPhone += 1;
+        }
+        if (hasNameMatch) {
+          matchedByName += 1;
         }
         continue;
       }
 
+      if (hasGeneratedName) {
+        newWithoutName += 1;
+      } else {
+        newWithName += 1;
+      }
       toCreate.push(item);
     }
     appendWhatsappSessionLog(session, 'import.matches', {
       matchedTotal,
       matchedByPhone,
       matchedByImportKey,
+      matchedByJid,
+      matchedByName,
+      newWithName,
+      newWithoutName,
       toCreate: toCreate.length,
     });
     setImportProgress('match', 82, uniqueContacts.length, uniqueContacts.length, 'Сопоставление завершено');
 
     let createdEntities = [];
+    let importedWithImage = 0;
     if (toCreate.length) {
       const contactsWithImages = await mapWithConcurrency(
         toCreate,
@@ -3094,6 +3203,7 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
           );
         },
       );
+      importedWithImage = contactsWithImages.reduce((total, row) => total + (row.image ? 1 : 0), 0);
 
       setImportProgress('save', 95, contactsWithImages.length, contactsWithImages.length, 'Сохранение в базу');
       createdEntities = await Entity.insertMany(
@@ -3140,7 +3250,12 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
       total: uniqueContacts.length,
       matchedByPhone,
       matchedByImportKey,
+      matchedByJid,
+      matchedByName,
       newAvailable: toCreate.length,
+      newWithName,
+      newWithoutName,
+      importedWithImage,
     });
     touchWhatsappSession(session, ownerId);
 
@@ -3152,7 +3267,12 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
       matched: matchedTotal,
       matchedByPhone,
       matchedByImportKey,
+      matchedByJid,
+      matchedByName,
       newAvailable: toCreate.length,
+      newWithName,
+      newWithoutName,
+      importedWithImage,
       entities: createdEntities,
       session: toWhatsappSessionStatus(session),
     });
