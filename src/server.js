@@ -23,6 +23,22 @@ const AUTH_REQUIRED = String(process.env.AUTH_REQUIRED || 'true').toLowerCase() 
 const DEV_AUTH_ENABLED =
   !IS_PRODUCTION && String(process.env.DEV_AUTH_ENABLED || 'true').toLowerCase() !== 'false';
 const DEFAULT_ALLOWED_ORIGINS = ['http://localhost:5173', 'http://localhost:3000'];
+const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
+const OPENAI_MODEL = String(process.env.OPENAI_MODEL || 'gpt-4.1-mini').trim();
+const AI_CONTEXT_ENTITY_LIMIT = Math.max(1, Number(process.env.AI_CONTEXT_ENTITY_LIMIT) || 120);
+const AI_HISTORY_MESSAGE_LIMIT = Math.max(1, Number(process.env.AI_HISTORY_MESSAGE_LIMIT) || 12);
+const AI_ATTACHMENT_LIMIT = Math.max(1, Number(process.env.AI_ATTACHMENT_LIMIT) || 6);
+const ENTITY_TYPES = new Set([
+  'project',
+  'person',
+  'company',
+  'event',
+  'resource',
+  'goal',
+  'result',
+  'task',
+  'shape',
+]);
 
 function parseAllowedOrigins() {
   const raw = [
@@ -152,6 +168,368 @@ function normalizeProjectCanvasData(canvasData) {
     edges,
     ...(viewport ? { viewport } : {}),
     ...(rawBackground ? { background: rawBackground } : {}),
+  };
+}
+
+function toProfile(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+  return value;
+}
+
+function toTrimmedString(value, maxLength = 240) {
+  if (typeof value !== 'string') return '';
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  return trimmed.slice(0, maxLength);
+}
+
+function toStringArray(value, maxItems = 8, itemMaxLength = 80) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => toTrimmedString(item, itemMaxLength))
+    .filter(Boolean)
+    .slice(0, maxItems);
+}
+
+function compactObject(value) {
+  if (Array.isArray(value)) {
+    const nextArray = value
+      .map((item) => compactObject(item))
+      .filter((item) => item !== undefined);
+    return nextArray.length ? nextArray : undefined;
+  }
+
+  if (value && typeof value === 'object') {
+    const nextObject = Object.entries(value).reduce((acc, [key, item]) => {
+      const compacted = compactObject(item);
+      if (compacted === undefined) return acc;
+      acc[key] = compacted;
+      return acc;
+    }, {});
+    return Object.keys(nextObject).length ? nextObject : undefined;
+  }
+
+  if (typeof value === 'string') {
+    return value.trim() ? value : undefined;
+  }
+
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+
+  return value;
+}
+
+function normalizeAgentHistory(rawHistory) {
+  if (!Array.isArray(rawHistory)) return [];
+  return rawHistory
+    .map((item) => {
+      const row = toProfile(item);
+      const role = row.role === 'assistant' ? 'assistant' : row.role === 'user' ? 'user' : '';
+      const text = toTrimmedString(row.text, 1800);
+      if (!role || !text) return null;
+      return { role, text };
+    })
+    .filter(Boolean)
+    .slice(-AI_HISTORY_MESSAGE_LIMIT);
+}
+
+function normalizeAgentAttachments(rawAttachments) {
+  if (!Array.isArray(rawAttachments)) return [];
+  return rawAttachments
+    .map((item) => {
+      const attachment = toProfile(item);
+      const name = toTrimmedString(attachment.name, 120);
+      if (!name) return null;
+      const mime = toTrimmedString(attachment.mime, 120);
+      const size =
+        typeof attachment.size === 'number' && Number.isFinite(attachment.size)
+          ? Math.max(0, Math.floor(attachment.size))
+          : 0;
+      return { name, mime, size };
+    })
+    .filter(Boolean)
+    .slice(0, AI_ATTACHMENT_LIMIT);
+}
+
+function summarizeEntityForAgent(entity) {
+  const profile = toProfile(entity.profile);
+  const aiMetadata = toProfile(entity.ai_metadata);
+  const logo = toProfile(profile.logo);
+
+  return compactObject({
+    id: String(entity._id),
+    type: entity.type,
+    name: toTrimmedString(entity.name, 120) || '(без названия)',
+    description: toTrimmedString(aiMetadata.description, 260),
+    tags: toStringArray(aiMetadata.tags, 8),
+    markers: toStringArray(aiMetadata.markers, 6),
+    skills: toStringArray(aiMetadata.skills, 8),
+    roles: toStringArray(aiMetadata.roles, 8),
+    importance: toStringArray(aiMetadata.importance, 4),
+    status: toStringArray(aiMetadata.status, 4),
+    stage: toStringArray(aiMetadata.stage, 4),
+    owners: toStringArray(aiMetadata.owners, 6),
+    industry: toStringArray(aiMetadata.industry, 5),
+    location: toStringArray(aiMetadata.location, 5),
+    date: toStringArray(aiMetadata.date, 5),
+    links: toStringArray(aiMetadata.links, 6, 140),
+    visual: {
+      color: toTrimmedString(profile.color, 24),
+      emoji: toTrimmedString(profile.emoji, 8),
+      logo: toTrimmedString(logo.name || logo.id, 64),
+      hasImage: typeof profile.image === 'string' && profile.image.trim().length > 0,
+    },
+  });
+}
+
+function extractOpenAiResponseText(payload) {
+  if (payload && typeof payload.output_text === 'string' && payload.output_text.trim()) {
+    return payload.output_text.trim();
+  }
+
+  const chunks = [];
+  const outputs = Array.isArray(payload?.output) ? payload.output : [];
+  for (const item of outputs) {
+    const contentItems = Array.isArray(item?.content) ? item.content : [];
+    for (const content of contentItems) {
+      if (typeof content?.text === 'string' && content.text.trim()) {
+        chunks.push(content.text.trim());
+      }
+    }
+  }
+
+  if (!chunks.length) return '';
+  return chunks.join('\n').trim();
+}
+
+function buildProjectConnections(canvasData, entitiesById) {
+  const nodeEntityByNodeId = new Map();
+  for (const node of canvasData.nodes) {
+    if (!node.id || !node.entityId) continue;
+    nodeEntityByNodeId.set(node.id, node.entityId);
+  }
+
+  const entityNameById = new Map();
+  for (const entity of entitiesById) {
+    entityNameById.set(String(entity._id), toTrimmedString(entity.name, 120) || '(без названия)');
+  }
+
+  return canvasData.edges
+    .map((edge) => {
+      const sourceEntityId = nodeEntityByNodeId.get(edge.source);
+      const targetEntityId = nodeEntityByNodeId.get(edge.target);
+      if (!sourceEntityId || !targetEntityId) return null;
+
+      return compactObject({
+        from: entityNameById.get(sourceEntityId) || sourceEntityId,
+        to: entityNameById.get(targetEntityId) || targetEntityId,
+        label: toTrimmedString(edge.label, 80),
+        color: toTrimmedString(edge.color, 32),
+        arrows: {
+          left: Boolean(edge.arrowLeft),
+          right: Boolean(edge.arrowRight),
+        },
+      });
+    })
+    .filter(Boolean)
+    .slice(0, 180);
+}
+
+async function resolveAgentScopeContext(ownerId, rawScope) {
+  const scope = toProfile(rawScope);
+  const scopeType = toTrimmedString(scope.type, 24).toLowerCase();
+
+  if (scopeType === 'collection') {
+    const entityType = toTrimmedString(scope.entityType, 24);
+    if (!ENTITY_TYPES.has(entityType)) {
+      throw Object.assign(new Error('Invalid collection scope type'), { status: 400 });
+    }
+
+    const [entities, totalEntities] = await Promise.all([
+      Entity.find({ owner_id: ownerId, type: entityType })
+        .sort({ updatedAt: -1, _id: -1 })
+        .limit(AI_CONTEXT_ENTITY_LIMIT)
+        .lean(),
+      Entity.countDocuments({ owner_id: ownerId, type: entityType }),
+    ]);
+
+    return {
+      scopeType: 'collection',
+      entityType,
+      scopeName: entityType,
+      projectId: '',
+      projectName: '',
+      totalEntities,
+      entities,
+      connections: [],
+    };
+  }
+
+  if (scopeType === 'project') {
+    const projectId = toTrimmedString(scope.projectId, 80);
+    if (!projectId) {
+      throw Object.assign(new Error('projectId is required for project scope'), { status: 400 });
+    }
+
+    const project = await Entity.findOne({
+      _id: projectId,
+      owner_id: ownerId,
+      type: 'project',
+    })
+      .select({ _id: 1, name: 1, canvas_data: 1 })
+      .lean();
+
+    if (!project) {
+      throw Object.assign(new Error('Project not found'), { status: 404 });
+    }
+
+    const canvasData = normalizeProjectCanvasData(project.canvas_data);
+    const uniqueEntityIds = Array.from(
+      new Set(
+        canvasData.nodes
+          .map((node) => toTrimmedString(node.entityId, 80))
+          .filter(Boolean),
+      ),
+    );
+
+    const limitedEntityIds = uniqueEntityIds.slice(0, AI_CONTEXT_ENTITY_LIMIT);
+    const entities = limitedEntityIds.length
+      ? await Entity.find({
+          owner_id: ownerId,
+          _id: { $in: limitedEntityIds },
+        }).lean()
+      : [];
+
+    const entityById = new Map(entities.map((entity) => [String(entity._id), entity]));
+    const orderedEntities = limitedEntityIds
+      .map((id) => entityById.get(id))
+      .filter(Boolean);
+
+    const connections = buildProjectConnections(canvasData, orderedEntities);
+
+    return {
+      scopeType: 'project',
+      entityType: '',
+      scopeName: toTrimmedString(project.name, 140) || 'Без названия',
+      projectId: String(project._id),
+      projectName: toTrimmedString(project.name, 140) || 'Без названия',
+      totalEntities: uniqueEntityIds.length,
+      entities: orderedEntities,
+      connections,
+    };
+  }
+
+  throw Object.assign(new Error('Invalid scope type'), { status: 400 });
+}
+
+function buildAgentSystemPrompt(scopeContext) {
+  const scopeDescription =
+    scopeContext.scopeType === 'project'
+      ? `Текущий контекст: проект "${scopeContext.projectName}" (${scopeContext.totalEntities} сущностей).`
+      : `Текущий контекст: вкладка "${scopeContext.entityType}" (${scopeContext.totalEntities} сущностей).`;
+
+  return [
+    'Ты LLM-аналитик системы Synapse12.',
+    scopeDescription,
+    'Жесткое правило: используй ТОЛЬКО данные из переданного контекста.',
+    'Нельзя подтягивать данные из других вкладок, проектов или внешних источников.',
+    'Если данных в контексте недостаточно, прямо напиши: "Недостаточно данных в текущем контексте".',
+    'Отвечай по-русски, структурно и кратко.',
+    'Формат ответа:',
+    '1) Краткий вывод',
+    '2) Наблюдения',
+    '3) Возможности и риски',
+    '4) Следующие шаги',
+  ].join('\n');
+}
+
+function buildAgentUserPrompt({ scopeContext, message, history, attachments }) {
+  const contextPayload = {
+    scope: compactObject({
+      type: scopeContext.scopeType,
+      name: scopeContext.scopeName,
+      entityType: scopeContext.entityType,
+      projectId: scopeContext.projectId,
+      projectName: scopeContext.projectName,
+      totalEntities: scopeContext.totalEntities,
+      contextLimit: AI_CONTEXT_ENTITY_LIMIT,
+    }),
+    entities: scopeContext.entities.map((entity) => summarizeEntityForAgent(entity)),
+    connections: scopeContext.connections,
+    attachments,
+    history,
+  };
+
+  return [
+    'Контекст Synapse12 (JSON):',
+    JSON.stringify(contextPayload, null, 2),
+    '',
+    'Текущий запрос пользователя:',
+    message,
+  ].join('\n');
+}
+
+async function requestOpenAiAgentReply({ systemPrompt, userPrompt }) {
+  if (!OPENAI_API_KEY) {
+    throw Object.assign(new Error('OPENAI_API_KEY is not configured'), { status: 503 });
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 45_000);
+
+  let response;
+  let payload;
+  try {
+    response = await fetch('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: OPENAI_MODEL,
+        input: [
+          {
+            role: 'system',
+            content: [{ type: 'input_text', text: systemPrompt }],
+          },
+          {
+            role: 'user',
+            content: [{ type: 'input_text', text: userPrompt }],
+          },
+        ],
+        temperature: 0.25,
+        max_output_tokens: 900,
+      }),
+      signal: controller.signal,
+    });
+
+    payload = await response.json();
+  } catch (error) {
+    if (error && error.name === 'AbortError') {
+      throw Object.assign(new Error('AI request timeout'), { status: 504 });
+    }
+    throw Object.assign(new Error('Failed to call AI provider'), { status: 502 });
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (!response.ok) {
+    const providerMessage = toTrimmedString(payload?.error?.message, 300) || 'AI provider error';
+    throw Object.assign(new Error(providerMessage), { status: 502 });
+  }
+
+  const reply = extractOpenAiResponseText(payload);
+  if (!reply) {
+    throw Object.assign(new Error('AI response is empty'), { status: 502 });
+  }
+
+  return {
+    reply,
+    usage: payload?.usage || null,
   };
 }
 
@@ -628,6 +1006,49 @@ app.post('/api/auth/logout', async (req, res) => {
   return res.status(204).send();
 });
 
+app.post('/api/ai/agent-chat', requireAuth, async (req, res, next) => {
+  try {
+    const ownerId = requireOwnerId(req);
+    const message = toTrimmedString(req.body?.message, 2400);
+
+    if (!message) {
+      return res.status(400).json({ message: 'message is required' });
+    }
+
+    const history = normalizeAgentHistory(req.body?.history);
+    const attachments = normalizeAgentAttachments(req.body?.attachments);
+    const scopeContext = await resolveAgentScopeContext(ownerId, req.body?.scope);
+
+    const systemPrompt = buildAgentSystemPrompt(scopeContext);
+    const userPrompt = buildAgentUserPrompt({
+      scopeContext,
+      message,
+      history,
+      attachments,
+    });
+
+    const aiResponse = await requestOpenAiAgentReply({
+      systemPrompt,
+      userPrompt,
+    });
+
+    return res.status(200).json({
+      reply: aiResponse.reply,
+      usage: aiResponse.usage,
+      model: OPENAI_MODEL,
+      context: {
+        scopeType: scopeContext.scopeType,
+        entityType: scopeContext.entityType,
+        projectId: scopeContext.projectId,
+        totalEntities: scopeContext.totalEntities,
+        limitedTo: AI_CONTEXT_ENTITY_LIMIT,
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
 app.use('/api/entities', requireAuth);
 
 app.get('/api/entities', async (req, res, next) => {
@@ -763,6 +1184,9 @@ async function startServer() {
   }
   if (!SESSION_SECRET) {
     console.warn('[auth] SESSION_SECRET is not set. Session endpoints will be unavailable.');
+  }
+  if (!OPENAI_API_KEY) {
+    console.warn('[ai] OPENAI_API_KEY is not set. /api/ai/agent-chat will be unavailable.');
   }
   if (DEV_AUTH_ENABLED) {
     console.warn('[auth] DEV_AUTH_ENABLED=true. /api/auth/dev-login is available (development only).');
