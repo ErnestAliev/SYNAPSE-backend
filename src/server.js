@@ -4,6 +4,7 @@ const dotenv = require('dotenv');
 const cookieParser = require('cookie-parser');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
+const path = require('path');
 const { OAuth2Client } = require('google-auth-library');
 
 const connectDB = require('./config/db');
@@ -14,6 +15,10 @@ const EntityVector = require('./models/EntityVector');
 let whatsappWeb = null;
 let QRCode = null;
 let sharp = null;
+
+if (!process.env.PUPPETEER_CACHE_DIR) {
+  process.env.PUPPETEER_CACHE_DIR = path.resolve(__dirname, '..', '.cache', 'puppeteer');
+}
 
 try {
   whatsappWeb = require('whatsapp-web.js');
@@ -1381,6 +1386,14 @@ async function ensureOwnerWhatsappSession(ownerId) {
 
   const { Client, LocalAuth } = whatsappWeb;
   const ownerSessionKey = sanitizeOwnerSessionKey(ownerId);
+  const puppeteerOptions = {
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+  };
+  if (toTrimmedString(process.env.PUPPETEER_EXECUTABLE_PATH, 2048)) {
+    puppeteerOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+  }
+
   const session = {
     id: createWhatsappSessionId(),
     ownerId,
@@ -1397,10 +1410,7 @@ async function ensureOwnerWhatsappSession(ownerId) {
     authStrategy: new LocalAuth({
       clientId: `synapse12_${ownerSessionKey}`,
     }),
-    puppeteer: {
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    },
+    puppeteer: puppeteerOptions,
   });
 
   session.client = client;
