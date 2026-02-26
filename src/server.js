@@ -2773,6 +2773,7 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
   try {
     const ownerId = requireOwnerId(req);
     const sessionId = toTrimmedString(req.body?.sessionId, 120);
+    const includeImages = req.body?.includeImages === true;
     const session = getOwnerWhatsappSession(ownerId);
 
     if (!session || (sessionId && session.id !== sessionId)) {
@@ -2807,6 +2808,7 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
     appendWhatsappSessionLog(session, 'import.start', {
       connector: session.connector,
       sessionId: session.id,
+      includeImages,
       receivedPendingNotifications: session.receivedPendingNotifications,
       mirroredContacts: session?.contactsMirror instanceof Map ? session.contactsMirror.size : 0,
       mirroredChats: session?.chatsMirror instanceof Map ? session.chatsMirror.size : 0,
@@ -3064,7 +3066,7 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
         WHATSAPP_IMAGE_IMPORT_CONCURRENCY,
         async (item, index) => {
           let image = '';
-          if (WHATSAPP_IMAGE_FETCH_ENABLED && index < WHATSAPP_IMAGE_IMPORT_MAX_COUNT) {
+          if (includeImages && WHATSAPP_IMAGE_FETCH_ENABLED && index < WHATSAPP_IMAGE_IMPORT_MAX_COUNT) {
             image = await fetchWhatsappContactImage(session, item);
           }
 
