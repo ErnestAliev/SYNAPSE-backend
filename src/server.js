@@ -4099,8 +4099,29 @@ app.get('/api/entities', async (req, res, next) => {
     const ownerId = requireOwnerId(req);
     filter.owner_id = ownerId;
 
-    if (req.query.type) {
-      filter.type = req.query.type;
+    const typeQueryRaw = Array.isArray(req.query.type) ? req.query.type[0] : req.query.type;
+    const excludeTypeQueryRaw = Array.isArray(req.query.excludeType)
+      ? req.query.excludeType[0]
+      : req.query.excludeType;
+    const requestedType =
+      typeof typeQueryRaw === 'string' && ENTITY_TYPES.has(typeQueryRaw) ? typeQueryRaw : '';
+    const excludedType =
+      typeof excludeTypeQueryRaw === 'string' && ENTITY_TYPES.has(excludeTypeQueryRaw)
+        ? excludeTypeQueryRaw
+        : '';
+
+    if (requestedType) {
+      filter.type = requestedType;
+    }
+
+    if (excludedType) {
+      if (requestedType && requestedType === excludedType) {
+        return res.json([]);
+      }
+
+      if (!requestedType) {
+        filter.type = { $ne: excludedType };
+      }
     }
 
     const entities = await Entity.find(filter).sort({ createdAt: -1, _id: -1 });
