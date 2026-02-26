@@ -5,6 +5,7 @@ const cookieParser = require('cookie-parser');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const path = require('path');
+const fs = require('fs');
 const { OAuth2Client } = require('google-auth-library');
 
 const connectDB = require('./config/db');
@@ -13,6 +14,7 @@ const User = require('./models/User');
 const EntityVector = require('./models/EntityVector');
 
 let whatsappWeb = null;
+let whatsappBaileys = null;
 let QRCode = null;
 let sharp = null;
 
@@ -24,6 +26,12 @@ try {
   whatsappWeb = require('whatsapp-web.js');
 } catch {
   whatsappWeb = null;
+}
+
+try {
+  whatsappBaileys = require('@whiskeysockets/baileys');
+} catch {
+  whatsappBaileys = null;
 }
 
 try {
@@ -88,6 +96,9 @@ const WHATSAPP_MAX_CONCURRENT_SESSIONS = Math.max(
 const PUPPETEER_BROWSER_WS_ENDPOINT = String(process.env.PUPPETEER_BROWSER_WS_ENDPOINT || '').trim().slice(0, 2048);
 const WHATSAPP_ALLOW_LOCAL_CHROME =
   String(process.env.WHATSAPP_ALLOW_LOCAL_CHROME || (!IS_PRODUCTION ? 'true' : 'false')).toLowerCase() === 'true';
+const WHATSAPP_CONNECTOR = String(process.env.WHATSAPP_CONNECTOR || 'baileys')
+  .trim()
+  .toLowerCase();
 const ENTITY_TYPES = new Set([
   'project',
   'connection',
@@ -1338,6 +1349,68 @@ function normalizePhone(value) {
   return hasPlus ? `+${digits}` : digits;
 }
 
+function normalizeWhatsappJidToPhone(jid) {
+  const raw = toTrimmedString(jid, 200);
+  if (!raw || !raw.includes('@')) return '';
+
+  const userPart = raw.split('@')[0] || '';
+  const cleanUser = userPart.split(':')[0] || '';
+  return normalizePhone(cleanUser);
+}
+
+function buildBaileysImportContacts(session) {
+  const collected = new Map();
+
+  function pushContact(rawJid, rawName = '', rawStatus = '') {
+    const jid = toTrimmedString(rawJid, 200);
+    if (!jid) return;
+    if (jid.endsWith('@g.us') || jid.endsWith('@broadcast') || jid.endsWith('@newsletter')) return;
+
+    const phone = normalizeWhatsappJidToPhone(jid);
+    if (!phone) return;
+
+    const key = `${phone}@s.whatsapp.net`;
+    const existing = collected.get(key);
+    const nextName = toTrimmedString(rawName, 120);
+    const nextStatus = toTrimmedString(rawStatus, 1200);
+
+    if (existing) {
+      if (!existing.name && nextName) existing.name = nextName;
+      if (!existing.status && nextStatus) existing.status = nextStatus;
+      return;
+    }
+
+    collected.set(key, {
+      jid: key,
+      phone,
+      name: nextName,
+      status: nextStatus,
+    });
+  }
+
+  const contactsSource = session?.store?.contacts;
+  if (contactsSource && typeof contactsSource === 'object') {
+    for (const [jid, contact] of Object.entries(contactsSource)) {
+      const row = toProfile(contact);
+      pushContact(
+        jid || row.id || row.jid,
+        row.name || row.notify || row.verifiedName || row.shortName,
+        row.status || row.description,
+      );
+    }
+  }
+
+  const chatsSource = session?.store?.chats;
+  if (chatsSource && typeof chatsSource === 'object') {
+    for (const [jid, chat] of Object.entries(chatsSource)) {
+      const row = toProfile(chat);
+      pushContact(jid || row.id || row.jid, row.name || row.notify || row.subject, '');
+    }
+  }
+
+  return Array.from(collected.values());
+}
+
 function extractNormalizedPhonesFromProfile(rawProfile) {
   const profile = toProfile(rawProfile);
   const phones = new Set();
@@ -1369,8 +1442,34 @@ function createWhatsappSessionId() {
   return `wa-${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
 }
 
-function isWhatsappIntegrationAvailable() {
+function isWhatsappWebJsAvailable() {
   return Boolean(whatsappWeb && QRCode);
+}
+
+function isWhatsappBaileysAvailable() {
+  return Boolean(whatsappBaileys && QRCode);
+}
+
+function resolveWhatsappConnector() {
+  if (WHATSAPP_CONNECTOR === 'baileys') {
+    if (isWhatsappBaileysAvailable()) return 'baileys';
+    if (isWhatsappWebJsAvailable()) return 'webjs';
+    return '';
+  }
+
+  if (WHATSAPP_CONNECTOR === 'webjs') {
+    if (isWhatsappWebJsAvailable()) return 'webjs';
+    if (isWhatsappBaileysAvailable()) return 'baileys';
+    return '';
+  }
+
+  if (isWhatsappBaileysAvailable()) return 'baileys';
+  if (isWhatsappWebJsAvailable()) return 'webjs';
+  return '';
+}
+
+function isWhatsappIntegrationAvailable() {
+  return Boolean(resolveWhatsappConnector());
 }
 
 function toWhatsappSessionStatus(session) {
@@ -1445,9 +1544,34 @@ async function stopOwnerWhatsappSession(ownerId, reason = '') {
 
   if (session.client) {
     try {
-      await session.client.destroy();
+      if (session.connector === 'baileys') {
+        if (session.client.ws && typeof session.client.ws.close === 'function') {
+          session.client.ws.close();
+        }
+        if (typeof session.client.end === 'function') {
+          session.client.end(new Error('Session stopped'));
+        }
+      } else if (typeof session.client.destroy === 'function') {
+        await session.client.destroy();
+      }
     } catch {
       // Ignore client destroy errors.
+    }
+  }
+
+  if (session.connectionListener && session.client?.ev && typeof session.client.ev.off === 'function') {
+    try {
+      session.client.ev.off('connection.update', session.connectionListener);
+    } catch {
+      // Ignore listener cleanup errors.
+    }
+  }
+
+  if (session.credsListener && session.client?.ev && typeof session.client.ev.off === 'function') {
+    try {
+      session.client.ev.off('creds.update', session.credsListener);
+    } catch {
+      // Ignore listener cleanup errors.
     }
   }
 
@@ -1456,37 +1580,66 @@ async function stopOwnerWhatsappSession(ownerId, reason = '') {
   touchWhatsappSession(session);
 }
 
-async function ensureOwnerWhatsappSession(ownerId) {
-  if (!isWhatsappIntegrationAvailable()) {
-    throw Object.assign(
-      new Error('WhatsApp integration is unavailable. Install whatsapp-web.js and qrcode on backend.'),
-      { status: 503 },
-    );
-  }
+function createBaseWhatsappSession(ownerId, connector) {
+  return {
+    id: createWhatsappSessionId(),
+    ownerId,
+    connector,
+    status: 'initializing',
+    qrCodeDataUrl: '',
+    error: '',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    lastImportedAt: '',
+    idleTimer: null,
+    initTimer: null,
+    client: null,
+    store: null,
+    authDir: '',
+    connectionListener: null,
+    credsListener: null,
+  };
+}
 
-  const existing = getOwnerWhatsappSession(ownerId);
-  if (existing && ['initializing', 'qr', 'ready', 'importing'].includes(existing.status)) {
-    return existing;
-  }
+function attachWhatsappInitTimeout(ownerId, session, timeoutMessage) {
+  session.initTimer = setTimeout(() => {
+    if (session.status !== 'initializing') {
+      return;
+    }
 
-  if (existing) {
-    await stopOwnerWhatsappSession(ownerId, 'Restarting session');
-  }
+    session.status = 'error';
+    session.error = timeoutMessage;
+    touchWhatsappSession(session, ownerId);
 
+    if (session.client) {
+      if (session.connector === 'baileys') {
+        try {
+          if (session.client.ws && typeof session.client.ws.close === 'function') {
+            session.client.ws.close();
+          }
+        } catch {
+          // Ignore close errors.
+        }
+      } else if (typeof session.client.destroy === 'function') {
+        session.client.destroy().catch(() => {
+          // Ignore cleanup error.
+        });
+      }
+    }
+  }, WHATSAPP_INIT_TIMEOUT_MS);
+
+  if (typeof session.initTimer?.unref === 'function') {
+    session.initTimer.unref();
+  }
+}
+
+async function ensureOwnerWhatsappSessionWebJs(ownerId) {
   if (IS_PRODUCTION && !PUPPETEER_BROWSER_WS_ENDPOINT && !WHATSAPP_ALLOW_LOCAL_CHROME) {
     throw Object.assign(
       new Error(
         'WhatsApp connector is disabled on this backend instance. Configure PUPPETEER_BROWSER_WS_ENDPOINT (remote browser) or set WHATSAPP_ALLOW_LOCAL_CHROME=true on a high-memory instance.',
       ),
       { status: 503 },
-    );
-  }
-
-  const activeSessions = getActiveWhatsappSessionCount();
-  if (activeSessions >= WHATSAPP_MAX_CONCURRENT_SESSIONS) {
-    throw Object.assign(
-      new Error('WhatsApp is busy right now. Try again in 1-2 minutes.'),
-      { status: 429 },
     );
   }
 
@@ -1514,20 +1667,7 @@ async function ensureOwnerWhatsappSession(ownerId) {
     puppeteerOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
   }
 
-  const session = {
-    id: createWhatsappSessionId(),
-    ownerId,
-    status: 'initializing',
-    qrCodeDataUrl: '',
-    error: '',
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    lastImportedAt: '',
-    idleTimer: null,
-    initTimer: null,
-    client: null,
-  };
-
+  const session = createBaseWhatsappSession(ownerId, 'webjs');
   const client = new Client({
     authStrategy: new LocalAuth({
       clientId: `synapse12_${ownerSessionKey}`,
@@ -1537,24 +1677,7 @@ async function ensureOwnerWhatsappSession(ownerId) {
 
   session.client = client;
   whatsappSessionsByOwner.set(ownerId, session);
-  session.initTimer = setTimeout(() => {
-    if (session.status !== 'initializing') {
-      return;
-    }
-
-    session.status = 'error';
-    session.error = 'Initialization timed out. Chrome did not return QR in time.';
-    touchWhatsappSession(session, ownerId);
-
-    if (session.client) {
-      session.client.destroy().catch(() => {
-        // Ignore cleanup error.
-      });
-    }
-  }, WHATSAPP_INIT_TIMEOUT_MS);
-  if (typeof session.initTimer?.unref === 'function') {
-    session.initTimer.unref();
-  }
+  attachWhatsappInitTimeout(ownerId, session, 'Initialization timed out. Chrome did not return QR in time.');
 
   client.on('qr', async (qr) => {
     try {
@@ -1605,8 +1728,139 @@ async function ensureOwnerWhatsappSession(ownerId) {
     });
 
   touchWhatsappSession(session, ownerId);
-
   return session;
+}
+
+async function ensureOwnerWhatsappSessionBaileys(ownerId) {
+  const {
+    default: makeWASocket,
+    useMultiFileAuthState,
+    makeInMemoryStore,
+    fetchLatestBaileysVersion,
+    DisconnectReason,
+  } = whatsappBaileys;
+
+  const ownerSessionKey = sanitizeOwnerSessionKey(ownerId);
+  const authBaseDir = path.resolve(__dirname, '..', '.wa-auth');
+  const authDir = path.join(authBaseDir, ownerSessionKey);
+
+  fs.mkdirSync(authBaseDir, { recursive: true });
+  fs.mkdirSync(authDir, { recursive: true });
+
+  const { state, saveCreds } = await useMultiFileAuthState(authDir);
+  const versionData =
+    typeof fetchLatestBaileysVersion === 'function'
+      ? await fetchLatestBaileysVersion().catch(() => ({ version: undefined }))
+      : { version: undefined };
+
+  const store = makeInMemoryStore ? makeInMemoryStore({}) : null;
+  const socket = makeWASocket({
+    auth: state,
+    printQRInTerminal: false,
+    markOnlineOnConnect: false,
+    syncFullHistory: false,
+    browser: ['Synapse12', 'Chrome', '1.0.0'],
+    ...(Array.isArray(versionData?.version) ? { version: versionData.version } : {}),
+  });
+
+  if (store && typeof store.bind === 'function') {
+    store.bind(socket.ev);
+  }
+
+  const session = createBaseWhatsappSession(ownerId, 'baileys');
+  session.client = socket;
+  session.store = store;
+  session.authDir = authDir;
+
+  session.credsListener = () => {
+    saveCreds().catch(() => {
+      // Ignore auth state persistence errors.
+    });
+  };
+  socket.ev.on('creds.update', session.credsListener);
+
+  session.connectionListener = async (update) => {
+    const { connection, qr, lastDisconnect } = update || {};
+
+    if (qr) {
+      try {
+        clearWhatsappSessionInitTimer(session);
+        session.qrCodeDataUrl = await QRCode.toDataURL(qr, {
+          width: 300,
+          margin: 1,
+        });
+        session.status = 'qr';
+        session.error = '';
+        touchWhatsappSession(session, ownerId);
+      } catch (error) {
+        session.status = 'error';
+        session.error = toTrimmedString(error?.message, 260) || 'Failed to render QR code';
+        touchWhatsappSession(session, ownerId);
+      }
+    }
+
+    if (connection === 'open') {
+      clearWhatsappSessionInitTimer(session);
+      session.status = 'ready';
+      session.qrCodeDataUrl = '';
+      session.error = '';
+      touchWhatsappSession(session, ownerId);
+      return;
+    }
+
+    if (connection === 'close') {
+      clearWhatsappSessionInitTimer(session);
+      const statusCode = Number(lastDisconnect?.error?.output?.statusCode) || 0;
+
+      if (statusCode === DisconnectReason?.loggedOut) {
+        session.status = 'disconnected';
+        session.error = 'Logged out from WhatsApp. Scan QR again.';
+      } else {
+        session.status = 'error';
+        session.error = 'WhatsApp socket disconnected. Please retry QR.';
+      }
+      touchWhatsappSession(session, ownerId);
+    }
+  };
+  socket.ev.on('connection.update', session.connectionListener);
+
+  whatsappSessionsByOwner.set(ownerId, session);
+  attachWhatsappInitTimeout(ownerId, session, 'Initialization timed out. Socket did not return QR in time.');
+  touchWhatsappSession(session, ownerId);
+  return session;
+}
+
+async function ensureOwnerWhatsappSession(ownerId) {
+  const connector = resolveWhatsappConnector();
+  if (!connector) {
+    throw Object.assign(
+      new Error('WhatsApp integration is unavailable. Install @whiskeysockets/baileys or whatsapp-web.js with qrcode.'),
+      { status: 503 },
+    );
+  }
+
+  const existing = getOwnerWhatsappSession(ownerId);
+  if (existing && ['initializing', 'qr', 'ready', 'importing'].includes(existing.status)) {
+    return existing;
+  }
+
+  if (existing) {
+    await stopOwnerWhatsappSession(ownerId, 'Restarting session');
+  }
+
+  const activeSessions = getActiveWhatsappSessionCount();
+  if (activeSessions >= WHATSAPP_MAX_CONCURRENT_SESSIONS) {
+    throw Object.assign(
+      new Error('WhatsApp is busy right now. Try again in 1-2 minutes.'),
+      { status: 429 },
+    );
+  }
+
+  if (connector === 'baileys') {
+    return ensureOwnerWhatsappSessionBaileys(ownerId);
+  }
+
+  return ensureOwnerWhatsappSessionWebJs(ownerId);
 }
 
 async function mapWithConcurrency(items, limit, iterator) {
@@ -1891,12 +2145,20 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
     session.error = '';
     touchWhatsappSession(session, ownerId);
 
-    const allContacts = await session.client.getContacts();
+    const allContacts =
+      session.connector === 'baileys'
+        ? buildBaileysImportContacts(session)
+        : await session.client.getContacts();
     const importCandidates = allContacts
       .filter((contact) => {
         if (!contact || typeof contact !== 'object') return false;
         if (contact.isGroup || contact.isBroadcast || contact.isMe) return false;
-        const number = toTrimmedString(contact.number || contact.id?.user, 60);
+        const jid = toTrimmedString(contact.jid || contact.id?._serialized || contact.id, 200);
+        if (jid.endsWith('@g.us') || jid.endsWith('@broadcast') || jid.endsWith('@newsletter')) return false;
+        const number = toTrimmedString(
+          contact.number || contact.phone || contact.id?.user || normalizeWhatsappJidToPhone(jid),
+          60,
+        );
         if (!number) return false;
         return true;
       })
@@ -1904,25 +2166,33 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
 
     const preparedContactsMap = (
       await mapWithConcurrency(importCandidates, WHATSAPP_IMPORT_CONCURRENCY, async (contact, index) => {
-        const about = await readWhatsappContactAbout(contact);
-        const businessProfile = toProfile(contact.businessProfile);
+        const about =
+          session.connector === 'baileys'
+            ? toTrimmedString(contact.status, 1200)
+            : await readWhatsappContactAbout(contact);
+        const businessProfile =
+          session.connector === 'baileys' ? {} : toProfile(contact.businessProfile);
         const websites = Array.isArray(businessProfile.websites)
           ? businessProfile.websites
           : [businessProfile.websites].filter(Boolean);
 
         const normalized = normalizeWhatsappContact(
           {
-            name: contact.name,
-            displayName: contact.pushname,
-            fullName: contact.shortName,
-            phone: contact.number || contact.id?.user,
-            id: contact.id?._serialized,
+            name: contact.name || contact.notify,
+            displayName: contact.pushname || contact.verifiedName,
+            fullName: contact.shortName || contact.displayName,
+            phone:
+              contact.number ||
+              contact.phone ||
+              contact.id?.user ||
+              normalizeWhatsappJidToPhone(contact.jid || contact.id?._serialized || contact.id),
+            id: contact.id?._serialized || contact.jid || contact.id,
             description: about || businessProfile.description || '',
             links: websites,
             tags: ['WhatsApp'],
-            markers: [contact.isBusiness ? 'Бизнес' : '', contact.isMyContact ? 'Мой контакт' : ''],
+            markers: [contact.isBusiness ? 'Бизнес' : '', contact.isMyContact ? 'Мой контакт' : ''].filter(Boolean),
             roles: contact.isBusiness ? ['Компания'] : ['Контакт'],
-            statuses: [contact.isBlocked ? 'blocked' : '', contact.isBusiness ? 'business' : ''],
+            statuses: [contact.isBlocked ? 'blocked' : '', contact.isBusiness ? 'business' : ''].filter(Boolean),
             image: '',
           },
           index,
@@ -2067,6 +2337,7 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
         async (item, index) => {
           let image = '';
           if (
+            session.connector !== 'baileys' &&
             WHATSAPP_IMAGE_FETCH_ENABLED &&
             index < WHATSAPP_IMAGE_IMPORT_MAX_COUNT &&
             item._contact &&
@@ -2665,15 +2936,16 @@ async function startServer() {
   }
   if (!isWhatsappIntegrationAvailable()) {
     console.warn(
-      '[integrations] WhatsApp integration is disabled. Install backend deps: whatsapp-web.js and qrcode.',
+      '[integrations] WhatsApp integration is disabled. Install backend deps: @whiskeysockets/baileys or whatsapp-web.js, and qrcode.',
     );
   } else {
+    const resolvedConnector = resolveWhatsappConnector();
     console.warn(
-      `[integrations] WhatsApp settings: contactsLimit=${WHATSAPP_CONTACT_IMPORT_LIMIT}, imageFetch=${WHATSAPP_IMAGE_FETCH_ENABLED}, imageMaxCount=${WHATSAPP_IMAGE_IMPORT_MAX_COUNT}, sessionIdleMs=${WHATSAPP_SESSION_IDLE_TIMEOUT_MS}, initTimeoutMs=${WHATSAPP_INIT_TIMEOUT_MS}, maxSessions=${WHATSAPP_MAX_CONCURRENT_SESSIONS}`,
+      `[integrations] WhatsApp settings: connector=${resolvedConnector}, requestedConnector=${WHATSAPP_CONNECTOR}, contactsLimit=${WHATSAPP_CONTACT_IMPORT_LIMIT}, imageFetch=${WHATSAPP_IMAGE_FETCH_ENABLED}, imageMaxCount=${WHATSAPP_IMAGE_IMPORT_MAX_COUNT}, sessionIdleMs=${WHATSAPP_SESSION_IDLE_TIMEOUT_MS}, initTimeoutMs=${WHATSAPP_INIT_TIMEOUT_MS}, maxSessions=${WHATSAPP_MAX_CONCURRENT_SESSIONS}`,
     );
-    if (PUPPETEER_BROWSER_WS_ENDPOINT) {
+    if (resolvedConnector === 'webjs' && PUPPETEER_BROWSER_WS_ENDPOINT) {
       console.warn('[integrations] WhatsApp uses remote browser via PUPPETEER_BROWSER_WS_ENDPOINT.');
-    } else if (IS_PRODUCTION && !WHATSAPP_ALLOW_LOCAL_CHROME) {
+    } else if (resolvedConnector === 'webjs' && IS_PRODUCTION && !WHATSAPP_ALLOW_LOCAL_CHROME) {
       console.warn(
         '[integrations] Local Chromium is disabled in production. Set PUPPETEER_BROWSER_WS_ENDPOINT for stable WhatsApp QR.',
       );

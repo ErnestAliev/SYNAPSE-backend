@@ -2,13 +2,25 @@ const { spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
-const skip =
+const explicitSkip =
   String(process.env.PUPPETEER_SKIP_CHROME_DOWNLOAD || '')
     .trim()
     .toLowerCase() === 'true';
+const forceInstall =
+  String(process.env.PUPPETEER_INSTALL_CHROME || '')
+    .trim()
+    .toLowerCase() === 'true';
+const connector = String(process.env.WHATSAPP_CONNECTOR || 'baileys')
+  .trim()
+  .toLowerCase();
+const skip = explicitSkip || (!forceInstall && connector !== 'webjs');
 
 if (skip) {
-  console.log('[postinstall] Skip Chrome download: PUPPETEER_SKIP_CHROME_DOWNLOAD=true');
+  if (explicitSkip) {
+    console.log('[postinstall] Skip Chrome download: PUPPETEER_SKIP_CHROME_DOWNLOAD=true');
+  } else {
+    console.log(`[postinstall] Skip Chrome download: WHATSAPP_CONNECTOR=${connector} (Chrome only for webjs)`);
+  }
   process.exit(0);
 }
 
