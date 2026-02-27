@@ -75,8 +75,9 @@ const DEFAULT_ALLOWED_ORIGINS = ['http://localhost:5173', 'http://localhost:3000
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
 const OPENAI_MODEL = String(process.env.OPENAI_MODEL || 'gpt-5.2-pro').trim();
 const OPENAI_PROJECT_MODEL = String(process.env.OPENAI_PROJECT_MODEL || 'gpt-5.2-pro').trim();
-const OPENAI_ROUTER_MODEL = String(process.env.OPENAI_ROUTER_MODEL || 'gpt-5.2-pro').trim();
+const OPENAI_ROUTER_MODEL = String(process.env.OPENAI_ROUTER_MODEL || 'gpt-5-mini').trim();
 const OPENAI_DEEP_MODEL = String(process.env.OPENAI_DEEP_MODEL || OPENAI_PROJECT_MODEL || 'gpt-5.2-pro').trim();
+const OPENAI_REQUEST_TIMEOUT_MS = Number(process.env.OPENAI_REQUEST_TIMEOUT_MS) || 0;
 const OPENAI_EMBEDDING_MODEL = String(process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small').trim();
 const AI_CONTEXT_ENTITY_LIMIT = Math.max(1, Number(process.env.AI_CONTEXT_ENTITY_LIMIT) || 120);
 const AI_HISTORY_MESSAGE_LIMIT = Math.max(1, Number(process.env.AI_HISTORY_MESSAGE_LIMIT) || 12);
@@ -4190,6 +4191,7 @@ const aiAttachments = createAiAttachmentTools({
 const aiProvider = createAiProvider({
   OPENAI_API_KEY,
   OPENAI_MODEL,
+  OPENAI_REQUEST_TIMEOUT_MS,
   toTrimmedString,
 });
 

@@ -704,6 +704,7 @@ function createAiRouter(deps) {
         maxOutputTokens: 4000,
         allowEmptyResponse: true,
         emptyResponseFallback: 'Пустой ответ от модели. Уточните запрос или повторите через несколько секунд.',
+        timeoutMs: 130_000,
       });
       const usedModel = toTrimmedString(aiResponse?.debug?.response?.model, 120) || deepModel;
       const usedRouterModel = toTrimmedString(routerResponse?.debug?.response?.model, 120) || routerModel;
@@ -834,6 +835,7 @@ function createAiRouter(deps) {
         model: OPENAI_MODEL,
         temperature: 0.3,
         maxOutputTokens: 4000,
+        timeoutMs: 130_000,
       });
       const usedModel = toTrimmedString(aiResponse?.debug?.response?.model, 120) || OPENAI_MODEL;
 

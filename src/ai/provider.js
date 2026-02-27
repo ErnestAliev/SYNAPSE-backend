@@ -2,12 +2,39 @@ function createAiProvider(deps) {
   const {
     OPENAI_API_KEY,
     OPENAI_MODEL,
+    OPENAI_REQUEST_TIMEOUT_MS,
     toTrimmedString,
   } = deps;
-  const REQUEST_TIMEOUT_MS = 45_000;
+  const REQUEST_TIMEOUT_MS = Number.isFinite(Number(OPENAI_REQUEST_TIMEOUT_MS))
+    ? Math.max(15_000, Math.min(300_000, Math.floor(Number(OPENAI_REQUEST_TIMEOUT_MS))))
+    : 45_000;
   const DEFAULT_TEMPERATURE = 0.25;
   const DEFAULT_MAX_OUTPUT_TOKENS = 900;
   const MIN_MAX_OUTPUT_TOKENS = 16;
+
+  function resolveTimeoutMs(modelName, timeoutMsOverride) {
+    const override = Number(timeoutMsOverride);
+    if (Number.isFinite(override)) {
+      return Math.max(15_000, Math.min(300_000, Math.floor(override)));
+    }
+
+    const normalized = toTrimmedString(modelName, 120).toLowerCase();
+    if (!normalized) return REQUEST_TIMEOUT_MS;
+
+    if (normalized.startsWith('gpt-5.2-pro') || normalized.startsWith('gpt-5-pro')) {
+      return Math.max(REQUEST_TIMEOUT_MS, 130_000);
+    }
+
+    if (normalized.startsWith('gpt-5')) {
+      return Math.max(REQUEST_TIMEOUT_MS, 95_000);
+    }
+
+    if (normalized.startsWith('o1') || normalized.startsWith('o3') || normalized.startsWith('o4')) {
+      return Math.max(REQUEST_TIMEOUT_MS, 95_000);
+    }
+
+    return REQUEST_TIMEOUT_MS;
+  }
 
   function modelSupportsTemperature(modelName) {
     const normalized = toTrimmedString(modelName, 120).toLowerCase();
@@ -108,15 +135,17 @@ function createAiProvider(deps) {
     maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
     allowEmptyResponse = false,
     emptyResponseFallback = '',
+    timeoutMs,
   }) {
     if (!OPENAI_API_KEY) {
       throw Object.assign(new Error('OPENAI_API_KEY is not configured'), { status: 503 });
     }
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-    const startedAt = Date.now();
     const resolvedModel = toTrimmedString(model, 120) || OPENAI_MODEL;
+    const resolvedTimeoutMs = resolveTimeoutMs(resolvedModel, timeoutMs);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), resolvedTimeoutMs);
+    const startedAt = Date.now();
     const numericTemperature = Number.isFinite(Number(temperature)) ? Number(temperature) : DEFAULT_TEMPERATURE;
     const numericMaxOutputTokens = Number.isFinite(Number(maxOutputTokens))
       ? Math.max(MIN_MAX_OUTPUT_TOKENS, Math.floor(Number(maxOutputTokens)))
@@ -126,7 +155,7 @@ function createAiProvider(deps) {
       model: resolvedModel,
       temperature: shouldUseTemperature ? numericTemperature : null,
       max_output_tokens: numericMaxOutputTokens,
-      timeout_ms: REQUEST_TIMEOUT_MS,
+      timeout_ms: resolvedTimeoutMs,
     };
 
     let response;
