@@ -77,6 +77,20 @@ function createAiProvider(deps) {
       for (const content of contentItems) {
         if (typeof content?.text === 'string' && content.text.trim()) {
           chunks.push(content.text.trim());
+          continue;
+        }
+
+        if (typeof content?.refusal === 'string' && content.refusal.trim()) {
+          chunks.push(content.refusal.trim());
+          continue;
+        }
+
+        if (Array.isArray(content?.summary)) {
+          for (const summaryItem of content.summary) {
+            if (typeof summaryItem?.text === 'string' && summaryItem.text.trim()) {
+              chunks.push(summaryItem.text.trim());
+            }
+          }
         }
       }
     }
@@ -92,6 +106,8 @@ function createAiProvider(deps) {
     model = '',
     temperature = DEFAULT_TEMPERATURE,
     maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
+    allowEmptyResponse = false,
+    emptyResponseFallback = '',
   }) {
     if (!OPENAI_API_KEY) {
       throw Object.assign(new Error('OPENAI_API_KEY is not configured'), { status: 503 });
@@ -169,13 +185,15 @@ function createAiProvider(deps) {
       throw Object.assign(new Error(providerMessage), { status: 502 });
     }
 
-    const reply = extractOpenAiResponseText(payload);
-    if (!reply) {
+    const extractedReply = extractOpenAiResponseText(payload);
+    const reply = extractedReply || toTrimmedString(emptyResponseFallback, 1200);
+
+    if (!reply && !allowEmptyResponse) {
       throw Object.assign(new Error('AI response is empty'), { status: 502 });
     }
 
     return {
-      reply,
+      reply: reply || 'Не удалось получить текстовый ответ. Попробуйте уточнить запрос и повторить.',
       usage: payload?.usage || null,
       debug: {
         request: requestConfig,
@@ -185,7 +203,8 @@ function createAiProvider(deps) {
           id: toTrimmedString(payload?.id, 120),
           created: toTrimmedString(payload?.created, 120),
           model: toTrimmedString(payload?.model, 120) || requestConfig.model,
-          output_text_length: reply.length,
+          output_text_length: extractedReply.length,
+          used_empty_fallback: !extractedReply.length,
           completed_in_ms: Math.max(1, Date.now() - startedAt),
         },
         ...(includeRawPayload ? { raw_payload: payload } : {}),

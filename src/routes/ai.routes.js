@@ -700,6 +700,8 @@ function createAiRouter(deps) {
         model: deepModel,
         temperature: 0.25,
         maxOutputTokens: 4000,
+        allowEmptyResponse: true,
+        emptyResponseFallback: 'Пустой ответ от модели. Уточните запрос или повторите через несколько секунд.',
       });
       const usedModel = toTrimmedString(aiResponse?.debug?.response?.model, 120) || deepModel;
       const usedRouterModel = toTrimmedString(routerResponse?.debug?.response?.model, 120) || routerModel;
