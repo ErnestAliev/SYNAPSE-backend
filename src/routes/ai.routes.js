@@ -540,6 +540,7 @@ function createAiRouter(deps) {
         userPrompt,
         includeRawPayload: includeDebug,
       });
+      const usedModel = toTrimmedString(aiResponse?.debug?.response?.model, 120) || OPENAI_MODEL;
 
       const parsedResponse = extractJsonObjectFromText(aiResponse.reply);
       const analysis = ensureAnalysisMarkers(normalizeEntityAnalysisOutput(entity.type, parsedResponse));
@@ -588,7 +589,7 @@ function createAiRouter(deps) {
               normalized: analysis,
               reply,
               usage: aiResponse.usage,
-              model: toTrimmedString(aiResponse?.debug?.response?.model, 120) || OPENAI_MODEL,
+              model: usedModel,
             },
             provider: aiResponse.debug || {},
             vector: vector || null,
@@ -600,7 +601,7 @@ function createAiRouter(deps) {
         reply,
         suggestion: analysis,
         usage: aiResponse.usage,
-        model: OPENAI_MODEL,
+        model: usedModel,
         vector,
         ...(vectorWarning ? { vectorWarning } : {}),
         ...(debugPayload ? { debug: debugPayload } : {}),

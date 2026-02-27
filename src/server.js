@@ -73,7 +73,7 @@ const DEV_AUTH_ENABLED =
   !IS_PRODUCTION && String(process.env.DEV_AUTH_ENABLED || 'true').toLowerCase() !== 'false';
 const DEFAULT_ALLOWED_ORIGINS = ['http://localhost:5173', 'http://localhost:3000'];
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
-const OPENAI_MODEL = String(process.env.OPENAI_MODEL || 'gpt-4.1-mini').trim();
+const OPENAI_MODEL = String(process.env.OPENAI_MODEL || 'gpt-5-mini').trim();
 const OPENAI_PROJECT_MODEL = String(process.env.OPENAI_PROJECT_MODEL || 'gpt-5-mini').trim();
 const OPENAI_ROUTER_MODEL = String(process.env.OPENAI_ROUTER_MODEL || 'gpt-4o-mini').trim();
 const OPENAI_DEEP_MODEL = String(process.env.OPENAI_DEEP_MODEL || OPENAI_PROJECT_MODEL || 'gpt-5-mini').trim();
