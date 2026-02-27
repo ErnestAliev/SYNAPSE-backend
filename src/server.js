@@ -12,6 +12,10 @@ const connectDB = require('./config/db');
 const Entity = require('./models/Entity');
 const User = require('./models/User');
 const EntityVector = require('./models/EntityVector');
+const { createAiPrompts } = require('./ai/prompts');
+const { createAiAttachmentTools } = require('./ai/attachments');
+const { createAiProvider } = require('./ai/provider');
+const { createAiRouter } = require('./routes/ai.routes');
 
 let whatsappWeb = null;
 let whatsappBaileys = null;
@@ -1069,110 +1073,6 @@ function buildEntityAnalyzerCurrentFields(entityType, aiMetadata) {
   return current;
 }
 
-function buildEntityAnalyzerSystemPrompt(entityType) {
-  const allowedFields = getEntityAnalyzerFields(entityType);
-
-  return [
-    'Ты Synapse12 Entity Analyst.',
-    `Текущий тип сущности: ${entityType}.`,
-    'Работай только на данных из входного JSON.',
-    'Твоя задача: интерпретировать сырые пользовательские данные и вернуть структурированный JSON.',
-    'Нельзя превращать весь текст в теги. Добавляй только осмысленные признаки.',
-    `Разрешенные поля для fields: ${allowedFields.join(', ')}.`,
-    'importance: только одно из [Низкая, Средняя, Высокая], вернуть как массив из 0..1 элементов.',
-    'links: только валидные URL.',
-    'description: 3-6 предложений, емко и без воды.',
-    'changeType: одно из [initial, addition, update] относительно текущего описания.',
-    'changeReason: кратко (1-2 фразы), почему это initial/addition/update.',
-    'importanceSignal: одно из [increase, decrease, neutral] на основе новых фактов и истории.',
-    'importanceReason: кратко, почему важность нужно повысить/понизить/оставить.',
-    'Если данных мало, status=need_clarification и до 3 уточняющих вопросов.',
-    'Если данных хватает, status=ready.',
-    'Верни СТРОГО JSON без markdown.',
-    'Формат:',
-    '{',
-    '  "status": "ready | need_clarification",',
-    '  "description": "string",',
-    '  "changeType": "initial | addition | update",',
-    '  "changeReason": "string",',
-    '  "fields": { "tags": [], "roles": [], ... },',
-    '  "importanceSignal": "increase | decrease | neutral",',
-    '  "importanceReason": "string",',
-    '  "clarifyingQuestions": [],',
-    '  "confidence": {},',
-    '  "ignoredNoise": []',
-    '}',
-  ].join('\n');
-}
-
-function buildEntityAnalyzerUserPrompt({
-  entity,
-  message,
-  history,
-  attachments,
-  currentFields,
-  voiceInput,
-  documents,
-}) {
-  const contextPayload = {
-    entity: {
-      id: String(entity._id),
-      type: entity.type,
-      name: toTrimmedString(entity.name, 120),
-    },
-    descriptionContext: {
-      currentDescription: toTrimmedString(toProfile(entity.ai_metadata).description, 2200),
-      recentDescriptionHistory: normalizeDescriptionHistory(toProfile(entity.ai_metadata).description_history)
-        .slice(-5)
-        .map((row) => ({
-          at: row.at,
-          changeType: row.changeType,
-          reason: row.reason,
-        })),
-      recentImportanceHistory: normalizeImportanceHistory(toProfile(entity.ai_metadata).importance_history)
-        .slice(-5)
-        .map((row) => ({
-          at: row.at,
-          before: row.before,
-          after: row.after,
-          signal: row.signal,
-          reason: row.reason,
-        })),
-    },
-    currentFields,
-    message,
-    voiceInput,
-    history,
-    attachments,
-    documents,
-  };
-
-  return ['Контекст сущности (JSON):', JSON.stringify(contextPayload, null, 2)].join('\n');
-}
-
-function buildEntityAnalysisReplyText(analysis) {
-  if (analysis.status === 'need_clarification') {
-    if (analysis.clarifyingQuestions.length) {
-      return ['Нужны уточнения перед заполнением профиля:', ...analysis.clarifyingQuestions.map((q) => `- ${q}`)].join(
-        '\n',
-      );
-    }
-    return 'Нужны уточнения перед заполнением профиля.';
-  }
-
-  if (analysis.description) {
-    const changeLabels = {
-      initial: 'Первичное описание',
-      addition: 'Описание дополнено',
-      update: 'Описание обновлено',
-    };
-    const changeLabel = changeLabels[analysis.changeType] || 'Описание обновлено';
-    return `Готово. ${changeLabel}.\n\n${analysis.description}`;
-  }
-
-  return 'Готово. Поля профиля обновлены.';
-}
-
 function buildEntityVectorContent(entity, analysis) {
   const fields = analysis.fields || {};
   const asText = (value) => (Array.isArray(value) ? value.filter(Boolean).join(', ') : '');
@@ -1325,155 +1225,6 @@ function buildEntityMetadataPatch(entityType, existingMetadata, analysis) {
   });
 }
 
-function normalizeAgentHistory(rawHistory) {
-  if (!Array.isArray(rawHistory)) return [];
-  return rawHistory
-    .map((item) => {
-      const row = toProfile(item);
-      const role = row.role === 'assistant' ? 'assistant' : row.role === 'user' ? 'user' : '';
-      const text = toTrimmedString(row.text, 1800);
-      if (!role || !text) return null;
-      return { role, text };
-    })
-    .filter(Boolean)
-    .slice(-AI_HISTORY_MESSAGE_LIMIT);
-}
-
-function normalizeAgentAttachments(rawAttachments) {
-  if (!Array.isArray(rawAttachments)) return [];
-  return rawAttachments
-    .map((item) => {
-      const attachment = toProfile(item);
-      const name = toTrimmedString(attachment.name, 120);
-      if (!name) return null;
-      const mime = toTrimmedString(attachment.mime, 120);
-      const size =
-        typeof attachment.size === 'number' && Number.isFinite(attachment.size)
-          ? Math.max(0, Math.floor(attachment.size))
-          : 0;
-      const data = toTrimmedString(attachment.data, AI_ATTACHMENT_DATA_URL_MAX_LENGTH);
-      const text = toTrimmedString(attachment.text, AI_ATTACHMENT_TEXT_MAX_LENGTH);
-      return compactObject({ name, mime, size, data, text });
-    })
-    .filter(Boolean)
-    .slice(0, AI_ATTACHMENT_LIMIT);
-}
-
-function parseDataUrl(value) {
-  const raw = toTrimmedString(value, AI_ATTACHMENT_DATA_URL_MAX_LENGTH);
-  if (!raw.startsWith('data:')) return null;
-
-  const commaIndex = raw.indexOf(',');
-  if (commaIndex <= 5) return null;
-
-  const meta = raw.slice(5, commaIndex);
-  const payload = raw.slice(commaIndex + 1);
-  const metaParts = meta.split(';').map((part) => part.trim()).filter(Boolean);
-  const mime = toTrimmedString(metaParts[0] || '', 160).toLowerCase();
-  const isBase64 = metaParts.includes('base64');
-  if (!payload) return null;
-
-  return { mime, isBase64, payload };
-}
-
-function shouldTreatAsTextAttachment(name, mime) {
-  const loweredMime = toTrimmedString(mime, 120).toLowerCase();
-  const loweredName = toTrimmedString(name, 160).toLowerCase();
-  if (loweredMime.startsWith('text/')) return true;
-  if (loweredMime === 'application/json') return true;
-  if (loweredMime === 'application/xml') return true;
-  if (loweredMime === 'application/x-yaml') return true;
-  return (
-    loweredName.endsWith('.txt') ||
-    loweredName.endsWith('.md') ||
-    loweredName.endsWith('.json') ||
-    loweredName.endsWith('.csv') ||
-    loweredName.endsWith('.yaml') ||
-    loweredName.endsWith('.yml') ||
-    loweredName.endsWith('.xml') ||
-    loweredName.endsWith('.log')
-  );
-}
-
-function isDocxAttachment(name, mime) {
-  const loweredMime = toTrimmedString(mime, 120).toLowerCase();
-  const loweredName = toTrimmedString(name, 160).toLowerCase();
-  return (
-    loweredMime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
-    loweredName.endsWith('.docx')
-  );
-}
-
-function decodeAttachmentBuffer(attachment) {
-  const parsed = parseDataUrl(attachment?.data);
-  if (!parsed) return null;
-
-  let buffer = null;
-  try {
-    buffer = parsed.isBase64
-      ? Buffer.from(parsed.payload, 'base64')
-      : Buffer.from(decodeURIComponent(parsed.payload), 'utf8');
-  } catch {
-    return null;
-  }
-
-  if (!buffer || !buffer.length) return null;
-  if (buffer.length > AI_ATTACHMENT_BINARY_MAX_BYTES) return null;
-
-  return {
-    buffer,
-    mime: parsed.mime || toTrimmedString(attachment?.mime, 120).toLowerCase(),
-  };
-}
-
-async function extractAttachmentText(attachment) {
-  const directText = toTrimmedString(attachment?.text, AI_ATTACHMENT_TEXT_MAX_LENGTH);
-  if (directText) {
-    return directText;
-  }
-
-  const decoded = decodeAttachmentBuffer(attachment);
-  if (!decoded) return '';
-
-  const name = toTrimmedString(attachment?.name, 120);
-  const mime = toTrimmedString(attachment?.mime, 120).toLowerCase() || decoded.mime;
-
-  if (shouldTreatAsTextAttachment(name, mime)) {
-    return toTrimmedString(decoded.buffer.toString('utf8'), AI_ATTACHMENT_TEXT_MAX_LENGTH);
-  }
-
-  if (isDocxAttachment(name, mime) && mammoth) {
-    try {
-      const parsed = await mammoth.extractRawText({ buffer: decoded.buffer });
-      return toTrimmedString(parsed?.value, AI_ATTACHMENT_TEXT_MAX_LENGTH);
-    } catch {
-      return '';
-    }
-  }
-
-  return '';
-}
-
-async function prepareAgentAttachments(rawAttachments) {
-  const normalized = normalizeAgentAttachments(rawAttachments);
-  const prepared = [];
-
-  for (const attachment of normalized) {
-    const text = await extractAttachmentText(attachment);
-    prepared.push(
-      compactObject({
-        name: attachment.name,
-        mime: attachment.mime,
-        size: attachment.size,
-        text,
-        hasInlineData: Boolean(attachment.data),
-      }),
-    );
-  }
-
-  return prepared;
-}
-
 function summarizeEntityForAgent(entity) {
   const profile = toProfile(entity.profile);
   const aiMetadata = toProfile(entity.ai_metadata);
@@ -1510,26 +1261,6 @@ function summarizeEntityForAgent(entity) {
     },
     updatedAt: entity.updatedAt || '',
   });
-}
-
-function extractOpenAiResponseText(payload) {
-  if (payload && typeof payload.output_text === 'string' && payload.output_text.trim()) {
-    return payload.output_text.trim();
-  }
-
-  const chunks = [];
-  const outputs = Array.isArray(payload?.output) ? payload.output : [];
-  for (const item of outputs) {
-    const contentItems = Array.isArray(item?.content) ? item.content : [];
-    for (const content of contentItems) {
-      if (typeof content?.text === 'string' && content.text.trim()) {
-        chunks.push(content.text.trim());
-      }
-    }
-  }
-
-  if (!chunks.length) return '';
-  return chunks.join('\n').trim();
 }
 
 function buildProjectConnections(canvasData, entitiesById) {
@@ -1650,116 +1381,6 @@ async function resolveAgentScopeContext(ownerId, rawScope) {
   }
 
   throw Object.assign(new Error('Invalid scope type'), { status: 400 });
-}
-
-function buildAgentSystemPrompt(scopeContext) {
-  const scopeDescription =
-    scopeContext.scopeType === 'project'
-      ? `Текущий контекст: проект "${scopeContext.projectName}" (${scopeContext.totalEntities} сущностей).`
-      : `Текущий контекст: вкладка "${scopeContext.entityType}" (${scopeContext.totalEntities} сущностей).`;
-
-  return [
-    'Ты LLM-аналитик системы Synapse12.',
-    scopeDescription,
-    'Жесткое правило: используй ТОЛЬКО данные из переданного контекста.',
-    'Нельзя подтягивать данные из других вкладок, проектов или внешних источников.',
-    'Если пользователь просит "повторить анализ" или "обновить вывод", анализируй текущий контекст как есть и историю диалога.',
-    'Не отвечай "данные не предоставлены", если в контексте уже есть описание/теги/поля сущностей.',
-    'Фразу "Недостаточно данных в текущем контексте" используй только когда в контексте реально нет фактов для вывода.',
-    'Отвечай по-русски, структурно и кратко.',
-    'Формат ответа:',
-    '1) Краткий вывод',
-    '2) Наблюдения',
-    '3) Возможности и риски',
-    '4) Следующие шаги',
-  ].join('\n');
-}
-
-function buildAgentUserPrompt({ scopeContext, message, history, attachments }) {
-  const contextPayload = {
-    scope: compactObject({
-      type: scopeContext.scopeType,
-      name: scopeContext.scopeName,
-      entityType: scopeContext.entityType,
-      projectId: scopeContext.projectId,
-      projectName: scopeContext.projectName,
-      totalEntities: scopeContext.totalEntities,
-      contextLimit: AI_CONTEXT_ENTITY_LIMIT,
-    }),
-    entities: scopeContext.entities.map((entity) => summarizeEntityForAgent(entity)),
-    connections: scopeContext.connections,
-    attachments,
-    history,
-  };
-
-  return [
-    'Контекст Synapse12 (JSON):',
-    JSON.stringify(contextPayload, null, 2),
-    '',
-    'Текущий запрос пользователя:',
-    message,
-  ].join('\n');
-}
-
-async function requestOpenAiAgentReply({ systemPrompt, userPrompt }) {
-  if (!OPENAI_API_KEY) {
-    throw Object.assign(new Error('OPENAI_API_KEY is not configured'), { status: 503 });
-  }
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 45_000);
-
-  let response;
-  let payload;
-  try {
-    response = await fetch('https://api.openai.com/v1/responses', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: OPENAI_MODEL,
-        input: [
-          {
-            role: 'system',
-            content: [{ type: 'input_text', text: systemPrompt }],
-          },
-          {
-            role: 'user',
-            content: [{ type: 'input_text', text: userPrompt }],
-          },
-        ],
-        temperature: 0.25,
-        max_output_tokens: 900,
-      }),
-      signal: controller.signal,
-    });
-
-    payload = await response.json();
-  } catch (error) {
-    if (error && error.name === 'AbortError') {
-      throw Object.assign(new Error('AI request timeout'), { status: 504 });
-    }
-    throw Object.assign(new Error('Failed to call AI provider'), { status: 502 });
-  } finally {
-    clearTimeout(timeout);
-  }
-
-  if (!response.ok) {
-    const providerMessage = toTrimmedString(payload?.error?.message, 300) || 'AI provider error';
-    throw Object.assign(new Error(providerMessage), { status: 502 });
-  }
-
-  const reply = extractOpenAiResponseText(payload);
-  if (!reply) {
-    throw Object.assign(new Error('AI response is empty'), { status: 502 });
-  }
-
-  return {
-    reply,
-    usage: payload?.usage || null,
-  };
 }
 
 function getSessionCookieOptions() {
@@ -4502,245 +4123,54 @@ app.post('/api/auth/logout', async (req, res) => {
   return res.status(204).send();
 });
 
-app.post('/api/ai/agent-chat', requireAuth, async (req, res, next) => {
-  try {
-    const ownerId = requireOwnerId(req);
-    const message = toTrimmedString(req.body?.message, 2400);
-
-    if (!message) {
-      return res.status(400).json({ message: 'message is required' });
-    }
-
-    const history = normalizeAgentHistory(req.body?.history);
-    const attachments = await prepareAgentAttachments(req.body?.attachments);
-    const scopeContext = await resolveAgentScopeContext(ownerId, req.body?.scope);
-
-    const systemPrompt = buildAgentSystemPrompt(scopeContext);
-    const userPrompt = buildAgentUserPrompt({
-      scopeContext,
-      message,
-      history,
-      attachments,
-    });
-
-    const aiResponse = await requestOpenAiAgentReply({
-      systemPrompt,
-      userPrompt,
-    });
-
-    const includeDebug = AI_DEBUG_ECHO || req.body?.debug === true;
-    const debugPayload = includeDebug
-      ? {
-          scope: {
-            type: scopeContext.scopeType,
-            entityType: scopeContext.entityType,
-            projectId: scopeContext.projectId,
-            totalEntities: scopeContext.totalEntities,
-          },
-          input: {
-            message,
-            history,
-            attachments,
-          },
-          prompts: {
-            systemPrompt,
-            userPrompt,
-          },
-          response: {
-            reply: aiResponse.reply,
-            usage: aiResponse.usage,
-            model: OPENAI_MODEL,
-          },
-        }
-      : undefined;
-
-    return res.status(200).json({
-      reply: aiResponse.reply,
-      usage: aiResponse.usage,
-      model: OPENAI_MODEL,
-      context: {
-        scopeType: scopeContext.scopeType,
-        entityType: scopeContext.entityType,
-        projectId: scopeContext.projectId,
-        totalEntities: scopeContext.totalEntities,
-        limitedTo: AI_CONTEXT_ENTITY_LIMIT,
-      },
-      ...(debugPayload ? { debug: debugPayload } : {}),
-    });
-  } catch (error) {
-    return next(error);
-  }
+const aiPrompts = createAiPrompts({
+  AI_CONTEXT_ENTITY_LIMIT,
+  toTrimmedString,
+  toProfile,
+  getEntityAnalyzerFields,
+  normalizeDescriptionHistory,
+  normalizeImportanceHistory,
 });
 
-app.post('/api/ai/entity-analyze', requireAuth, async (req, res, next) => {
-  try {
-    const ownerId = requireOwnerId(req);
-    const entityId = toTrimmedString(req.body?.entityId, 80);
-    if (!entityId) {
-      return res.status(400).json({ message: 'entityId is required' });
-    }
-
-    const entity = await Entity.findOne({
-      _id: entityId,
-      owner_id: ownerId,
-    }).lean();
-
-    if (!entity) {
-      return res.status(404).json({ message: 'Entity not found' });
-    }
-
-    const message = toTrimmedString(req.body?.message, 4000);
-    const voiceInput = toTrimmedString(req.body?.voiceInput, 4000);
-    const history = normalizeAgentHistory(req.body?.history);
-    const attachments = await prepareAgentAttachments(req.body?.attachments);
-    const documents = await prepareAgentAttachments(req.body?.documents);
-
-    if (!message && !voiceInput && !history.length && !attachments.length && !documents.length) {
-      return res
-        .status(400)
-        .json({ message: 'message or at least one context item (history/attachments/documents) is required' });
-    }
-
-    const aiMetadata = toProfile(entity.ai_metadata);
-    const currentFields = buildEntityAnalyzerCurrentFields(entity.type, aiMetadata);
-    const systemPrompt = buildEntityAnalyzerSystemPrompt(entity.type);
-    const userPrompt = buildEntityAnalyzerUserPrompt({
-      entity,
-      message,
-      history,
-      attachments,
-      currentFields,
-      voiceInput,
-      documents,
-    });
-
-    const aiResponse = await requestOpenAiAgentReply({
-      systemPrompt,
-      userPrompt,
-    });
-
-    const parsedResponse = extractJsonObjectFromText(aiResponse.reply);
-    const analysis = normalizeEntityAnalysisOutput(entity.type, parsedResponse);
-    const reply = buildEntityAnalysisReplyText(analysis);
-
-    let vector = null;
-    let vectorWarning = '';
-    if (analysis.status === 'ready') {
-      try {
-        const vectorDoc = await upsertEntityVector(ownerId, entity, analysis);
-        if (vectorDoc) {
-          vector = {
-            id: String(vectorDoc._id),
-            model: vectorDoc.model,
-            dimensions: Array.isArray(vectorDoc.vector) ? vectorDoc.vector.length : 0,
-            updatedAt: vectorDoc.updatedAt,
-          };
-        }
-      } catch (error) {
-        vectorWarning = toTrimmedString(error?.message, 220) || 'Vector build failed';
-      }
-    }
-
-    const includeDebug = AI_DEBUG_ECHO || req.body?.debug === true;
-    const debugPayload = includeDebug
-      ? {
-          entity: {
-            id: String(entity._id),
-            type: entity.type,
-            name: entity.name || '',
-          },
-          input: {
-            message,
-            voiceInput,
-            history,
-            attachments,
-            documents,
-            currentFields,
-          },
-          prompts: {
-            systemPrompt,
-            userPrompt,
-          },
-          response: {
-            raw: aiResponse.reply,
-            parsed: parsedResponse,
-            normalized: analysis,
-            reply,
-            usage: aiResponse.usage,
-            model: OPENAI_MODEL,
-          },
-          vector: vector || null,
-          vectorWarning: vectorWarning || '',
-        }
-      : undefined;
-
-    return res.status(200).json({
-      reply,
-      suggestion: analysis,
-      usage: aiResponse.usage,
-      model: OPENAI_MODEL,
-      vector,
-      ...(vectorWarning ? { vectorWarning } : {}),
-      ...(debugPayload ? { debug: debugPayload } : {}),
-    });
-  } catch (error) {
-    return next(error);
-  }
+const aiAttachments = createAiAttachmentTools({
+  toProfile,
+  toTrimmedString,
+  compactObject,
+  AI_HISTORY_MESSAGE_LIMIT,
+  AI_ATTACHMENT_LIMIT,
+  AI_ATTACHMENT_TEXT_MAX_LENGTH,
+  AI_ATTACHMENT_DATA_URL_MAX_LENGTH,
+  AI_ATTACHMENT_BINARY_MAX_BYTES,
+  mammoth,
 });
 
-app.post('/api/ai/entity-apply', requireAuth, async (req, res, next) => {
-  try {
-    const ownerId = requireOwnerId(req);
-    const entityId = toTrimmedString(req.body?.entityId, 80);
-    if (!entityId) {
-      return res.status(400).json({ message: 'entityId is required' });
-    }
-
-    const entity = await Entity.findOne({
-      _id: entityId,
-      owner_id: ownerId,
-    });
-
-    if (!entity) {
-      return res.status(404).json({ message: 'Entity not found' });
-    }
-
-    const analysis = normalizeEntityAnalysisOutput(entity.type, req.body?.suggestion);
-    const nextMetadata = buildEntityMetadataPatch(entity.type, entity.ai_metadata, analysis);
-    entity.ai_metadata = nextMetadata;
-    await entity.save();
-    broadcastEntityEvent(ownerId, 'entity.updated', {
-      entity: entity.toObject(),
-    });
-
-    let vector = null;
-    let vectorWarning = '';
-    if (analysis.status === 'ready') {
-      try {
-        const vectorDoc = await upsertEntityVector(ownerId, entity, analysis);
-        if (vectorDoc) {
-          vector = {
-            id: String(vectorDoc._id),
-            model: vectorDoc.model,
-            dimensions: Array.isArray(vectorDoc.vector) ? vectorDoc.vector.length : 0,
-            updatedAt: vectorDoc.updatedAt,
-          };
-        }
-      } catch (error) {
-        vectorWarning = toTrimmedString(error?.message, 220) || 'Vector build failed';
-      }
-    }
-
-    return res.status(200).json({
-      entity,
-      suggestion: analysis,
-      vector,
-      ...(vectorWarning ? { vectorWarning } : {}),
-    });
-  } catch (error) {
-    return next(error);
-  }
+const aiProvider = createAiProvider({
+  OPENAI_API_KEY,
+  OPENAI_MODEL,
+  toTrimmedString,
 });
+
+const aiRouter = createAiRouter({
+  requireAuth,
+  requireOwnerId,
+  toTrimmedString,
+  toProfile,
+  AI_DEBUG_ECHO,
+  OPENAI_MODEL,
+  Entity,
+  resolveAgentScopeContext,
+  buildEntityAnalyzerCurrentFields,
+  extractJsonObjectFromText,
+  normalizeEntityAnalysisOutput,
+  buildEntityMetadataPatch,
+  upsertEntityVector,
+  broadcastEntityEvent,
+  aiPrompts,
+  aiAttachments,
+  aiProvider,
+});
+
+app.use('/api/ai', aiRouter);
 
 app.use('/api/entities', requireAuth);
 
