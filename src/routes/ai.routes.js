@@ -533,10 +533,12 @@ function createAiRouter(deps) {
         voiceInput,
         documents,
       });
+      const includeDebug = AI_DEBUG_ECHO || req.body?.debug === true;
 
       const aiResponse = await aiProvider.requestOpenAiAgentReply({
         systemPrompt,
         userPrompt,
+        includeRawPayload: includeDebug,
       });
 
       const parsedResponse = extractJsonObjectFromText(aiResponse.reply);
@@ -561,7 +563,6 @@ function createAiRouter(deps) {
         }
       }
 
-      const includeDebug = AI_DEBUG_ECHO || req.body?.debug === true;
       const debugPayload = includeDebug
         ? {
             entity: {
@@ -587,8 +588,9 @@ function createAiRouter(deps) {
               normalized: analysis,
               reply,
               usage: aiResponse.usage,
-              model: OPENAI_MODEL,
+              model: toTrimmedString(aiResponse?.debug?.response?.model, 120) || OPENAI_MODEL,
             },
+            provider: aiResponse.debug || {},
             vector: vector || null,
             vectorWarning: vectorWarning || '',
           }
