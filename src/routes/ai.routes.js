@@ -670,7 +670,7 @@ function createAiRouter(deps) {
       const routerPrompt = aiPrompts.buildRouterPrompt(contextData, message);
       const routerSystemPrompt =
         'Ты Semantic Router Synapse12. Верни строго одно слово из списка: investor, hr, strategist, default.';
-      const routerModel = toTrimmedString(OPENAI_ROUTER_MODEL, 120) || 'gpt-4o-mini';
+      const routerModel = toTrimmedString(OPENAI_ROUTER_MODEL, 120) || 'gpt-5.2-pro';
 
       const routerResponse = await aiProvider.requestOpenAiAgentReply({
         systemPrompt: routerSystemPrompt,
