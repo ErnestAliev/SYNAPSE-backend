@@ -1,3 +1,58 @@
+const SYSTEM_CONTEXT_KEYS_TO_DROP = new Set(['__v', 'createdAt', 'updatedAt']);
+
+function cleanContextValue(value, path) {
+  if (value instanceof Date) {
+    return new Date(value.getTime());
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item, index) => cleanContextValue(item, path.concat(String(index))));
+  }
+
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+
+  const source = value;
+  const output = {};
+
+  for (const [key, nestedValue] of Object.entries(source)) {
+    if (SYSTEM_CONTEXT_KEYS_TO_DROP.has(key)) {
+      continue;
+    }
+
+    if (key === 'attachments') {
+      continue;
+    }
+
+    if (key === 'description_history') {
+      if (Array.isArray(nestedValue)) {
+        if (!nestedValue.length) {
+          output[key] = [];
+        } else {
+          const lastItem = nestedValue[nestedValue.length - 1];
+          output[key] = [cleanContextValue(lastItem, path.concat(key, '0'))];
+        }
+      } else {
+        output[key] = cleanContextValue(nestedValue, path.concat(key));
+      }
+      continue;
+    }
+
+    if (key === 'image' && path[path.length - 1] === 'profile') {
+      continue;
+    }
+
+    output[key] = cleanContextValue(nestedValue, path.concat(key));
+  }
+
+  return output;
+}
+
+function cleanContextData(entities) {
+  return cleanContextValue(entities, []);
+}
+
 function createAiPrompts(deps) {
   const {
     AI_CONTEXT_ENTITY_LIMIT,
@@ -32,6 +87,8 @@ function createAiPrompts(deps) {
   }
 
   function buildAgentUserPrompt({ scopeContext, message, history, attachments }) {
+    const cleanedEntities = cleanContextData(scopeContext.entities);
+
     const contextPayload = {
       scope: {
         type: scopeContext.scopeType,
@@ -42,7 +99,7 @@ function createAiPrompts(deps) {
         totalEntities: scopeContext.totalEntities,
         contextLimit: AI_CONTEXT_ENTITY_LIMIT,
       },
-      entities: scopeContext.entities,
+      entities: cleanedEntities,
       connections: scopeContext.connections,
       attachments,
       history,
@@ -174,4 +231,5 @@ function createAiPrompts(deps) {
 
 module.exports = {
   createAiPrompts,
+  cleanContextData,
 };
