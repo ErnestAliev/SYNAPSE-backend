@@ -7,6 +7,7 @@ function createAiProvider(deps) {
   const REQUEST_TIMEOUT_MS = 45_000;
   const DEFAULT_TEMPERATURE = 0.25;
   const DEFAULT_MAX_OUTPUT_TOKENS = 900;
+  const MIN_MAX_OUTPUT_TOKENS = 16;
 
   function modelSupportsTemperature(modelName) {
     const normalized = toTrimmedString(modelName, 120).toLowerCase();
@@ -102,7 +103,7 @@ function createAiProvider(deps) {
     const resolvedModel = toTrimmedString(model, 120) || OPENAI_MODEL;
     const numericTemperature = Number.isFinite(Number(temperature)) ? Number(temperature) : DEFAULT_TEMPERATURE;
     const numericMaxOutputTokens = Number.isFinite(Number(maxOutputTokens))
-      ? Math.max(1, Math.floor(Number(maxOutputTokens)))
+      ? Math.max(MIN_MAX_OUTPUT_TOKENS, Math.floor(Number(maxOutputTokens)))
       : DEFAULT_MAX_OUTPUT_TOKENS;
     const shouldUseTemperature = modelSupportsTemperature(resolvedModel);
     const requestConfig = {
