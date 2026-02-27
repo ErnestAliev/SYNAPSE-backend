@@ -1,4 +1,25 @@
 const SYSTEM_CONTEXT_KEYS_TO_DROP = new Set(['__v', 'createdAt', 'updatedAt']);
+const EXPERT_PROFILES = Object.freeze({
+  investor:
+    'Ты Жесткий Инвест-аналитик. Фокус: юнит-экономика, кассовые разрывы, ROI, риски договоров.',
+  hr: 'Ты HR-профайлер. Фокус: совместимость команды, стили управления, психотипы, риск конфликтов.',
+  strategist: 'Ты Бизнес-стратег. Фокус: поиск неочевидных рычагов, транзитных связей, точек роста.',
+  default: 'Ты Аналитик Synapse12. Фокус: базовая оценка связей.',
+});
+
+const STRICT_FORMATTING_RULES = `
+ПРАВИЛА ВЫДАЧИ (КРИТИЧЕСКИ ВАЖНО):
+1. ПИШИ ТОЛЬКО ЧИСТЫМ ТЕКСТОМ.
+2. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать Markdown (звездочки **, решетки #, списки -, _, жирный шрифт, курсив).
+3. ЗАПРЕЩЕНО использовать эмодзи.
+4. НИКАКОЙ ВОДЫ. Отвечай строго в 4 абзаца:
+Факт: [сухой факт из данных]
+Связь: [твой инсайт]
+Вывод: [оценка риска/вероятности]
+Вопрос: [один хирургический вопрос пользователю для следующего шага]
+`.trim();
+
+const ALLOWED_ROUTER_ROLES = new Set(['investor', 'hr', 'strategist', 'default']);
 
 function isPathInsideDocuments(path) {
   return Array.isArray(path) && path.includes('documents');
@@ -65,6 +86,40 @@ function cleanContextData(entities) {
   return cleanContextValue(entities, []);
 }
 
+function collectEntitySemanticSignals(entity) {
+  if (!entity || typeof entity !== 'object') return [];
+
+  const metadata = entity.ai_metadata && typeof entity.ai_metadata === 'object' ? entity.ai_metadata : {};
+  const directTags = Array.isArray(entity.tags) ? entity.tags : [];
+  const directRoles = Array.isArray(entity.roles) ? entity.roles : [];
+  const metaTags = Array.isArray(metadata.tags) ? metadata.tags : [];
+  const metaRoles = Array.isArray(metadata.roles) ? metadata.roles : [];
+
+  return [...directTags, ...directRoles, ...metaTags, ...metaRoles]
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter(Boolean);
+}
+
+function normalizeDetectedRole(rawRole) {
+  const normalized = typeof rawRole === 'string' ? rawRole.trim().toLowerCase() : '';
+  if (!normalized) return 'default';
+
+  // Router can return extra text; take first semantic token only.
+  const firstToken = normalized
+    .split(/[\s,.;:!?\n\r\t]+/g)
+    .map((item) => item.trim())
+    .find(Boolean);
+
+  if (firstToken && ALLOWED_ROUTER_ROLES.has(firstToken)) {
+    return firstToken;
+  }
+
+  if (normalized.includes('investor')) return 'investor';
+  if (normalized.includes('strategist')) return 'strategist';
+  if (normalized === 'hr' || normalized.includes(' hr')) return 'hr';
+  return 'default';
+}
+
 function createAiPrompts(deps) {
   const {
     AI_CONTEXT_ENTITY_LIMIT,
@@ -75,33 +130,10 @@ function createAiPrompts(deps) {
     normalizeImportanceHistory,
   } = deps;
 
-  function buildAgentSystemPrompt(scopeContext) {
-    const scopeDescription =
-      scopeContext.scopeType === 'project'
-        ? `Текущий контекст: проект "${scopeContext.projectName}" (${scopeContext.totalEntities} сущностей).`
-        : `Текущий контекст: вкладка "${scopeContext.entityType}" (${scopeContext.totalEntities} сущностей).`;
-
-    return [
-      'Ты LLM-аналитик системы Synapse12.',
-      scopeDescription,
-      'Жесткое правило: используй ТОЛЬКО данные из переданного контекста.',
-      'Нельзя подтягивать данные из других вкладок, проектов или внешних источников.',
-      'Если пользователь просит "повторить анализ" или "обновить вывод", анализируй текущий контекст как есть и историю диалога.',
-      'Не отвечай "данные не предоставлены", если в контексте уже есть описание/теги/поля сущностей.',
-      'Фразу "Недостаточно данных в текущем контексте" используй только когда в контексте реально нет фактов для вывода.',
-      'Отвечай по-русски, структурно и кратко.',
-      'Формат ответа:',
-      '1) Краткий вывод',
-      '2) Наблюдения',
-      '3) Возможности и риски',
-      '4) Следующие шаги',
-    ].join('\n');
-  }
-
-  function buildAgentUserPrompt({ scopeContext, message, history, attachments }) {
+  function buildAgentContextData({ scopeContext, history, attachments }) {
     const cleanedEntities = cleanContextData(scopeContext.entities);
 
-    const contextPayload = {
+    return {
       scope: {
         type: scopeContext.scopeType,
         name: scopeContext.scopeName,
@@ -116,13 +148,59 @@ function createAiPrompts(deps) {
       attachments,
       history,
     };
+  }
+
+  function buildRouterPrompt(contextData, userMessage) {
+    const entities = Array.isArray(contextData?.entities) ? contextData.entities : [];
+    const tagsAndRoles = entities
+      .map((entity) => collectEntitySemanticSignals(entity).join(' '))
+      .filter(Boolean)
+      .join(' ')
+      .slice(0, 6000);
+
+    const query = toTrimmedString(userMessage, 2400);
+
+    return [
+      `Проанализируй запрос "${query}" и теги: "${tagsAndRoles}".`,
+      'Определи, какой эксперт нужен. Верни СТРОГО ОДНО СЛОВО из списка: investor, hr, strategist, default.',
+      'Не пиши больше ничего.',
+    ].join('\n');
+  }
+
+  function buildAgentSystemPrompt(contextData, detectedRole = 'default') {
+    const normalizedRole = normalizeDetectedRole(detectedRole);
+    const expertText = EXPERT_PROFILES[normalizedRole] || EXPERT_PROFILES.default;
+    const scope = contextData?.scope && typeof contextData.scope === 'object' ? contextData.scope : {};
+    const scopeType = toTrimmedString(scope.type, 24);
+    const scopeDescription =
+      scopeType === 'project'
+        ? `Текущий контекст: проект "${toTrimmedString(scope.projectName, 140)}" (${Number(scope.totalEntities) || 0} сущностей).`
+        : `Текущий контекст: вкладка "${toTrimmedString(scope.entityType, 64)}" (${Number(scope.totalEntities) || 0} сущностей).`;
+
+    return [
+      expertText,
+      scopeDescription,
+      'Жесткое правило: используй ТОЛЬКО данные из переданного контекста.',
+      STRICT_FORMATTING_RULES,
+    ].join('\n');
+  }
+
+  function buildAgentUserPrompt({ contextData, scopeContext, message, history, attachments }) {
+    const payloadContext =
+      contextData && typeof contextData === 'object'
+        ? contextData
+        : buildAgentContextData({
+            scopeContext,
+            history,
+            attachments,
+          });
 
     return [
       'Контекст Synapse12 (JSON):',
-      JSON.stringify(contextPayload, null, 2),
+      JSON.stringify(payloadContext, null, 2),
       '',
       'Текущий запрос пользователя:',
-      message,
+      toTrimmedString(message, 2400),
     ].join('\n');
   }
 
@@ -233,6 +311,9 @@ function createAiPrompts(deps) {
   }
 
   return {
+    buildAgentContextData,
+    buildRouterPrompt,
+    normalizeDetectedRole,
     buildAgentSystemPrompt,
     buildAgentUserPrompt,
     buildEntityAnalyzerSystemPrompt,

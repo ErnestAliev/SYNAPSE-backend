@@ -89,6 +89,8 @@ function createAiProvider(deps) {
     userPrompt,
     includeRawPayload = false,
     model = '',
+    temperature = DEFAULT_TEMPERATURE,
+    maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
   }) {
     if (!OPENAI_API_KEY) {
       throw Object.assign(new Error('OPENAI_API_KEY is not configured'), { status: 503 });
@@ -98,11 +100,15 @@ function createAiProvider(deps) {
     const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     const startedAt = Date.now();
     const resolvedModel = toTrimmedString(model, 120) || OPENAI_MODEL;
+    const numericTemperature = Number.isFinite(Number(temperature)) ? Number(temperature) : DEFAULT_TEMPERATURE;
+    const numericMaxOutputTokens = Number.isFinite(Number(maxOutputTokens))
+      ? Math.max(1, Math.floor(Number(maxOutputTokens)))
+      : DEFAULT_MAX_OUTPUT_TOKENS;
     const shouldUseTemperature = modelSupportsTemperature(resolvedModel);
     const requestConfig = {
       model: resolvedModel,
-      temperature: shouldUseTemperature ? DEFAULT_TEMPERATURE : null,
-      max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+      temperature: shouldUseTemperature ? numericTemperature : null,
+      max_output_tokens: numericMaxOutputTokens,
       timeout_ms: REQUEST_TIMEOUT_MS,
     };
 

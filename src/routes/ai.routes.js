@@ -9,6 +9,8 @@ function createAiRouter(deps) {
     AI_DEBUG_ECHO,
     OPENAI_MODEL,
     OPENAI_PROJECT_MODEL,
+    OPENAI_ROUTER_MODEL,
+    OPENAI_DEEP_MODEL,
     Entity,
     resolveAgentScopeContext,
     buildEntityAnalyzerCurrentFields,
@@ -313,23 +315,48 @@ function createAiRouter(deps) {
       const history = aiAttachments.normalizeAgentHistory(req.body?.history);
       const attachments = await aiAttachments.prepareAgentAttachments(req.body?.attachments);
       const scopeContext = await resolveAgentScopeContext(ownerId, req.body?.scope);
-      const resolvedChatModel = scopeContext.scopeType === 'project' ? OPENAI_PROJECT_MODEL : OPENAI_MODEL;
-
-      const systemPrompt = aiPrompts.buildAgentSystemPrompt(scopeContext);
-      const userPrompt = aiPrompts.buildAgentUserPrompt({
+      const contextData = aiPrompts.buildAgentContextData({
         scopeContext,
-        message,
         history,
         attachments,
+      });
+
+      const routerPrompt = aiPrompts.buildRouterPrompt(contextData, message);
+      const routerSystemPrompt =
+        'Ты Semantic Router Synapse12. Верни строго одно слово из списка: investor, hr, strategist, default.';
+      const routerModel = toTrimmedString(OPENAI_ROUTER_MODEL, 120) || 'gpt-4o-mini';
+
+      const routerResponse = await aiProvider.requestOpenAiAgentReply({
+        systemPrompt: routerSystemPrompt,
+        userPrompt: routerPrompt,
+        includeRawPayload: includeDebug,
+        model: routerModel,
+        temperature: 0,
+        maxOutputTokens: 5,
+      });
+      const detectedRoleRaw = toTrimmedString(routerResponse.reply, 60);
+      const detectedRole = aiPrompts.normalizeDetectedRole(detectedRoleRaw);
+      const deepModel =
+        toTrimmedString(OPENAI_DEEP_MODEL, 120) ||
+        toTrimmedString(OPENAI_PROJECT_MODEL, 120) ||
+        'gpt-5.2-pro';
+
+      const systemPrompt = aiPrompts.buildAgentSystemPrompt(contextData, detectedRole);
+      const userPrompt = aiPrompts.buildAgentUserPrompt({
+        contextData,
+        message,
       });
 
       const aiResponse = await aiProvider.requestOpenAiAgentReply({
         systemPrompt,
         userPrompt,
         includeRawPayload: includeDebug,
-        model: resolvedChatModel,
+        model: deepModel,
+        temperature: 0.25,
+        maxOutputTokens: 4000,
       });
-      const usedModel = toTrimmedString(aiResponse?.debug?.response?.model, 120) || resolvedChatModel;
+      const usedModel = toTrimmedString(aiResponse?.debug?.response?.model, 120) || deepModel;
+      const usedRouterModel = toTrimmedString(routerResponse?.debug?.response?.model, 120) || routerModel;
 
       const debugPayload = includeDebug
         ? {
@@ -344,6 +371,17 @@ function createAiRouter(deps) {
               message,
               history,
               attachments,
+            },
+            semanticRouter: {
+              model: usedRouterModel,
+              prompt: {
+                system: routerSystemPrompt,
+                user: routerPrompt,
+              },
+              detectedRoleRaw,
+              detectedRole,
+              usage: routerResponse.usage,
+              provider: routerResponse.debug || {},
             },
             prompts: {
               systemPrompt,
@@ -362,6 +400,7 @@ function createAiRouter(deps) {
         reply: aiResponse.reply,
         usage: aiResponse.usage,
         model: usedModel,
+        detectedRole,
         context: {
           scopeType: scopeContext.scopeType,
           entityType: scopeContext.entityType,
