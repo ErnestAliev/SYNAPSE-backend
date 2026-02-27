@@ -679,6 +679,8 @@ function createAiRouter(deps) {
         model: routerModel,
         temperature: 0,
         maxOutputTokens: 5,
+        allowEmptyResponse: true,
+        emptyResponseFallback: 'default',
       });
       const detectedRoleRaw = toTrimmedString(routerResponse.reply, 60);
       const detectedRole = aiPrompts.normalizeDetectedRole(detectedRoleRaw);
