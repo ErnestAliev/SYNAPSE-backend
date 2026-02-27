@@ -175,13 +175,13 @@ const ENTITY_TYPES = new Set([
 const ENTITY_ANALYZER_FIELDS = Object.freeze({
   connection: ['tags', 'markers', 'roles', 'links', 'phones', 'status', 'importance'],
   person: ['tags', 'markers', 'roles', 'skills', 'links', 'importance'],
-  company: ['tags', 'industry', 'departments', 'stage', 'risks', 'links', 'phones', 'importance'],
-  event: ['tags', 'date', 'location', 'participants', 'outcomes', 'links', 'importance'],
-  resource: ['tags', 'resources', 'status', 'owners', 'links', 'importance'],
-  goal: ['tags', 'priority', 'metrics', 'owners', 'status', 'links', 'importance'],
-  result: ['tags', 'outcomes', 'metrics', 'owners', 'links', 'importance'],
-  task: ['tags', 'priority', 'status', 'owners', 'date', 'links', 'importance'],
-  project: ['tags', 'stage', 'priority', 'risks', 'owners', 'links', 'importance'],
+  company: ['tags', 'markers', 'industry', 'departments', 'stage', 'risks', 'links', 'phones', 'importance'],
+  event: ['tags', 'markers', 'date', 'location', 'participants', 'outcomes', 'links', 'importance'],
+  resource: ['tags', 'markers', 'resources', 'status', 'owners', 'links', 'importance'],
+  goal: ['tags', 'markers', 'priority', 'metrics', 'owners', 'status', 'links', 'importance'],
+  result: ['tags', 'markers', 'outcomes', 'metrics', 'owners', 'links', 'importance'],
+  task: ['tags', 'markers', 'priority', 'status', 'owners', 'date', 'links', 'importance'],
+  project: ['tags', 'markers', 'stage', 'priority', 'risks', 'owners', 'links', 'importance'],
   shape: ['tags', 'markers', 'status', 'links', 'importance'],
 });
 const ENTITY_IMPORTANCE_VALUES = ['Низкая', 'Средняя', 'Высокая'];

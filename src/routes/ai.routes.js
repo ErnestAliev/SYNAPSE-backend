@@ -138,6 +138,84 @@ function createAiRouter(deps) {
     return normalized.slice(-AGENT_CHAT_HISTORY_MESSAGE_LIMIT);
   }
 
+  function normalizeMarkerList(rawValues, maxItems = 6) {
+    const source = Array.isArray(rawValues) ? rawValues : [];
+    const dedup = new Set();
+    const result = [];
+
+    for (const item of source) {
+      const value = toTrimmedString(item, 64);
+      if (!value) continue;
+      const key = value.toLowerCase();
+      if (dedup.has(key)) continue;
+      dedup.add(key);
+      result.push(value);
+      if (result.length >= maxItems) break;
+    }
+
+    return result;
+  }
+
+  function ensureAnalysisMarkers(analysis) {
+    if (!analysis || typeof analysis !== 'object') return analysis;
+    if (analysis.status !== 'ready') return analysis;
+
+    const fields = toProfile(analysis.fields);
+    const currentMarkers = normalizeMarkerList(fields.markers);
+    if (currentMarkers.length) {
+      return {
+        ...analysis,
+        fields: {
+          ...fields,
+          markers: currentMarkers,
+        },
+      };
+    }
+
+    const fallbackKeys = [
+      'risks',
+      'status',
+      'stage',
+      'priority',
+      'outcomes',
+      'owners',
+      'industry',
+      'departments',
+      'resources',
+      'metrics',
+      'participants',
+      'location',
+      'date',
+      'roles',
+      'skills',
+      'phones',
+      'tags',
+    ];
+
+    const fallback = [];
+    for (const key of fallbackKeys) {
+      const values = normalizeMarkerList(fields[key], 6);
+      for (const value of values) {
+        if (fallback.includes(value)) continue;
+        fallback.push(value);
+        if (fallback.length >= 6) break;
+      }
+      if (fallback.length >= 6) break;
+    }
+
+    if (!fallback.length) {
+      fallback.push('Контекст требует уточнения');
+    }
+
+    return {
+      ...analysis,
+      fields: {
+        ...fields,
+        markers: fallback,
+      },
+    };
+  }
+
   function mapHistoryMessagesToResponse(messages) {
     return (Array.isArray(messages) ? messages : []).map((message) => ({
       id: toTrimmedString(message.id, 120),
@@ -462,7 +540,7 @@ function createAiRouter(deps) {
       });
 
       const parsedResponse = extractJsonObjectFromText(aiResponse.reply);
-      const analysis = normalizeEntityAnalysisOutput(entity.type, parsedResponse);
+      const analysis = ensureAnalysisMarkers(normalizeEntityAnalysisOutput(entity.type, parsedResponse));
       const reply = aiPrompts.buildEntityAnalysisReplyText(analysis);
 
       let vector = null;
@@ -547,7 +625,7 @@ function createAiRouter(deps) {
         return res.status(404).json({ message: 'Entity not found' });
       }
 
-      const analysis = normalizeEntityAnalysisOutput(entity.type, req.body?.suggestion);
+      const analysis = ensureAnalysisMarkers(normalizeEntityAnalysisOutput(entity.type, req.body?.suggestion));
       const nextMetadata = buildEntityMetadataPatch(entity.type, entity.ai_metadata, analysis);
       entity.ai_metadata = nextMetadata;
       await entity.save();
