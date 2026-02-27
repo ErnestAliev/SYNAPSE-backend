@@ -1,5 +1,9 @@
 const SYSTEM_CONTEXT_KEYS_TO_DROP = new Set(['__v', 'createdAt', 'updatedAt']);
 
+function isPathInsideDocuments(path) {
+  return Array.isArray(path) && path.includes('documents');
+}
+
 function cleanContextValue(value, path) {
   if (value instanceof Date) {
     return new Date(value.getTime());
@@ -25,6 +29,10 @@ function cleanContextValue(value, path) {
       continue;
     }
 
+    if (key === 'chat_history') {
+      continue;
+    }
+
     if (key === 'description_history') {
       if (Array.isArray(nestedValue)) {
         if (!nestedValue.length) {
@@ -36,6 +44,10 @@ function cleanContextValue(value, path) {
       } else {
         output[key] = cleanContextValue(nestedValue, path.concat(key));
       }
+      continue;
+    }
+
+    if (key === 'data' && isPathInsideDocuments(path)) {
       continue;
     }
 
