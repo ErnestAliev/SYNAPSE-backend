@@ -339,7 +339,7 @@ function createAiRouter(deps) {
       const deepModel =
         toTrimmedString(OPENAI_DEEP_MODEL, 120) ||
         toTrimmedString(OPENAI_PROJECT_MODEL, 120) ||
-        'gpt-5.2-pro';
+        'gpt-5-mini';
 
       const systemPrompt = aiPrompts.buildAgentSystemPrompt(contextData, detectedRole);
       const userPrompt = aiPrompts.buildAgentUserPrompt({
