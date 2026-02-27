@@ -12,6 +12,7 @@ const connectDB = require('./config/db');
 const Entity = require('./models/Entity');
 const User = require('./models/User');
 const EntityVector = require('./models/EntityVector');
+const AgentChatHistory = require('./models/AgentChatHistory');
 const { createAiPrompts } = require('./ai/prompts');
 const { createAiAttachmentTools } = require('./ai/attachments');
 const { createAiProvider } = require('./ai/provider');
@@ -87,6 +88,22 @@ const AI_ATTACHMENT_BINARY_MAX_BYTES = Math.max(
   Number(process.env.AI_ATTACHMENT_BINARY_MAX_BYTES) || 2_000_000,
 );
 const AI_DEBUG_ECHO = String(process.env.AI_DEBUG_ECHO || '').toLowerCase() === 'true';
+const AGENT_CHAT_HISTORY_MESSAGE_LIMIT = Math.max(
+  20,
+  Number(process.env.AGENT_CHAT_HISTORY_MESSAGE_LIMIT) || 140,
+);
+const AGENT_CHAT_HISTORY_ATTACHMENT_LIMIT = Math.max(
+  0,
+  Number(process.env.AGENT_CHAT_HISTORY_ATTACHMENT_LIMIT) || 6,
+);
+const AGENT_CHAT_HISTORY_ATTACHMENT_DATA_MAX_LENGTH = Math.max(
+  2000,
+  Number(process.env.AGENT_CHAT_HISTORY_ATTACHMENT_DATA_MAX_LENGTH) || 320000,
+);
+const AGENT_CHAT_HISTORY_TEXT_MAX_LENGTH = Math.max(
+  400,
+  Number(process.env.AGENT_CHAT_HISTORY_TEXT_MAX_LENGTH) || 12000,
+);
 const WHATSAPP_CONTACT_IMPORT_LIMIT = Math.max(1, Number(process.env.WHATSAPP_CONTACT_IMPORT_LIMIT) || 2500);
 const WHATSAPP_IMPORT_CONCURRENCY = Math.max(1, Number(process.env.WHATSAPP_IMPORT_CONCURRENCY) || 4);
 const WHATSAPP_IMPORT_BATCH_SIZE = Math.max(1, Number(process.env.WHATSAPP_IMPORT_BATCH_SIZE) || 80);
@@ -4165,6 +4182,12 @@ const aiRouter = createAiRouter({
   buildEntityMetadataPatch,
   upsertEntityVector,
   broadcastEntityEvent,
+  AgentChatHistory,
+  entityTypes: Array.from(ENTITY_TYPES),
+  AGENT_CHAT_HISTORY_MESSAGE_LIMIT,
+  AGENT_CHAT_HISTORY_ATTACHMENT_LIMIT,
+  AGENT_CHAT_HISTORY_ATTACHMENT_DATA_MAX_LENGTH,
+  AGENT_CHAT_HISTORY_TEXT_MAX_LENGTH,
   aiPrompts,
   aiAttachments,
   aiProvider,
