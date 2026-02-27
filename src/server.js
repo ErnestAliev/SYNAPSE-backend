@@ -74,6 +74,7 @@ const DEV_AUTH_ENABLED =
 const DEFAULT_ALLOWED_ORIGINS = ['http://localhost:5173', 'http://localhost:3000'];
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
 const OPENAI_MODEL = String(process.env.OPENAI_MODEL || 'gpt-4.1-mini').trim();
+const OPENAI_PROJECT_MODEL = String(process.env.OPENAI_PROJECT_MODEL || 'gpt-5.2-pro').trim();
 const OPENAI_EMBEDDING_MODEL = String(process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small').trim();
 const AI_CONTEXT_ENTITY_LIMIT = Math.max(1, Number(process.env.AI_CONTEXT_ENTITY_LIMIT) || 120);
 const AI_HISTORY_MESSAGE_LIMIT = Math.max(1, Number(process.env.AI_HISTORY_MESSAGE_LIMIT) || 12);
@@ -4174,6 +4175,7 @@ const aiRouter = createAiRouter({
   toProfile,
   AI_DEBUG_ECHO,
   OPENAI_MODEL,
+  OPENAI_PROJECT_MODEL,
   Entity,
   resolveAgentScopeContext,
   buildEntityAnalyzerCurrentFields,
@@ -4385,7 +4387,7 @@ async function startServer() {
     console.warn('[ai] OPENAI_API_KEY is not set. /api/ai/* endpoints will be unavailable.');
   } else {
     console.warn(
-      `[ai] Enabled models: chat=${OPENAI_MODEL}, embedding=${OPENAI_EMBEDDING_MODEL}, debugEcho=${AI_DEBUG_ECHO}`,
+      `[ai] Enabled models: chat_default=${OPENAI_MODEL}, chat_project=${OPENAI_PROJECT_MODEL}, embedding=${OPENAI_EMBEDDING_MODEL}, debugEcho=${AI_DEBUG_ECHO}`,
     );
   }
   if (!isWhatsappIntegrationAvailable()) {

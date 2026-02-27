@@ -8,6 +8,7 @@ function createAiRouter(deps) {
     toProfile,
     AI_DEBUG_ECHO,
     OPENAI_MODEL,
+    OPENAI_PROJECT_MODEL,
     Entity,
     resolveAgentScopeContext,
     buildEntityAnalyzerCurrentFields,
@@ -312,6 +313,7 @@ function createAiRouter(deps) {
       const history = aiAttachments.normalizeAgentHistory(req.body?.history);
       const attachments = await aiAttachments.prepareAgentAttachments(req.body?.attachments);
       const scopeContext = await resolveAgentScopeContext(ownerId, req.body?.scope);
+      const resolvedChatModel = scopeContext.scopeType === 'project' ? OPENAI_PROJECT_MODEL : OPENAI_MODEL;
 
       const systemPrompt = aiPrompts.buildAgentSystemPrompt(scopeContext);
       const userPrompt = aiPrompts.buildAgentUserPrompt({
@@ -325,7 +327,9 @@ function createAiRouter(deps) {
         systemPrompt,
         userPrompt,
         includeRawPayload: includeDebug,
+        model: resolvedChatModel,
       });
+      const usedModel = toTrimmedString(aiResponse?.debug?.response?.model, 120) || resolvedChatModel;
 
       const debugPayload = includeDebug
         ? {
@@ -348,7 +352,7 @@ function createAiRouter(deps) {
             response: {
               reply: aiResponse.reply,
               usage: aiResponse.usage,
-              model: OPENAI_MODEL,
+              model: usedModel,
             },
             provider: aiResponse.debug || {},
           }
@@ -357,7 +361,7 @@ function createAiRouter(deps) {
       return res.status(200).json({
         reply: aiResponse.reply,
         usage: aiResponse.usage,
-        model: OPENAI_MODEL,
+        model: usedModel,
         context: {
           scopeType: scopeContext.scopeType,
           entityType: scopeContext.entityType,

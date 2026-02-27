@@ -28,7 +28,12 @@ function createAiProvider(deps) {
     return chunks.join('\n').trim();
   }
 
-  async function requestOpenAiAgentReply({ systemPrompt, userPrompt, includeRawPayload = false }) {
+  async function requestOpenAiAgentReply({
+    systemPrompt,
+    userPrompt,
+    includeRawPayload = false,
+    model = '',
+  }) {
     if (!OPENAI_API_KEY) {
       throw Object.assign(new Error('OPENAI_API_KEY is not configured'), { status: 503 });
     }
@@ -36,8 +41,9 @@ function createAiProvider(deps) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     const startedAt = Date.now();
+    const resolvedModel = toTrimmedString(model, 120) || OPENAI_MODEL;
     const requestConfig = {
-      model: OPENAI_MODEL,
+      model: resolvedModel,
       temperature: DEFAULT_TEMPERATURE,
       max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
       timeout_ms: REQUEST_TIMEOUT_MS,
