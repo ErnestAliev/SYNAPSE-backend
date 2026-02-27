@@ -27,6 +27,7 @@ function createAiRouter(deps) {
     try {
       const ownerId = requireOwnerId(req);
       const message = toTrimmedString(req.body?.message, 2400);
+      const includeDebug = AI_DEBUG_ECHO || req.body?.debug === true;
 
       if (!message) {
         return res.status(400).json({ message: 'message is required' });
@@ -47,11 +48,12 @@ function createAiRouter(deps) {
       const aiResponse = await aiProvider.requestOpenAiAgentReply({
         systemPrompt,
         userPrompt,
+        includeRawPayload: includeDebug,
       });
 
-      const includeDebug = AI_DEBUG_ECHO || req.body?.debug === true;
       const debugPayload = includeDebug
         ? {
+            timestamp: new Date().toISOString(),
             scope: {
               type: scopeContext.scopeType,
               entityType: scopeContext.entityType,
@@ -72,6 +74,7 @@ function createAiRouter(deps) {
               usage: aiResponse.usage,
               model: OPENAI_MODEL,
             },
+            provider: aiResponse.debug || {},
           }
         : undefined;
 

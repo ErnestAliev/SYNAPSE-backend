@@ -4,6 +4,9 @@ function createAiProvider(deps) {
     OPENAI_MODEL,
     toTrimmedString,
   } = deps;
+  const REQUEST_TIMEOUT_MS = 45_000;
+  const DEFAULT_TEMPERATURE = 0.25;
+  const DEFAULT_MAX_OUTPUT_TOKENS = 900;
 
   function extractOpenAiResponseText(payload) {
     if (payload && typeof payload.output_text === 'string' && payload.output_text.trim()) {
@@ -25,13 +28,20 @@ function createAiProvider(deps) {
     return chunks.join('\n').trim();
   }
 
-  async function requestOpenAiAgentReply({ systemPrompt, userPrompt }) {
+  async function requestOpenAiAgentReply({ systemPrompt, userPrompt, includeRawPayload = false }) {
     if (!OPENAI_API_KEY) {
       throw Object.assign(new Error('OPENAI_API_KEY is not configured'), { status: 503 });
     }
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 45_000);
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    const startedAt = Date.now();
+    const requestConfig = {
+      model: OPENAI_MODEL,
+      temperature: DEFAULT_TEMPERATURE,
+      max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+      timeout_ms: REQUEST_TIMEOUT_MS,
+    };
 
     let response;
     let payload;
@@ -43,7 +53,7 @@ function createAiProvider(deps) {
           Authorization: `Bearer ${OPENAI_API_KEY}`,
         },
         body: JSON.stringify({
-          model: OPENAI_MODEL,
+          model: requestConfig.model,
           input: [
             {
               role: 'system',
@@ -54,8 +64,8 @@ function createAiProvider(deps) {
               content: [{ type: 'input_text', text: userPrompt }],
             },
           ],
-          temperature: 0.25,
-          max_output_tokens: 900,
+          temperature: requestConfig.temperature,
+          max_output_tokens: requestConfig.max_output_tokens,
         }),
         signal: controller.signal,
       });
@@ -83,6 +93,19 @@ function createAiProvider(deps) {
     return {
       reply,
       usage: payload?.usage || null,
+      debug: {
+        request: requestConfig,
+        response: {
+          status: response.status,
+          ok: response.ok,
+          id: toTrimmedString(payload?.id, 120),
+          created: toTrimmedString(payload?.created, 120),
+          model: toTrimmedString(payload?.model, 120) || requestConfig.model,
+          output_text_length: reply.length,
+          completed_in_ms: Math.max(1, Date.now() - startedAt),
+        },
+        ...(includeRawPayload ? { raw_payload: payload } : {}),
+      },
     };
   }
 
