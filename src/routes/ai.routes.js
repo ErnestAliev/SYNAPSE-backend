@@ -39,6 +39,31 @@ function createAiRouter(deps) {
   );
   const AGENT_CHAT_SCOPE_TYPES = new Set(['collection', 'project']);
   const AGENT_CHAT_ENTITY_TYPES = new Set(Array.isArray(entityTypes) ? entityTypes : []);
+  const PROJECT_CHAT_FIELD_CONFIGS = Object.freeze({
+    tags: { maxItems: 40, itemMaxLength: 64 },
+    markers: { maxItems: 40, itemMaxLength: 64 },
+    roles: { maxItems: 36, itemMaxLength: 64 },
+    skills: { maxItems: 36, itemMaxLength: 64 },
+    risks: { maxItems: 36, itemMaxLength: 96 },
+    priority: { maxItems: 18, itemMaxLength: 64 },
+    status: { maxItems: 24, itemMaxLength: 64 },
+    tasks: { maxItems: 36, itemMaxLength: 120 },
+    metrics: { maxItems: 28, itemMaxLength: 96 },
+    owners: { maxItems: 28, itemMaxLength: 64 },
+    participants: { maxItems: 36, itemMaxLength: 64 },
+    resources: { maxItems: 36, itemMaxLength: 96 },
+    outcomes: { maxItems: 36, itemMaxLength: 96 },
+    industry: { maxItems: 24, itemMaxLength: 64 },
+    departments: { maxItems: 24, itemMaxLength: 64 },
+    stage: { maxItems: 18, itemMaxLength: 64 },
+    date: { maxItems: 24, itemMaxLength: 64 },
+    location: { maxItems: 24, itemMaxLength: 64 },
+    phones: { maxItems: 28, itemMaxLength: 40 },
+    links: { maxItems: 24, itemMaxLength: 240 },
+    importance: { maxItems: 1, itemMaxLength: 24 },
+    ignoredNoise: { maxItems: 40, itemMaxLength: 120 },
+  });
+  const PROJECT_CHAT_FIELD_KEYS = Object.freeze(Object.keys(PROJECT_CHAT_FIELD_CONFIGS));
 
   function normalizeScope(rawScope) {
     const scope = toProfile(rawScope);
@@ -213,6 +238,249 @@ function createAiRouter(deps) {
         ...fields,
         markers: fallback,
       },
+    };
+  }
+
+  function normalizeProjectImportanceValues(rawValue) {
+    const source = Array.isArray(rawValue) ? rawValue : [rawValue];
+    const normalized = source
+      .map((item) => toTrimmedString(item, 32).toLowerCase())
+      .filter(Boolean)
+      .map((item) => {
+        if (item === 'низкая' || item === 'low' || item === 'l') return 'Низкая';
+        if (item === 'средняя' || item === 'medium' || item === 'med' || item === 'm') return 'Средняя';
+        if (item === 'высокая' || item === 'high' || item === 'h' || item === 'critical' || item === 'критично') {
+          return 'Высокая';
+        }
+        return '';
+      })
+      .filter(Boolean);
+
+    return normalized.length ? [normalized[0]] : [];
+  }
+
+  function normalizeProjectLinkValue(rawValue) {
+    const value = toTrimmedString(rawValue, 240);
+    if (!value) return '';
+
+    const withProtocol = /^https?:\/\//i.test(value) ? value : `https://${value}`;
+    try {
+      const url = new URL(withProtocol);
+      if (!url.hostname || !url.protocol.startsWith('http')) return '';
+      return url.toString();
+    } catch {
+      return '';
+    }
+  }
+
+  function normalizeProjectFieldArray(fieldKey, rawValue) {
+    if (!PROJECT_CHAT_FIELD_CONFIGS[fieldKey]) return [];
+
+    if (fieldKey === 'importance') {
+      return normalizeProjectImportanceValues(rawValue);
+    }
+
+    const { maxItems, itemMaxLength } = PROJECT_CHAT_FIELD_CONFIGS[fieldKey];
+    const source = Array.isArray(rawValue) ? rawValue : [rawValue];
+    const dedup = new Set();
+    const normalized = [];
+
+    for (const item of source) {
+      const value =
+        fieldKey === 'links'
+          ? normalizeProjectLinkValue(item)
+          : toTrimmedString(item, itemMaxLength);
+      if (!value) continue;
+      const key = value.toLowerCase();
+      if (dedup.has(key)) continue;
+      dedup.add(key);
+      normalized.push(value);
+      if (normalized.length >= maxItems) break;
+    }
+
+    return normalized;
+  }
+
+  function createEmptyProjectFieldMap() {
+    const map = {};
+    for (const fieldKey of PROJECT_CHAT_FIELD_KEYS) {
+      map[fieldKey] = [];
+    }
+    return map;
+  }
+
+  function mergeProjectFieldValues(fieldKey, ...lists) {
+    const dedup = new Set();
+    const merged = [];
+    const maxItems = PROJECT_CHAT_FIELD_CONFIGS[fieldKey]?.maxItems || 24;
+
+    for (const list of lists) {
+      const normalized = normalizeProjectFieldArray(fieldKey, list);
+      for (const value of normalized) {
+        const key = value.toLowerCase();
+        if (dedup.has(key)) continue;
+        dedup.add(key);
+        merged.push(value);
+        if (merged.length >= maxItems) return merged;
+      }
+    }
+
+    return merged;
+  }
+
+  function buildProjectFieldMapFromMetadata(aiMetadata) {
+    const metadata = toProfile(aiMetadata);
+    const fieldMap = createEmptyProjectFieldMap();
+    for (const fieldKey of PROJECT_CHAT_FIELD_KEYS) {
+      fieldMap[fieldKey] = normalizeProjectFieldArray(fieldKey, metadata[fieldKey]);
+    }
+    return fieldMap;
+  }
+
+  function buildProjectEntityAggregatedFields(entities) {
+    const fieldMap = createEmptyProjectFieldMap();
+    const source = Array.isArray(entities) ? entities : [];
+
+    for (const entity of source) {
+      const metadata = toProfile(entity?.ai_metadata);
+      for (const fieldKey of PROJECT_CHAT_FIELD_KEYS) {
+        fieldMap[fieldKey] = mergeProjectFieldValues(fieldKey, fieldMap[fieldKey], metadata[fieldKey]);
+      }
+    }
+
+    return fieldMap;
+  }
+
+  function mergeProjectFieldMaps(...maps) {
+    const merged = createEmptyProjectFieldMap();
+    for (const fieldKey of PROJECT_CHAT_FIELD_KEYS) {
+      const lists = maps.map((map) => (map && typeof map === 'object' ? map[fieldKey] : []));
+      merged[fieldKey] = mergeProjectFieldValues(fieldKey, ...lists);
+    }
+    return merged;
+  }
+
+  function normalizeProjectEnrichmentOutput(rawResponse) {
+    const parsed = toProfile(rawResponse);
+    const status = toTrimmedString(parsed.status, 32) === 'need_clarification' ? 'need_clarification' : 'ready';
+    const summary = toTrimmedString(parsed.summary || parsed.description, 2200);
+    const changeReason = toTrimmedString(parsed.changeReason, 240);
+    const fieldsSource = toProfile(parsed.fields);
+    const fields = createEmptyProjectFieldMap();
+
+    for (const fieldKey of PROJECT_CHAT_FIELD_KEYS) {
+      fields[fieldKey] = normalizeProjectFieldArray(fieldKey, fieldsSource[fieldKey]);
+    }
+
+    const ignoredNoiseFallback = normalizeProjectFieldArray('ignoredNoise', parsed.ignoredNoise);
+    if (ignoredNoiseFallback.length) {
+      fields.ignoredNoise = mergeProjectFieldValues('ignoredNoise', fields.ignoredNoise, ignoredNoiseFallback);
+    }
+
+    const clarifyingQuestions = (Array.isArray(parsed.clarifyingQuestions) ? parsed.clarifyingQuestions : [])
+      .map((item) => toTrimmedString(item, 220))
+      .filter(Boolean)
+      .slice(0, 3);
+
+    return {
+      status,
+      summary,
+      changeReason,
+      fields,
+      clarifyingQuestions,
+    };
+  }
+
+  async function runProjectChatAutoEnrichment({
+    ownerId,
+    scopeContext,
+    contextData,
+    message,
+    history,
+    assistantReply,
+    includeDebug,
+  }) {
+    if (!scopeContext || scopeContext.scopeType !== 'project') {
+      return null;
+    }
+
+    const projectId = toTrimmedString(scopeContext.projectId, 80);
+    if (!projectId) {
+      return null;
+    }
+
+    const projectEntity = await Entity.findOne({
+      _id: projectId,
+      owner_id: ownerId,
+      type: 'project',
+    });
+    if (!projectEntity) {
+      return null;
+    }
+
+    const currentProjectFields = buildProjectFieldMapFromMetadata(projectEntity.ai_metadata);
+    const aggregatedEntityFields = buildProjectEntityAggregatedFields(scopeContext.entities);
+    const systemPrompt = aiPrompts.buildProjectEnrichmentSystemPrompt();
+    const userPrompt = aiPrompts.buildProjectEnrichmentUserPrompt({
+      contextData,
+      message,
+      assistantReply,
+      history,
+      currentProjectFields,
+      aggregatedEntityFields,
+    });
+
+    const enrichmentResponse = await aiProvider.requestOpenAiAgentReply({
+      systemPrompt,
+      userPrompt,
+      includeRawPayload: includeDebug,
+      model: OPENAI_MODEL,
+      temperature: 0.2,
+      maxOutputTokens: 2200,
+    });
+
+    const parsed = extractJsonObjectFromText(enrichmentResponse.reply);
+    const enrichment = normalizeProjectEnrichmentOutput(parsed);
+    const mergedFields = mergeProjectFieldMaps(currentProjectFields, aggregatedEntityFields, enrichment.fields);
+    const existingMetadata = toProfile(projectEntity.ai_metadata);
+    const existingDescription = toTrimmedString(existingMetadata.description, 2200);
+    const nextDescription = enrichment.summary || existingDescription;
+
+    const analysisForPatch = {
+      status: 'ready',
+      description: nextDescription,
+      changeType: enrichment.summary ? 'addition' : '',
+      changeReason: enrichment.changeReason || 'project_chat_auto_enrichment',
+      fields: mergedFields,
+      importanceSignal: '',
+      importanceReason: '',
+      clarifyingQuestions: enrichment.clarifyingQuestions,
+      ignoredNoise: mergedFields.ignoredNoise || [],
+      confidence: {},
+    };
+
+    const nextMetadata = buildEntityMetadataPatch('project', projectEntity.ai_metadata, analysisForPatch);
+    nextMetadata.project_chat_enrichment = {
+      updatedAt: new Date().toISOString(),
+      model: toTrimmedString(enrichmentResponse?.debug?.response?.model, 120) || OPENAI_MODEL,
+      source: 'agent_chat',
+      status: enrichment.status,
+      changeReason: analysisForPatch.changeReason,
+    };
+
+    projectEntity.ai_metadata = nextMetadata;
+    await projectEntity.save();
+    broadcastEntityEvent(ownerId, 'entity.updated', {
+      entity: projectEntity.toObject(),
+    });
+
+    return {
+      status: enrichment.status,
+      model: nextMetadata.project_chat_enrichment.model,
+      updatedAt: nextMetadata.project_chat_enrichment.updatedAt,
+      mergedFieldCounts: Object.fromEntries(
+        PROJECT_CHAT_FIELD_KEYS.map((fieldKey) => [fieldKey, Array.isArray(mergedFields[fieldKey]) ? mergedFields[fieldKey].length : 0]),
+      ),
     };
   }
 
@@ -436,6 +704,20 @@ function createAiRouter(deps) {
       const usedModel = toTrimmedString(aiResponse?.debug?.response?.model, 120) || deepModel;
       const usedRouterModel = toTrimmedString(routerResponse?.debug?.response?.model, 120) || routerModel;
 
+      if (scopeContext.scopeType === 'project') {
+        void runProjectChatAutoEnrichment({
+          ownerId,
+          scopeContext,
+          contextData,
+          message,
+          history,
+          assistantReply: aiResponse.reply,
+          includeDebug,
+        }).catch(() => {
+          // Background enrichment must never break the main reply.
+        });
+      }
+
       const debugPayload = includeDebug
         ? {
             timestamp: new Date().toISOString(),
@@ -470,6 +752,12 @@ function createAiRouter(deps) {
               usage: aiResponse.usage,
               model: usedModel,
             },
+            projectAutoEnrichment: scopeContext.scopeType === 'project'
+              ? {
+                  queued: true,
+                  projectId: scopeContext.projectId,
+                }
+              : null,
             provider: aiResponse.debug || {},
           }
         : undefined;
@@ -539,6 +827,9 @@ function createAiRouter(deps) {
         systemPrompt,
         userPrompt,
         includeRawPayload: includeDebug,
+        model: OPENAI_MODEL,
+        temperature: 0.3,
+        maxOutputTokens: 4000,
       });
       const usedModel = toTrimmedString(aiResponse?.debug?.response?.model, 120) || OPENAI_MODEL;
 

@@ -73,10 +73,10 @@ const DEV_AUTH_ENABLED =
   !IS_PRODUCTION && String(process.env.DEV_AUTH_ENABLED || 'true').toLowerCase() !== 'false';
 const DEFAULT_ALLOWED_ORIGINS = ['http://localhost:5173', 'http://localhost:3000'];
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
-const OPENAI_MODEL = String(process.env.OPENAI_MODEL || 'gpt-5-mini').trim();
-const OPENAI_PROJECT_MODEL = String(process.env.OPENAI_PROJECT_MODEL || 'gpt-5-mini').trim();
+const OPENAI_MODEL = String(process.env.OPENAI_MODEL || 'gpt-5.2-pro').trim();
+const OPENAI_PROJECT_MODEL = String(process.env.OPENAI_PROJECT_MODEL || 'gpt-5.2-pro').trim();
 const OPENAI_ROUTER_MODEL = String(process.env.OPENAI_ROUTER_MODEL || 'gpt-4o-mini').trim();
-const OPENAI_DEEP_MODEL = String(process.env.OPENAI_DEEP_MODEL || OPENAI_PROJECT_MODEL || 'gpt-5-mini').trim();
+const OPENAI_DEEP_MODEL = String(process.env.OPENAI_DEEP_MODEL || OPENAI_PROJECT_MODEL || 'gpt-5.2-pro').trim();
 const OPENAI_EMBEDDING_MODEL = String(process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small').trim();
 const AI_CONTEXT_ENTITY_LIMIT = Math.max(1, Number(process.env.AI_CONTEXT_ENTITY_LIMIT) || 120);
 const AI_HISTORY_MESSAGE_LIMIT = Math.max(1, Number(process.env.AI_HISTORY_MESSAGE_LIMIT) || 12);
@@ -174,14 +174,37 @@ const ENTITY_TYPES = new Set([
 ]);
 const ENTITY_ANALYZER_FIELDS = Object.freeze({
   connection: ['tags', 'markers', 'roles', 'links', 'phones', 'status', 'importance'],
-  person: ['tags', 'markers', 'roles', 'skills', 'links', 'importance'],
+  person: ['tags', 'markers', 'roles', 'skills', 'links', 'importance', 'risks', 'ignoredNoise'],
   company: ['tags', 'markers', 'industry', 'departments', 'stage', 'risks', 'links', 'phones', 'importance'],
   event: ['tags', 'markers', 'date', 'location', 'participants', 'outcomes', 'links', 'importance'],
   resource: ['tags', 'markers', 'resources', 'status', 'owners', 'links', 'importance'],
   goal: ['tags', 'markers', 'priority', 'metrics', 'owners', 'status', 'links', 'importance'],
   result: ['tags', 'markers', 'outcomes', 'metrics', 'owners', 'links', 'importance'],
   task: ['tags', 'markers', 'priority', 'status', 'owners', 'date', 'links', 'importance'],
-  project: ['tags', 'markers', 'stage', 'priority', 'risks', 'owners', 'links', 'importance'],
+  project: [
+    'tags',
+    'markers',
+    'roles',
+    'skills',
+    'risks',
+    'priority',
+    'status',
+    'tasks',
+    'metrics',
+    'owners',
+    'participants',
+    'resources',
+    'outcomes',
+    'industry',
+    'departments',
+    'stage',
+    'date',
+    'location',
+    'phones',
+    'links',
+    'importance',
+    'ignoredNoise',
+  ],
   shape: ['tags', 'markers', 'status', 'links', 'importance'],
 });
 const ENTITY_IMPORTANCE_VALUES = ['Низкая', 'Средняя', 'Высокая'];

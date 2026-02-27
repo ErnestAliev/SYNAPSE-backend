@@ -20,6 +20,30 @@ const STRICT_FORMATTING_RULES = `
 `.trim();
 
 const ALLOWED_ROUTER_ROLES = new Set(['investor', 'hr', 'strategist', 'default']);
+const PROJECT_CHAT_ENRICHMENT_FIELDS = Object.freeze([
+  'tags',
+  'markers',
+  'roles',
+  'skills',
+  'risks',
+  'priority',
+  'status',
+  'tasks',
+  'metrics',
+  'owners',
+  'participants',
+  'resources',
+  'outcomes',
+  'industry',
+  'departments',
+  'stage',
+  'date',
+  'location',
+  'phones',
+  'links',
+  'importance',
+  'ignoredNoise',
+]);
 
 function isPathInsideDocuments(path) {
   return Array.isArray(path) && path.includes('documents');
@@ -184,11 +208,16 @@ function createAiPrompts(deps) {
       scopeType === 'project'
         ? `Текущий контекст: проект "${projectName}" (${totalEntities} сущностей).`
         : `Текущий контекст: вкладка "${entityType}" (${totalEntities} сущностей).`;
+    const projectExtractionHint =
+      scopeType === 'project'
+        ? 'Важно: для проектного чата выделяй факты, риски, задачи и метрики максимально конкретно.'
+        : '';
 
     return [
       expertText,
       scopeDescription,
       'Жесткое правило: используй ТОЛЬКО данные из переданного контекста.',
+      projectExtractionHint,
       STRICT_FORMATTING_RULES,
     ].join('\n');
   }
@@ -210,6 +239,95 @@ function createAiPrompts(deps) {
       'Текущий запрос пользователя:',
       toTrimmedString(message, 2400),
     ].join('\n');
+  }
+
+  function buildProjectEnrichmentSystemPrompt() {
+    return [
+      'Ты Synapse12 Project Context Extractor.',
+      'Работай только по входному JSON-контексту без внешних фактов.',
+      'Задача: извлечь структурированные поля проекта из диалога пользователя и ответа ассистента.',
+      'Сохраняй только релевантные факты для проекта и связанных сущностей.',
+      'Удаляй дубликаты (регистронезависимо), обрезай шум, не раздувай списки.',
+      'Возвращай только короткие содержательные элементы (не отдельные слова без смысла).',
+      `Разрешенные keys в fields: ${PROJECT_CHAT_ENRICHMENT_FIELDS.join(', ')}.`,
+      'links: только валидные URL.',
+      'importance: только [Низкая, Средняя, Высокая], массив из 0..1 элементов.',
+      'tasks: конкретные действия/шаги, а не абстракции.',
+      'ignoredNoise: факты, не относящиеся к текущему проекту.',
+      'Верни СТРОГО JSON без markdown.',
+      'Формат:',
+      '{',
+      '  "status": "ready | need_clarification",',
+      '  "summary": "string",',
+      '  "changeReason": "string",',
+      '  "fields": {',
+      '    "tags": [],',
+      '    "markers": [],',
+      '    "roles": [],',
+      '    "skills": [],',
+      '    "risks": [],',
+      '    "priority": [],',
+      '    "status": [],',
+      '    "tasks": [],',
+      '    "metrics": [],',
+      '    "owners": [],',
+      '    "participants": [],',
+      '    "resources": [],',
+      '    "outcomes": [],',
+      '    "industry": [],',
+      '    "departments": [],',
+      '    "stage": [],',
+      '    "date": [],',
+      '    "location": [],',
+      '    "phones": [],',
+      '    "links": [],',
+      '    "importance": [],',
+      '    "ignoredNoise": []',
+      '  },',
+      '  "clarifyingQuestions": []',
+      '}',
+    ].join('\n');
+  }
+
+  function buildProjectEnrichmentUserPrompt({
+    contextData,
+    message,
+    assistantReply,
+    history,
+    currentProjectFields,
+    aggregatedEntityFields,
+  }) {
+    const compactEntities = (Array.isArray(contextData?.entities) ? contextData.entities : [])
+      .slice(0, 140)
+      .map((entity) => {
+        const row = toProfile(entity);
+        const metadata = toProfile(row.ai_metadata);
+        return {
+          id: toTrimmedString(row.id || row._id, 80),
+          type: toTrimmedString(row.type, 24),
+          name: toTrimmedString(row.name, 120),
+          tags: Array.isArray(metadata.tags) ? metadata.tags.slice(0, 8) : [],
+          markers: Array.isArray(metadata.markers) ? metadata.markers.slice(0, 6) : [],
+          roles: Array.isArray(metadata.roles) ? metadata.roles.slice(0, 6) : [],
+          risks: Array.isArray(metadata.risks) ? metadata.risks.slice(0, 6) : [],
+          tasks: Array.isArray(metadata.tasks) ? metadata.tasks.slice(0, 8) : [],
+        };
+      });
+
+    const payload = {
+      scope: toProfile(contextData?.scope),
+      dialogue: {
+        userMessage: toTrimmedString(message, 2400),
+        assistantReply: toTrimmedString(assistantReply, 4000),
+      },
+      history: Array.isArray(history) ? history : [],
+      currentProjectFields: toProfile(currentProjectFields),
+      aggregatedEntityFields: toProfile(aggregatedEntityFields),
+      entityHints: compactEntities,
+      connections: Array.isArray(contextData?.connections) ? contextData.connections : [],
+    };
+
+    return ['Контекст обогащения проекта (JSON):', JSON.stringify(payload, null, 2)].join('\n');
   }
 
   function buildEntityAnalyzerSystemPrompt(entityType) {
@@ -345,6 +463,8 @@ function createAiPrompts(deps) {
     normalizeDetectedRole,
     buildAgentSystemPrompt,
     buildAgentUserPrompt,
+    buildProjectEnrichmentSystemPrompt,
+    buildProjectEnrichmentUserPrompt,
     buildEntityAnalyzerSystemPrompt,
     buildEntityAnalyzerUserPrompt,
     buildEntityAnalysisReplyText,
