@@ -170,12 +170,20 @@ function createAiPrompts(deps) {
   function buildAgentSystemPrompt(contextData, detectedRole = 'default') {
     const normalizedRole = normalizeDetectedRole(detectedRole);
     const expertText = EXPERT_PROFILES[normalizedRole] || EXPERT_PROFILES.default;
-    const scope = contextData?.scope && typeof contextData.scope === 'object' ? contextData.scope : {};
-    const scopeType = toTrimmedString(scope.type, 24);
+    const scopeSource =
+      contextData && typeof contextData === 'object'
+        ? contextData.scope && typeof contextData.scope === 'object'
+          ? contextData.scope
+          : contextData
+        : {};
+    const scopeType = toTrimmedString(scopeSource.scopeType || scopeSource.type, 24);
+    const projectName = toTrimmedString(scopeSource.projectName, 140);
+    const entityType = toTrimmedString(scopeSource.entityType, 64);
+    const totalEntities = Number(scopeSource.totalEntities) || 0;
     const scopeDescription =
       scopeType === 'project'
-        ? `Текущий контекст: проект "${toTrimmedString(scope.projectName, 140)}" (${Number(scope.totalEntities) || 0} сущностей).`
-        : `Текущий контекст: вкладка "${toTrimmedString(scope.entityType, 64)}" (${Number(scope.totalEntities) || 0} сущностей).`;
+        ? `Текущий контекст: проект "${projectName}" (${totalEntities} сущностей).`
+        : `Текущий контекст: вкладка "${entityType}" (${totalEntities} сущностей).`;
 
     return [
       expertText,
