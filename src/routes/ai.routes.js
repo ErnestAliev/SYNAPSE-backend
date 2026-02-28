@@ -67,6 +67,7 @@ function createAiRouter(deps) {
   });
   const PROJECT_CHAT_FIELD_KEYS = Object.freeze(Object.keys(PROJECT_CHAT_FIELD_CONFIGS));
   const QUIZ_ALLOWED_MODES = new Set(['quiz_step', 'quiz_stop_check']);
+  const QUIZ_PROFILE_SUMMARY_QUESTION_ID = 'P9_PROFILE_SUMMARY';
   const QUIZ_MIN_LEVEL1_QUESTIONS = 7;
   const QUIZ_STOP_CHECK_MIN_STEPS = 8;
   const QUIZ_STOP_CHECK_MAX_STEPS = 10;
@@ -1168,6 +1169,34 @@ function createAiRouter(deps) {
     };
   }
 
+  function isQuizProfileSummaryQuestionId(questionId) {
+    return toTrimmedString(questionId, 80).toUpperCase() === QUIZ_PROFILE_SUMMARY_QUESTION_ID;
+  }
+
+  function buildQuizProfileSummaryQuestion(entityName) {
+    const name = toTrimmedString(entityName, 120) || 'эта сущность';
+    return {
+      mode: 'quiz_step',
+      entityType: 'person',
+      questionId: QUIZ_PROFILE_SUMMARY_QUESTION_ID,
+      questionKey: 'profile_summary',
+      questionText: `В двух словах: чем занимается ${name} и чем может быть полезен?`,
+      options: [],
+      expectsType: 'text',
+      expects: { type: 'text' },
+      state: {
+        facts: {},
+        missing: [],
+        confidence: 0,
+      },
+      draftUpdate: {
+        description: '',
+        fieldsPatch: {},
+      },
+      stopCheck: null,
+    };
+  }
+
   function getQuizLevel1TemplateQuestion(entityType, entityName, level1AnswersCount) {
     const bank = Array.isArray(QUIZ_LEVEL1_BANK_BY_TYPE[entityType])
       ? QUIZ_LEVEL1_BANK_BY_TYPE[entityType]
@@ -2258,18 +2287,22 @@ function createAiRouter(deps) {
         });
       };
 
-      const buildStepResponseFromQuestion = (question, state, draftUpdate, extras = {}) => ({
-        mode: 'quiz_step',
-        entityType,
-        questionId: question.questionId,
-        questionText: question.questionText,
-        options: normalizeQuizOptions(question.options),
-        expects: { type: 'choice_or_text' },
-        state: normalizeQuizStatePayload(state, state),
-        draftUpdate: normalizeQuizDraftUpdate(draftUpdate),
-        stopCheck: null,
-        ...extras,
-      });
+      const buildStepResponseFromQuestion = (question, state, draftUpdate, extras = {}) => {
+        const expectsType =
+          toTrimmedString(question?.expectsType, 24).toLowerCase() === 'text' ? 'text' : 'choice_or_text';
+        return {
+          mode: 'quiz_step',
+          entityType,
+          questionId: question.questionId,
+          questionText: question.questionText,
+          options: expectsType === 'text' ? [] : normalizeQuizOptions(question.options),
+          expects: { type: expectsType },
+          state: normalizeQuizStatePayload(state, state),
+          draftUpdate: normalizeQuizDraftUpdate(draftUpdate),
+          stopCheck: null,
+          ...extras,
+        };
+      };
 
       const stopCheckQuestion = {
         questionId: 'stop_check',
@@ -2281,6 +2314,7 @@ function createAiRouter(deps) {
           { id: '4', text: 'Свой вариант' },
         ]),
       };
+      const profileSummaryQuestion = buildQuizProfileSummaryQuestion(entityName);
 
       if (action === 'start') {
         if (storedState.isActive && toTrimmedString(storedState.lastQuestion?.mode, 24) === 'quiz_stop_check') {
@@ -2317,9 +2351,13 @@ function createAiRouter(deps) {
           });
         }
 
-        const activeQuestion =
-          findQuizQuestionById(entityType, entityName, storedState.activeQuestionId) ||
-          findQuizQuestionById(entityType, entityName, storedState.lastQuestion?.questionId);
+        const hasProfileSummaryActiveQuestion =
+          isQuizProfileSummaryQuestionId(storedState.activeQuestionId) ||
+          isQuizProfileSummaryQuestionId(storedState.lastQuestion?.questionId);
+        const activeQuestion = hasProfileSummaryActiveQuestion
+          ? profileSummaryQuestion
+          : findQuizQuestionById(entityType, entityName, storedState.activeQuestionId) ||
+            findQuizQuestionById(entityType, entityName, storedState.lastQuestion?.questionId);
         const activeQuestionId = toTrimmedString(activeQuestion?.questionId, 80).toUpperCase();
         const answeredSet = new Set(
           (Array.isArray(storedState.answeredQuestionIds) ? storedState.answeredQuestionIds : [])
@@ -2417,11 +2455,16 @@ function createAiRouter(deps) {
       }
 
       const activeQuestionMode = toTrimmedString(storedState.lastQuestion?.mode, 24);
+      const hasProfileSummaryActiveQuestion =
+        isQuizProfileSummaryQuestionId(storedState.activeQuestionId) ||
+        isQuizProfileSummaryQuestionId(storedState.lastQuestion?.questionId);
       let activeQuestion =
         activeQuestionMode === 'quiz_stop_check'
           ? stopCheckQuestion
-          : findQuizQuestionById(entityType, entityName, storedState.activeQuestionId) ||
-            findQuizQuestionById(entityType, entityName, storedState.lastQuestion?.questionId);
+          : hasProfileSummaryActiveQuestion
+            ? profileSummaryQuestion
+            : findQuizQuestionById(entityType, entityName, storedState.activeQuestionId) ||
+              findQuizQuestionById(entityType, entityName, storedState.lastQuestion?.questionId);
       if (!activeQuestion) {
         const firstQuestion = getQuizFirstQuestion(entityType, entityName);
         const nextState = createInitialQuizState(entityType, entityName, firstQuestion);
@@ -2449,6 +2492,8 @@ function createAiRouter(deps) {
             ? toTrimmedString(storedState.lastQuestion?.mode, 24) === 'quiz_stop_check'
               ? stopCheckQuestion
               : null
+            : isQuizProfileSummaryQuestionId(requestedQuestionId)
+              ? profileSummaryQuestion
             : findQuizQuestionById(entityType, entityName, requestedQuestionId);
         const requestedIsAnswered = requestedQuestionId ? answeredSet.has(requestedQuestionId) : false;
 
@@ -2572,22 +2617,21 @@ function createAiRouter(deps) {
 
         if (!chooseDeep) {
           storedState.level = 1;
-          storedState.active = false;
-          storedState.isActive = false;
-          storedState.activeQuestionId = '';
-          storedState.completedAt = nowIso;
+          storedState.active = true;
+          storedState.isActive = true;
+          storedState.activeQuestionId = profileSummaryQuestion.questionId;
           storedState.updatedAt = nowIso;
           storedState.lastQuestion = {
-            mode: 'quiz_stop_check',
-            questionId: stopCheckQuestion.questionId,
-            questionKey: '',
-            questionText: stopCheckQuestion.questionText,
-            options: normalizeQuizOptions(stopCheckQuestion.options),
+            mode: 'quiz_step',
+            questionId: profileSummaryQuestion.questionId,
+            questionKey: toTrimmedString(profileSummaryQuestion.questionKey, 64),
+            questionText: profileSummaryQuestion.questionText,
+            options: [],
           };
           await persistQuizState(storedState);
 
           return res.status(200).json(
-            buildQuizCompletedPayload(entityType, 'Квиз завершён. Данные сохранены.', storedState, {
+            buildStepResponseFromQuestion(profileSummaryQuestion, storedState, {
               description: '',
               fieldsPatch: {},
             }),
@@ -2678,8 +2722,9 @@ function createAiRouter(deps) {
       storedState.missing = updatedStateFromAnswer.missing;
       storedState.confidence = updatedStateFromAnswer.confidence;
 
+      const isProfileSummaryAnswer = isQuizProfileSummaryQuestionId(activeQuestion.questionId);
       const quizStepLimit = Number(storedState.level) >= 2 ? QUIZ_STOP_CHECK_MAX_STEPS + QUIZ_MAX_LEVEL2_QUESTIONS : QUIZ_STOP_CHECK_MAX_STEPS;
-      const shouldStopCheck = storedState.missing.length === 0 || Number(storedState.stepIndex) >= quizStepLimit;
+      const shouldStopCheck = !isProfileSummaryAnswer && (storedState.missing.length === 0 || Number(storedState.stepIndex) >= quizStepLimit);
 
       const currentFields = buildEntityAnalyzerCurrentFields(entity.type, aiMetadata);
       const forceStopCheck = shouldStopCheck;
@@ -2754,7 +2799,22 @@ function createAiRouter(deps) {
       }
 
       let responsePayload;
-      if (shouldStopCheck) {
+      if (isProfileSummaryAnswer) {
+        storedState.level = 1;
+        storedState.active = false;
+        storedState.isActive = false;
+        storedState.activeQuestionId = '';
+        storedState.completedAt = nowIso;
+        storedState.updatedAt = nowIso;
+        storedState.lastQuestion = {
+          mode: 'quiz_step',
+          questionId: profileSummaryQuestion.questionId,
+          questionKey: toTrimmedString(profileSummaryQuestion.questionKey, 64),
+          questionText: profileSummaryQuestion.questionText,
+          options: [],
+        };
+        responsePayload = buildQuizCompletedPayload(entityType, 'Квиз завершён. Данные сохранены.', storedState, draftUpdate);
+      } else if (shouldStopCheck) {
         storedState.active = true;
         storedState.isActive = true;
         storedState.activeQuestionId = stopCheckQuestion.questionId;
