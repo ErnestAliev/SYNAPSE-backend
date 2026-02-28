@@ -48,6 +48,59 @@ function normalizeShapeNameForUpdate(update) {
   return update;
 }
 
+function toBoolean(value) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true') return true;
+    if (normalized === 'false') return false;
+  }
+  return false;
+}
+
+function normalizeMineFlagsForUpdate(update) {
+  if (!update || typeof update !== 'object' || Array.isArray(update)) return update;
+
+  const hasSet = !!update.$set && typeof update.$set === 'object' && !Array.isArray(update.$set);
+  const container = hasSet ? update.$set : update;
+  const nextType = container.type ?? update.type;
+
+  if (typeof nextType !== 'string') {
+    if (Object.prototype.hasOwnProperty.call(container, 'is_me')) {
+      const nextIsMe = toBoolean(container.is_me);
+      container.is_me = nextIsMe;
+      if (nextIsMe) {
+        container.is_mine = true;
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(container, 'is_mine')) {
+      container.is_mine = toBoolean(container.is_mine);
+    }
+
+    if (hasSet) {
+      update.$set = container;
+    }
+    return update;
+  }
+
+  if (nextType === 'person') {
+    const nextIsMe = toBoolean(container.is_me);
+    const nextIsMine = toBoolean(container.is_mine);
+    container.is_me = nextIsMe;
+    container.is_mine = nextIsMe ? true : nextIsMine;
+  } else {
+    container.is_me = false;
+    container.is_mine = toBoolean(container.is_mine);
+  }
+
+  if (hasSet) {
+    update.$set = container;
+  }
+
+  return update;
+}
+
 function isEmptyCanvasData(value) {
   return value === undefined || value === null || (typeof value === 'object' && Object.keys(value).length === 0);
 }
@@ -100,6 +153,14 @@ const entitySchema = new mongoose.Schema(
       type: mongoose.Schema.Types.Mixed,
       default: {},
     },
+    is_mine: {
+      type: Boolean,
+      default: false,
+    },
+    is_me: {
+      type: Boolean,
+      default: false,
+    },
     ai_metadata: {
       type: mongoose.Schema.Types.Mixed,
       default: {},
@@ -139,6 +200,16 @@ entitySchema.pre('validate', function preValidate() {
     this.name = normalizeShapeName(this.name);
   }
 
+  if (this.type === 'person') {
+    const nextIsMe = toBoolean(this.is_me);
+    const nextIsMine = toBoolean(this.is_mine);
+    this.is_me = nextIsMe;
+    this.is_mine = nextIsMe ? true : nextIsMine;
+  } else {
+    this.is_me = false;
+    this.is_mine = toBoolean(this.is_mine);
+  }
+
   if (this.type === 'project' && !this.canvas_data) {
     this.canvas_data = {
       nodes: [],
@@ -153,7 +224,8 @@ entitySchema.pre('validate', function preValidate() {
 
 entitySchema.pre('findOneAndUpdate', function preFindOneAndUpdate() {
   const update = this.getUpdate() || {};
-  this.setUpdate(normalizeShapeNameForUpdate(update));
+  const normalized = normalizeMineFlagsForUpdate(normalizeShapeNameForUpdate(update));
+  this.setUpdate(normalized);
 });
 
 module.exports = mongoose.model('Entity', entitySchema);

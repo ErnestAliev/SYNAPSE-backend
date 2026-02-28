@@ -482,6 +482,20 @@ function toTrimmedTailString(value, maxLength = 240) {
   return trimmed.slice(trimmed.length - maxLength);
 }
 
+function toBooleanFlag(value, fallback = false) {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true') return true;
+    if (normalized === 'false') return false;
+  }
+
+  return fallback;
+}
+
 function toStringArray(value, maxItems = 8, itemMaxLength = 80) {
   if (!Array.isArray(value)) return [];
   return value
@@ -988,6 +1002,52 @@ function normalizeIncomingEntityPayload(rawPayload, options = {}) {
   payload.ai_metadata = enrichEntityMetadata(options.existingMetadata, metadata, {
     source: options.source,
   });
+  return payload;
+}
+
+function normalizeMineFlagsInPayload(payload, entityType, options = {}) {
+  const mode = options.mode === 'update' ? 'update' : 'create';
+  if (!payload || typeof payload !== 'object') {
+    return payload;
+  }
+
+  const hasIsMine = Object.prototype.hasOwnProperty.call(payload, 'is_mine');
+  const hasIsMe = Object.prototype.hasOwnProperty.call(payload, 'is_me');
+
+  if (entityType === 'person') {
+    if (mode === 'create') {
+      const nextIsMe = toBooleanFlag(payload.is_me, false);
+      const nextIsMine = toBooleanFlag(payload.is_mine, false);
+      payload.is_me = nextIsMe;
+      payload.is_mine = nextIsMe ? true : nextIsMine;
+      return payload;
+    }
+
+    if (hasIsMe) {
+      const nextIsMe = toBooleanFlag(payload.is_me, false);
+      payload.is_me = nextIsMe;
+      if (nextIsMe) {
+        payload.is_mine = true;
+      }
+    }
+
+    if (hasIsMine) {
+      payload.is_mine = toBooleanFlag(payload.is_mine, false);
+    }
+
+    if (hasIsMe && payload.is_me === true) {
+      payload.is_mine = true;
+    }
+
+    return payload;
+  }
+
+  payload.is_me = false;
+
+  if (mode === 'create' || hasIsMine) {
+    payload.is_mine = toBooleanFlag(payload.is_mine, false);
+  }
+
   return payload;
 }
 
@@ -4273,7 +4333,10 @@ app.get('/api/entities', async (req, res, next) => {
 app.post('/api/entities', async (req, res, next) => {
   try {
     const ownerId = requireOwnerId(req);
-    const payload = normalizeIncomingEntityPayload(req.body, { source: 'system' });
+    let payload = normalizeIncomingEntityPayload(req.body, { source: 'system' });
+    const payloadEntityType =
+      typeof payload.type === 'string' && ENTITY_TYPES.has(payload.type) ? payload.type : 'shape';
+    payload = normalizeMineFlagsInPayload(payload, payloadEntityType, { mode: 'create' });
     payload.owner_id = ownerId;
 
     const entity = await Entity.create(payload);
@@ -4294,16 +4357,19 @@ app.put('/api/entities/:id', async (req, res, next) => {
         _id: req.params.id,
         owner_id: ownerId,
       },
-      { ai_metadata: 1 },
+      { ai_metadata: 1, type: 1 },
     ).lean();
     if (!existingEntity) {
       return res.status(404).json({ message: 'Entity not found' });
     }
 
-    const payload = normalizeIncomingEntityPayload(req.body, {
+    let payload = normalizeIncomingEntityPayload(req.body, {
       existingMetadata: existingEntity.ai_metadata,
       source: 'manual',
     });
+    const payloadEntityType =
+      typeof payload.type === 'string' && ENTITY_TYPES.has(payload.type) ? payload.type : existingEntity.type;
+    payload = normalizeMineFlagsInPayload(payload, payloadEntityType, { mode: 'update' });
     payload.owner_id = ownerId;
 
     const updatedEntity = await Entity.findOneAndUpdate(
@@ -4327,6 +4393,99 @@ app.put('/api/entities/:id', async (req, res, next) => {
     });
 
     return res.json(updatedEntity);
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post('/api/entities/:id/set-me', async (req, res, next) => {
+  try {
+    const ownerId = requireOwnerId(req);
+    const personId = toTrimmedString(req.params.id, 80);
+    if (!personId) {
+      return res.status(400).json({ message: 'Entity id is required' });
+    }
+
+    const person = await Entity.findOne({
+      _id: personId,
+      owner_id: ownerId,
+      type: 'person',
+    });
+    if (!person) {
+      return res.status(404).json({ message: 'Person not found' });
+    }
+
+    const existingMeEntities = await Entity.find(
+      {
+        owner_id: ownerId,
+        type: 'person',
+        _id: { $ne: person._id },
+        is_me: true,
+      },
+      { _id: 1 },
+    ).lean();
+    const clearedPersonIds = existingMeEntities.map((item) => String(item._id)).filter(Boolean);
+
+    if (clearedPersonIds.length) {
+      await Entity.updateMany(
+        {
+          owner_id: ownerId,
+          _id: { $in: clearedPersonIds },
+        },
+        {
+          $set: { is_me: false },
+        },
+      );
+    }
+
+    const updatedPerson = await Entity.findOneAndUpdate(
+      {
+        _id: person._id,
+        owner_id: ownerId,
+        type: 'person',
+      },
+      {
+        $set: {
+          is_me: true,
+          is_mine: true,
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      },
+    );
+
+    if (!updatedPerson) {
+      return res.status(404).json({ message: 'Person not found' });
+    }
+
+    const changedIds = Array.from(new Set([...clearedPersonIds, String(updatedPerson._id)]));
+    const changedEntities = changedIds.length
+      ? await Entity.find(
+          {
+            owner_id: ownerId,
+            _id: { $in: changedIds },
+          },
+          {},
+        ).lean()
+      : [];
+    const changedById = new Map(changedEntities.map((item) => [String(item._id), item]));
+    const orderedChangedEntities = changedIds
+      .map((id) => changedById.get(id))
+      .filter((item) => Boolean(item));
+
+    for (const changedEntity of orderedChangedEntities) {
+      broadcastEntityEvent(ownerId, 'entity.updated', {
+        entity: changedEntity,
+      });
+    }
+
+    return res.status(200).json({
+      entity: updatedPerson.toObject(),
+      entities: orderedChangedEntities,
+      clearedPersonIds,
+    });
   } catch (error) {
     return next(error);
   }
