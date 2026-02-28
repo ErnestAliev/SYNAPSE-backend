@@ -1682,6 +1682,51 @@ function createAiRouter(deps) {
     };
   }
 
+  function hasQuizPatchValues(rawPatch) {
+    const patch = toProfile(rawPatch);
+    for (const [key, value] of Object.entries(patch)) {
+      if (!QUIZ_FIELDS_PATCH_ALLOWED.has(key)) continue;
+      if (!Array.isArray(value)) continue;
+      if (value.some((item) => Boolean(toTrimmedString(item, key === 'linksAdd' ? 240 : 96)))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function mergeQuizDraftUpdates(baseUpdate, extraUpdate) {
+    const normalizedBase = normalizeQuizDraftUpdate(baseUpdate);
+    const normalizedExtra = normalizeQuizDraftUpdate(extraUpdate);
+    const mergedFieldsPatch = {};
+
+    for (const key of QUIZ_FIELDS_PATCH_ALLOWED) {
+      const existing = Array.isArray(normalizedBase.fieldsPatch[key]) ? normalizedBase.fieldsPatch[key] : [];
+      const incoming = Array.isArray(normalizedExtra.fieldsPatch[key]) ? normalizedExtra.fieldsPatch[key] : [];
+      if (!existing.length && !incoming.length) continue;
+
+      const dedup = new Set();
+      const merged = [];
+      const maxLength = key === 'linksAdd' ? 240 : 96;
+      for (const item of [...existing, ...incoming]) {
+        const value = toTrimmedString(item, maxLength);
+        if (!value) continue;
+        const dedupKey = value.toLowerCase();
+        if (dedup.has(dedupKey)) continue;
+        dedup.add(dedupKey);
+        merged.push(value);
+        if (merged.length >= 18) break;
+      }
+      if (merged.length) {
+        mergedFieldsPatch[key] = merged;
+      }
+    }
+
+    return normalizeQuizDraftUpdate({
+      description: toTrimmedString(normalizedExtra.description, 2200) || normalizedBase.description,
+      fieldsPatch: mergedFieldsPatch,
+    });
+  }
+
   function normalizeQuizModelResponse(rawResponse, { entityType, fallbackQuestion, fallbackState }) {
     const parsed = toProfile(rawResponse);
     const modeRaw = toTrimmedString(parsed.mode, 24);
@@ -2510,7 +2555,9 @@ function createAiRouter(deps) {
             questionId: requestedQuestion.questionId,
             questionKey: toTrimmedString(requestedQuestion.questionKey, 64),
             questionText: requestedQuestion.questionText,
-            options: normalizeQuizOptions(requestedQuestion.options),
+            options: isQuizProfileSummaryQuestionId(requestedQuestion.questionId)
+              ? []
+              : normalizeQuizOptions(requestedQuestion.options),
           };
           storedState.updatedAt = nowIso;
           quizDesyncFixed = true;
@@ -2723,6 +2770,12 @@ function createAiRouter(deps) {
       storedState.confidence = updatedStateFromAnswer.confidence;
 
       const isProfileSummaryAnswer = isQuizProfileSummaryQuestionId(activeQuestion.questionId);
+      if (isProfileSummaryAnswer && answer.answerText) {
+        storedState.facts = {
+          ...toProfile(storedState.facts),
+          profile_summary: answer.answerText,
+        };
+      }
       const quizStepLimit = Number(storedState.level) >= 2 ? QUIZ_STOP_CHECK_MAX_STEPS + QUIZ_MAX_LEVEL2_QUESTIONS : QUIZ_STOP_CHECK_MAX_STEPS;
       const shouldStopCheck = !isProfileSummaryAnswer && (storedState.missing.length === 0 || Number(storedState.stepIndex) >= quizStepLimit);
 
@@ -2741,31 +2794,76 @@ function createAiRouter(deps) {
           : 0,
         history: Array.isArray(storedState.history) ? storedState.history.slice(-18) : [],
       };
-      const systemPrompt = aiPrompts.buildEntityQuizSystemPrompt({
-        entityType,
-        level: normalizedPromptLevel,
-        forceStopCheck,
-      });
-      const userPrompt = aiPrompts.buildEntityQuizUserPrompt({
-        entityType,
-        name: entityName,
-        currentDescription: toTrimmedString(aiMetadata.description, 2200),
-        currentFields,
-        quizState: quizPromptState,
-        lastQuestion: {
-          questionId: activeQuestion.questionId,
-          questionKey: toTrimmedString(activeQuestion.questionKey, 64),
-          questionText: activeQuestion.questionText,
-          options: normalizeQuizOptions(activeQuestion.options),
-          mode: 'quiz_step',
-        },
-        answer,
-        forceStopCheck,
-        level: normalizedPromptLevel,
-      });
+      const systemPrompt = isProfileSummaryAnswer
+        ? [
+            'Ты Synapse12 Quiz Finalizer.',
+            `Текущий тип сущности: ${entityType}.`,
+            'Нужно финализировать профиль сущности после квиза.',
+            'Используй ТОЛЬКО данные из входного JSON.',
+            'Не обнуляй ранее собранные факты квиза: они остаются валидными и должны быть учтены.',
+            'Если в финальном тексте есть противоречия к ранее собранным фактам, не стирай факты; добавь риск в risksAdd и помести спорный фрагмент в ignoredNoiseAdd.',
+            'Верни строго JSON без markdown.',
+            'Формат:',
+            '{',
+            '  "description": "string",',
+            '  "fieldsPatch": {',
+            '    "tagsAdd": [], "markersAdd": [], "rolesAdd": [], "skillsAdd": [], "risksAdd": [],',
+            '    "statusAdd": [], "tasksAdd": [], "metricsAdd": [], "ownersAdd": [],',
+            '    "participantsAdd": [], "resourcesAdd": [], "outcomesAdd": [], "industryAdd": [],',
+            '    "departmentsAdd": [], "stageAdd": [], "dateAdd": [], "locationAdd": [],',
+            '    "phonesAdd": [], "linksAdd": [], "importanceAdd": [], "ignoredNoiseAdd": []',
+            '  }',
+            '}',
+          ].join('\n')
+        : aiPrompts.buildEntityQuizSystemPrompt({
+            entityType,
+            level: normalizedPromptLevel,
+            forceStopCheck,
+          });
+      const userPrompt = isProfileSummaryAnswer
+        ? [
+            'Контекст финализации квиза (JSON):',
+            JSON.stringify(
+              {
+                entity: {
+                  id: String(entity._id),
+                  type: entityType,
+                  name: entityName,
+                  currentDescription: toTrimmedString(aiMetadata.description, 2200),
+                  currentFields,
+                },
+                quiz: {
+                  facts: toProfile(storedState.facts),
+                  missing: Array.isArray(storedState.missing) ? storedState.missing : [],
+                  history: Array.isArray(storedState.history) ? storedState.history.slice(-24) : [],
+                  profileSummary: answer.answerText,
+                },
+              },
+              null,
+              2,
+            ),
+          ].join('\n')
+        : aiPrompts.buildEntityQuizUserPrompt({
+            entityType,
+            name: entityName,
+            currentDescription: toTrimmedString(aiMetadata.description, 2200),
+            currentFields,
+            quizState: quizPromptState,
+            lastQuestion: {
+              questionId: activeQuestion.questionId,
+              questionKey: toTrimmedString(activeQuestion.questionKey, 64),
+              questionText: activeQuestion.questionText,
+              options: normalizeQuizOptions(activeQuestion.options),
+              mode: 'quiz_step',
+            },
+            answer,
+            forceStopCheck,
+            level: normalizedPromptLevel,
+          });
 
-      const model =
-        forceStopCheck
+      const model = isProfileSummaryAnswer
+        ? toTrimmedString(OPENAI_QUIZ_SMART_MODEL, 120) || toTrimmedString(OPENAI_MODEL, 120)
+        : forceStopCheck
           ? toTrimmedString(OPENAI_QUIZ_SMART_MODEL, 120) || toTrimmedString(OPENAI_MODEL, 120)
           : toTrimmedString(OPENAI_QUIZ_FAST_MODEL, 120) || toTrimmedString(OPENAI_MODEL, 120);
       let aiUsage = null;
@@ -2773,6 +2871,7 @@ function createAiRouter(deps) {
       let aiRawReply = '';
       let aiParsedResponse = {};
       let aiProviderDebug = {};
+      let profileSummaryFallbackDebug = null;
       let draftUpdate = {
         description: '',
         fieldsPatch: {},
@@ -2785,15 +2884,131 @@ function createAiRouter(deps) {
           includeRawPayload: includeDebug,
           model,
           temperature: 0.2,
-          maxOutputTokens: forceStopCheck ? 1800 : 900,
-          timeoutMs: forceStopCheck ? 90_000 : 60_000,
+          maxOutputTokens: isProfileSummaryAnswer ? 2400 : forceStopCheck ? 1800 : 900,
+          timeoutMs: isProfileSummaryAnswer ? 90_000 : forceStopCheck ? 90_000 : 60_000,
         });
         usedModel = toTrimmedString(aiResponse?.debug?.response?.model, 120) || model;
         aiUsage = aiResponse.usage;
         aiRawReply = aiResponse.reply || '';
         aiProviderDebug = aiResponse.debug || {};
         aiParsedResponse = extractJsonObjectFromText(aiResponse.reply);
-        draftUpdate = normalizeQuizDraftUpdate(toProfile(aiParsedResponse).draftUpdate || aiParsedResponse);
+        if (isProfileSummaryAnswer) {
+          const parsedResponse = toProfile(aiParsedResponse);
+          const hasAnalyzerShape =
+            typeof parsedResponse.status === 'string' ||
+            (parsedResponse.fields && typeof parsedResponse.fields === 'object');
+          if (hasAnalyzerShape) {
+            const normalizedAnalysis = normalizeEntityAnalysisOutput(entity.type, parsedResponse);
+            const fieldsPatchFromAnalysis = {};
+            for (const [fieldKey, rawValues] of Object.entries(toProfile(normalizedAnalysis.fields))) {
+              if (!Array.isArray(rawValues) || !rawValues.length) continue;
+              fieldsPatchFromAnalysis[`${fieldKey}Add`] = rawValues;
+            }
+            if (Array.isArray(normalizedAnalysis.ignoredNoise) && normalizedAnalysis.ignoredNoise.length) {
+              fieldsPatchFromAnalysis.ignoredNoiseAdd = normalizedAnalysis.ignoredNoise;
+            }
+            draftUpdate = normalizeQuizDraftUpdate({
+              description: toTrimmedString(normalizedAnalysis.description, 2200),
+              fieldsPatch: fieldsPatchFromAnalysis,
+            });
+          } else {
+            draftUpdate = normalizeQuizDraftUpdate(parsedResponse.draftUpdate || parsedResponse);
+          }
+
+          const shouldRunFinalizerFallback = !hasQuizPatchValues(draftUpdate.fieldsPatch);
+          if (shouldRunFinalizerFallback) {
+            const fallbackSystemPrompt = aiPrompts.buildEntityAnalyzerSystemPrompt(entity.type);
+            const fallbackQuizHistory = (Array.isArray(storedState.history) ? storedState.history : [])
+              .slice(-18)
+              .map((item) => {
+                const row = toProfile(item);
+                const questionText = toTrimmedString(row.questionText, 240);
+                const answerText = toTrimmedString(row.answerText, 240);
+                if (!questionText && !answerText) return '';
+                return `${questionText || 'Вопрос'} -> ${answerText || 'Ответ отсутствует'}`;
+              })
+              .filter(Boolean);
+
+            const fallbackMessage = [
+              'Финальный ответ пользователя после квиза:',
+              answer.answerText,
+              '',
+              'Факты квиза (JSON):',
+              JSON.stringify(toProfile(storedState.facts), null, 2),
+              '',
+              'История последних шагов квиза:',
+              fallbackQuizHistory.length ? fallbackQuizHistory.join('\n') : 'Нет данных',
+              '',
+              'Сформируй итоговое описание и заполни поля сущности без потери фактов.',
+            ].join('\n');
+
+            const fallbackUserPrompt = aiPrompts.buildEntityAnalyzerUserPrompt({
+              entity,
+              message: fallbackMessage,
+              history: [],
+              attachments: [],
+              currentFields,
+              voiceInput: '',
+              documents: [],
+            });
+
+            try {
+              const fallbackResponse = await aiProvider.requestOpenAiAgentReply({
+                systemPrompt: fallbackSystemPrompt,
+                userPrompt: fallbackUserPrompt,
+                includeRawPayload: includeDebug,
+                model: toTrimmedString(OPENAI_QUIZ_SMART_MODEL, 120) || toTrimmedString(OPENAI_MODEL, 120),
+                temperature: 0.2,
+                maxOutputTokens: 2400,
+                timeoutMs: 90_000,
+              });
+              const fallbackParsed = extractJsonObjectFromText(fallbackResponse.reply);
+              const normalizedFallback = normalizeEntityAnalysisOutput(entity.type, fallbackParsed);
+              const fallbackPatchFromAnalysis = {};
+              for (const [fieldKey, rawValues] of Object.entries(toProfile(normalizedFallback.fields))) {
+                if (!Array.isArray(rawValues) || !rawValues.length) continue;
+                fallbackPatchFromAnalysis[`${fieldKey}Add`] = rawValues;
+              }
+              if (Array.isArray(normalizedFallback.ignoredNoise) && normalizedFallback.ignoredNoise.length) {
+                fallbackPatchFromAnalysis.ignoredNoiseAdd = normalizedFallback.ignoredNoise;
+              }
+              const fallbackDraftUpdate = normalizeQuizDraftUpdate({
+                description: toTrimmedString(normalizedFallback.description, 2200),
+                fieldsPatch: fallbackPatchFromAnalysis,
+              });
+              draftUpdate = mergeQuizDraftUpdates(draftUpdate, fallbackDraftUpdate);
+              profileSummaryFallbackDebug = {
+                model: toTrimmedString(fallbackResponse?.debug?.response?.model, 120),
+                usage: fallbackResponse.usage || null,
+                aiRawReply: fallbackResponse.reply || '',
+                aiParsedResponse: fallbackParsed,
+                llmError: '',
+              };
+            } catch (fallbackError) {
+              const fallbackErrorMessage =
+                toTrimmedString(fallbackError?.message, 220) || 'profile_summary_fallback_failed';
+              profileSummaryFallbackDebug = {
+                model: '',
+                usage: null,
+                aiRawReply: '',
+                aiParsedResponse: {},
+                llmError: fallbackErrorMessage,
+              };
+              if (!llmError) {
+                llmError = fallbackErrorMessage;
+              }
+            }
+          }
+
+          if (!toTrimmedString(draftUpdate.description, 2200)) {
+            draftUpdate = normalizeQuizDraftUpdate({
+              ...draftUpdate,
+              description: answer.answerText,
+            });
+          }
+        } else {
+          draftUpdate = normalizeQuizDraftUpdate(toProfile(aiParsedResponse).draftUpdate || aiParsedResponse);
+        }
       } catch (error) {
         llmError = toTrimmedString(error?.message, 220) || 'quiz_draft_update_failed';
       }
@@ -2934,6 +3149,7 @@ function createAiRouter(deps) {
               llmError,
               aiRawReply,
               aiParsedResponse,
+              profileSummaryFallback: profileSummaryFallbackDebug,
             },
             provider: aiProviderDebug,
           }
