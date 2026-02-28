@@ -77,6 +77,8 @@ const OPENAI_MODEL = String(process.env.OPENAI_MODEL || 'gpt-5.2-pro').trim();
 const OPENAI_PROJECT_MODEL = String(process.env.OPENAI_PROJECT_MODEL || 'gpt-5.2-pro').trim();
 const OPENAI_ROUTER_MODEL = String(process.env.OPENAI_ROUTER_MODEL || 'gpt-5-mini').trim();
 const OPENAI_DEEP_MODEL = String(process.env.OPENAI_DEEP_MODEL || OPENAI_PROJECT_MODEL || 'gpt-5.2-pro').trim();
+const OPENAI_QUIZ_FAST_MODEL = String(process.env.OPENAI_QUIZ_FAST_MODEL || 'gpt-4.1-mini').trim();
+const OPENAI_QUIZ_SMART_MODEL = String(process.env.OPENAI_QUIZ_SMART_MODEL || 'gpt-5.2-pro').trim();
 const OPENAI_REQUEST_TIMEOUT_MS = Number(process.env.OPENAI_REQUEST_TIMEOUT_MS) || 0;
 const OPENAI_EMBEDDING_MODEL = String(process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small').trim();
 const AI_CONTEXT_ENTITY_LIMIT = Math.max(1, Number(process.env.AI_CONTEXT_ENTITY_LIMIT) || 120);
@@ -4205,6 +4207,8 @@ const aiRouter = createAiRouter({
   OPENAI_PROJECT_MODEL,
   OPENAI_ROUTER_MODEL,
   OPENAI_DEEP_MODEL,
+  OPENAI_QUIZ_FAST_MODEL,
+  OPENAI_QUIZ_SMART_MODEL,
   Entity,
   resolveAgentScopeContext,
   buildEntityAnalyzerCurrentFields,

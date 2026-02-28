@@ -330,6 +330,114 @@ function createAiPrompts(deps) {
     return ['Контекст обогащения проекта (JSON):', JSON.stringify(payload, null, 2)].join('\n');
   }
 
+  function buildEntityQuizSystemPrompt({ entityType, level = 'level1', forceStopCheck = false } = {}) {
+    const normalizedType = toTrimmedString(entityType, 24) || 'shape';
+    const normalizedLevel = toTrimmedString(level, 24) || 'level1';
+    const mustStopCheck = forceStopCheck === true;
+
+    return [
+      'Ты Quiz Master для заполнения сущностей Synapse12.',
+      `Текущий тип сущности: ${normalizedType}.`,
+      `Текущий уровень квиза: ${normalizedLevel}.`,
+      'Твоя задача: короткими вопросами собрать факты для описания и полей сущности.',
+      'Используй только входной контекст и текущее состояние квиза.',
+      'Время не упоминай и не используй (никаких "сейчас/потом/в будущем").',
+      'Не лей воду, не делай длинных объяснений.',
+      'Один вопрос = один смысл.',
+      'Всегда возвращай варианты: 3 смысловых + "Свой вариант".',
+      'Если пользователь пишет "Ответ 2", трактуй это как выбор option id=2.',
+      'Если пользователь пишет текст, трактуй это как "Свой вариант".',
+      mustStopCheck
+        ? 'Критично: на этом шаге обязательно верни mode="quiz_stop_check".'
+        : 'Обычно возвращай mode="quiz_step".',
+      'Возвращай строго JSON, без markdown и без текста вокруг.',
+      'Формат quiz_step:',
+      '{',
+      '  "mode": "quiz_step",',
+      '  "entityType": "person | company | project | event | resource | goal | result | task | shape",',
+      '  "questionId": "string",',
+      '  "questionText": "string",',
+      '  "options": [',
+      '    { "id": "1", "text": "..." },',
+      '    { "id": "2", "text": "..." },',
+      '    { "id": "3", "text": "..." },',
+      '    { "id": "4", "text": "Свой вариант" }',
+      '  ],',
+      '  "expects": { "type": "choice_or_text" },',
+      '  "state": {',
+      '    "facts": {},',
+      '    "missing": [],',
+      '    "confidence": 0.0',
+      '  },',
+      '  "draftUpdate": {',
+      '    "description": "string",',
+      '    "fieldsPatch": { "tagsAdd": [], "rolesAdd": [], "linksAdd": [] }',
+      '  },',
+      '  "stopCheck": null',
+      '}',
+      'Формат quiz_stop_check:',
+      '{',
+      '  "mode": "quiz_stop_check",',
+      '  "questionId": "stop_check",',
+      '  "questionText": "Данных достаточно или углубляемся?",',
+      '  "options": [',
+      '    { "id": "1", "text": "Достаточно — завершить" },',
+      '    { "id": "2", "text": "Углубить" },',
+      '    { "id": "3", "text": "Пауза" },',
+      '    { "id": "4", "text": "Свой вариант" }',
+      '  ],',
+      '  "summary": {',
+      '    "keyFacts": [],',
+      '    "risks": [],',
+      '    "nextSuggestedStep": "string"',
+      '  },',
+      '  "state": {',
+      '    "facts": {},',
+      '    "missing": [],',
+      '    "confidence": 0.0',
+      '  },',
+      '  "draftUpdate": {',
+      '    "description": "string",',
+      '    "fieldsPatch": { "tagsAdd": [], "rolesAdd": [], "linksAdd": [] }',
+      '  }',
+      '}',
+    ].join('\n');
+  }
+
+  function buildEntityQuizUserPrompt({
+    entityType,
+    name,
+    currentDescription,
+    currentFields,
+    quizState,
+    lastQuestion,
+    answer,
+    forceStopCheck,
+    level,
+  }) {
+    const payload = {
+      entity: {
+        entityType: toTrimmedString(entityType, 24),
+        name: toTrimmedString(name, 120),
+        currentDescription: toTrimmedString(currentDescription, 2600),
+        currentFields: toProfile(currentFields),
+      },
+      quiz: {
+        level: toTrimmedString(level, 24),
+        forceStopCheck: forceStopCheck === true,
+        state: toProfile(quizState),
+        lastQuestion: toProfile(lastQuestion),
+        answer: toProfile(answer),
+      },
+      instruction: {
+        askShort: true,
+        returnStrictJsonOnly: true,
+      },
+    };
+
+    return ['Контекст шага квиза (JSON):', JSON.stringify(payload, null, 2)].join('\n');
+  }
+
   function buildEntityAnalyzerSystemPrompt(entityType) {
     const allowedFields = getEntityAnalyzerFields(entityType);
 
@@ -465,6 +573,8 @@ function createAiPrompts(deps) {
     buildAgentUserPrompt,
     buildProjectEnrichmentSystemPrompt,
     buildProjectEnrichmentUserPrompt,
+    buildEntityQuizSystemPrompt,
+    buildEntityQuizUserPrompt,
     buildEntityAnalyzerSystemPrompt,
     buildEntityAnalyzerUserPrompt,
     buildEntityAnalysisReplyText,
