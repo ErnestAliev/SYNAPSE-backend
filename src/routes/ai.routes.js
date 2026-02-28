@@ -68,9 +68,11 @@ function createAiRouter(deps) {
   const PROJECT_CHAT_FIELD_KEYS = Object.freeze(Object.keys(PROJECT_CHAT_FIELD_CONFIGS));
   const QUIZ_ALLOWED_MODES = new Set(['quiz_step', 'quiz_stop_check']);
   const QUIZ_MIN_LEVEL1_QUESTIONS = 7;
-  const QUIZ_MAX_LEVEL1_QUESTIONS = 10;
   const QUIZ_MAX_LEVEL2_QUESTIONS = 12;
   const QUIZ_HISTORY_LIMIT = 60;
+  const QUIZ_REQUIRED_FACT_KEYS = Object.freeze(['value', 'risk_signal', 'next_step']);
+  const QUIZ_RISK_SIGNAL_QUESTION_IDS = new Set(['P6', 'C5', 'PR5', 'E5', 'R4', 'G4', 'T3', 'T5']);
+  const QUIZ_NEXT_STEP_QUESTION_IDS = new Set(['P8', 'C8', 'PR7', 'E6', 'R6', 'G5', 'RS4', 'T6', 'S4']);
   const QUIZ_FIELDS_PATCH_ALLOWED = new Set([
     'tagsAdd',
     'markersAdd',
@@ -1164,6 +1166,124 @@ function createAiRouter(deps) {
     };
   }
 
+  function hasQuizFactValue(rawValue) {
+    if (Array.isArray(rawValue)) {
+      return rawValue.some((item) => Boolean(toTrimmedString(item, 320)));
+    }
+    if (rawValue && typeof rawValue === 'object') {
+      return Object.keys(rawValue).length > 0;
+    }
+    return Boolean(toTrimmedString(rawValue, 320));
+  }
+
+  function createQuizMissingSet(rawMissing) {
+    const set = new Set(QUIZ_REQUIRED_FACT_KEYS);
+    const source = Array.isArray(rawMissing) ? rawMissing : [];
+    for (const item of source) {
+      const key = toTrimmedString(item, 64);
+      if (!key) continue;
+      set.add(key);
+    }
+    return set;
+  }
+
+  function computeQuizConfidenceFromFacts(rawFacts, fallbackConfidence = 0) {
+    const facts = toProfile(rawFacts);
+    const requiredCount = QUIZ_REQUIRED_FACT_KEYS.length || 1;
+    let filled = 0;
+    for (const key of QUIZ_REQUIRED_FACT_KEYS) {
+      if (hasQuizFactValue(facts[key])) filled += 1;
+    }
+    const byFacts = Math.min(1, Math.max(0, filled / requiredCount));
+    const fallback = Number.isFinite(Number(fallbackConfidence))
+      ? Math.min(1, Math.max(0, Number(fallbackConfidence)))
+      : 0;
+    return Math.max(byFacts, fallback);
+  }
+
+  function normalizeQuizFactsAndMissing(state) {
+    const facts = toProfile(state?.facts);
+    const missingSet = createQuizMissingSet(state?.missing);
+    for (const key of QUIZ_REQUIRED_FACT_KEYS) {
+      if (hasQuizFactValue(facts[key])) {
+        missingSet.delete(key);
+      }
+    }
+    return {
+      facts,
+      missing: Array.from(missingSet).slice(0, 20),
+      confidence: computeQuizConfidenceFromFacts(facts, state?.confidence),
+    };
+  }
+
+  function updateQuizFactsFromAnswer(state, lastQuestion, answer) {
+    const normalizedState = normalizeQuizFactsAndMissing(state);
+    const facts = toProfile(normalizedState.facts);
+    const missingSet = createQuizMissingSet(normalizedState.missing);
+    const questionId = toTrimmedString(lastQuestion?.questionId, 80);
+    const questionIdUpper = questionId.toUpperCase();
+    const questionText = toTrimmedString(lastQuestion?.questionText, 320).toLowerCase();
+    const answerText = toTrimmedString(answer?.answerText, 320);
+
+    if (!questionId || !answerText) {
+      return normalizedState;
+    }
+
+    if (questionId.toLowerCase() === 'q1') {
+      facts.value = answerText;
+      missingSet.delete('value');
+    }
+
+    const isRiskSignalQuestion =
+      QUIZ_RISK_SIGNAL_QUESTION_IDS.has(questionIdUpper) ||
+      questionIdUpper === 'RISK_SIGNAL' ||
+      questionText.includes('риск') ||
+      questionText.includes('красный флаг');
+    if (isRiskSignalQuestion) {
+      facts.risk_signal = answerText;
+      missingSet.delete('risk_signal');
+    }
+
+    const isNextStepQuestion =
+      QUIZ_NEXT_STEP_QUESTION_IDS.has(questionIdUpper) ||
+      questionIdUpper === 'NEXT_STEP' ||
+      questionText.includes('следующий шаг') ||
+      questionText.includes('next step');
+    if (isNextStepQuestion) {
+      facts.next_step = answerText;
+      missingSet.delete('next_step');
+    }
+
+    return {
+      facts,
+      missing: Array.from(missingSet).slice(0, 20),
+      confidence: computeQuizConfidenceFromFacts(facts, normalizedState.confidence),
+    };
+  }
+
+  function hasQuizRequiredStopFacts(state) {
+    const facts = toProfile(state?.facts);
+    return hasQuizFactValue(facts.risk_signal) && hasQuizFactValue(facts.next_step);
+  }
+
+  function hasValidModelQuizStepQuestion(rawResponse) {
+    const parsed = toProfile(rawResponse);
+    const mode = toTrimmedString(parsed.mode, 24).toLowerCase();
+    if (mode !== 'quiz_step') return false;
+    const questionId = toTrimmedString(parsed.questionId, 80);
+    const questionText = toTrimmedString(parsed.questionText, 320);
+    if (!questionId || !questionText) return false;
+    const rawOptions = Array.isArray(parsed.options) ? parsed.options : [];
+    if (rawOptions.length !== 4) return false;
+    for (let index = 0; index < 4; index += 1) {
+      const row = toProfile(rawOptions[index]);
+      const id = toTrimmedString(row.id, 8);
+      const text = toTrimmedString(row.text, 220);
+      if (id !== String(index + 1) || !text) return false;
+    }
+    return true;
+  }
+
   function normalizeQuizStatePayload(rawState, fallbackState) {
     const state = toProfile(rawState);
     const fallback = toProfile(fallbackState);
@@ -1786,6 +1906,10 @@ function createAiRouter(deps) {
             ? 'answer'
             : 'start';
       const storedState = normalizeStoredQuizState(aiMetadata.quiz_state, entityType, entityName);
+      const normalizedStoredState = normalizeQuizFactsAndMissing(storedState);
+      storedState.facts = normalizedStoredState.facts;
+      storedState.missing = normalizedStoredState.missing;
+      storedState.confidence = normalizedStoredState.confidence;
 
       if (action === 'start') {
         if ((storedState.active || storedState.level === 'paused') && storedState.lastQuestion?.questionId) {
@@ -1887,6 +2011,13 @@ function createAiRouter(deps) {
         storedState.level2Answers += 1;
       }
 
+      if (storedState.lastQuestion.mode !== 'quiz_stop_check') {
+        const updatedStateFromAnswer = updateQuizFactsFromAnswer(storedState, storedState.lastQuestion, answer);
+        storedState.facts = updatedStateFromAnswer.facts;
+        storedState.missing = updatedStateFromAnswer.missing;
+        storedState.confidence = updatedStateFromAnswer.confidence;
+      }
+
       if (storedState.lastQuestion.mode === 'quiz_stop_check') {
         const answerLower = answer.answerText.toLowerCase();
         const chooseDeep =
@@ -1955,14 +2086,10 @@ function createAiRouter(deps) {
         }
       }
 
-      const hasNextLevel1Template =
-        storedState.level === 'level1' &&
-        Boolean(getQuizLevel1TemplateQuestion(entityType, entityName, storedState.level1Answers));
+      const hasRequiredLevel1Facts = hasQuizRequiredStopFacts(storedState);
       const forceStopCheck =
-        (storedState.level === 'level1' && storedState.level1Answers >= QUIZ_MAX_LEVEL1_QUESTIONS) ||
         (storedState.level === 'level1' &&
-          storedState.level1Answers >= QUIZ_MIN_LEVEL1_QUESTIONS &&
-          !hasNextLevel1Template) ||
+          (storedState.level1Answers >= QUIZ_MIN_LEVEL1_QUESTIONS || hasRequiredLevel1Facts)) ||
         (storedState.level === 'level2' && storedState.level2Answers >= QUIZ_MAX_LEVEL2_QUESTIONS);
       const currentFields = buildEntityAnalyzerCurrentFields(entity.type, aiMetadata);
 
@@ -2017,9 +2144,10 @@ function createAiRouter(deps) {
         fallbackQuestion,
         fallbackState: storedState,
       });
+      const hasValidModelStepQuestion = hasValidModelQuizStepQuestion(parsedResponse);
 
       const level1TemplateQuestion =
-        storedState.level === 'level1' && !forceStopCheck
+        storedState.level === 'level1' && !forceStopCheck && !hasValidModelStepQuestion
           ? getQuizLevel1TemplateQuestion(entityType, entityName, storedState.level1Answers)
           : null;
       if (level1TemplateQuestion) {
@@ -2049,9 +2177,18 @@ function createAiRouter(deps) {
         };
       }
 
-      storedState.facts = toProfile(normalizedResponse.state.facts);
-      storedState.missing = normalizedResponse.state.missing;
-      storedState.confidence = normalizedResponse.state.confidence;
+      const normalizedStateAfterAnswer = normalizeQuizFactsAndMissing(storedState);
+      storedState.facts = normalizedStateAfterAnswer.facts;
+      storedState.missing = normalizedStateAfterAnswer.missing;
+      storedState.confidence = normalizedStateAfterAnswer.confidence;
+      normalizedResponse = {
+        ...normalizedResponse,
+        state: {
+          facts: toProfile(storedState.facts),
+          missing: storedState.missing,
+          confidence: storedState.confidence,
+        },
+      };
       storedState.updatedAt = nowIso;
       storedState.lastQuestion = {
         mode: normalizedResponse.mode,
