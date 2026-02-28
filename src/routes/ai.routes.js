@@ -1252,13 +1252,17 @@ function createAiRouter(deps) {
     );
   }
 
-  function chooseNextQuizQuestion(state, entityType, entityName) {
+  function chooseNextQuizQuestion(state, entityType, entityName, options = {}) {
     const bank = buildQuizQuestionBank(entityType, entityName);
     const answeredSet = new Set(
       (Array.isArray(state?.answeredQuestionIds) ? state.answeredQuestionIds : [])
         .map((item) => toTrimmedString(item, 80).toUpperCase())
         .filter(Boolean),
     );
+    const excludedQuestionId = toTrimmedString(options.excludeQuestionId, 80).toUpperCase();
+    if (excludedQuestionId) {
+      answeredSet.add(excludedQuestionId);
+    }
     const missingSet = new Set(
       (Array.isArray(state?.missing) ? state.missing : [])
         .map((item) => toTrimmedString(item, 64))
@@ -1492,20 +1496,26 @@ function createAiRouter(deps) {
     return Boolean(toTrimmedString(rawValue, 320));
   }
 
-  function createQuizMissingSet(rawMissing, entityType) {
-    const set = new Set(getQuizDefaultMissing(entityType));
-    const source = Array.isArray(rawMissing) ? rawMissing : [];
-    for (const item of source) {
-      const key = toTrimmedString(item, 64);
-      if (!key) continue;
-      set.add(key);
-    }
-    return set;
+  function normalizeQuizLevel(rawLevel) {
+    const numericLevel = Number(rawLevel);
+    if (Number.isFinite(numericLevel) && numericLevel >= 2) return 2;
+    const normalized = toTrimmedString(rawLevel, 24).toLowerCase();
+    if (normalized === 'level2' || normalized === '2') return 2;
+    return 1;
   }
 
-  function computeQuizConfidenceFromFacts(rawFacts, entityType, fallbackConfidence = 0) {
+  function getQuizRequiredStateKeys(entityType, rawLevel) {
+    const level = normalizeQuizLevel(rawLevel);
+    if (level >= 2) {
+      // Для Level-2 пока сохраняем тот же обязательный набор; при расширении добавляем отдельный маппинг.
+      return getQuizDefaultMissing(entityType);
+    }
+    return getQuizDefaultMissing(entityType);
+  }
+
+  function computeQuizConfidenceFromFacts(rawFacts, requiredKeys, fallbackConfidence = 0) {
     const facts = toProfile(rawFacts);
-    const required = getQuizDefaultMissing(entityType);
+    const required = Array.isArray(requiredKeys) ? requiredKeys : [];
     const requiredCount = required.length || 1;
     let filled = 0;
     for (const key of required) {
@@ -1520,23 +1530,17 @@ function createAiRouter(deps) {
 
   function normalizeQuizFactsAndMissing(state, entityType) {
     const facts = toProfile(state?.facts);
-    const missingSet = createQuizMissingSet(state?.missing, entityType);
-    for (const key of getQuizDefaultMissing(entityType)) {
-      if (hasQuizFactValue(facts[key])) {
-        missingSet.delete(key);
-      }
-    }
+    const requiredKeys = getQuizRequiredStateKeys(entityType, state?.level);
+    const missing = requiredKeys.filter((key) => !hasQuizFactValue(facts[key]));
     return {
       facts,
-      missing: Array.from(missingSet).slice(0, 20),
-      confidence: computeQuizConfidenceFromFacts(facts, entityType, state?.confidence),
+      missing: missing.slice(0, 24),
+      confidence: computeQuizConfidenceFromFacts(facts, requiredKeys, state?.confidence),
     };
   }
 
   function updateQuizFactsFromAnswer(state, lastQuestion, answer, entityType) {
-    const normalizedState = normalizeQuizFactsAndMissing(state, entityType);
-    const facts = toProfile(normalizedState.facts);
-    const missingSet = createQuizMissingSet(normalizedState.missing, entityType);
+    const facts = toProfile(state?.facts);
     const questionId = toTrimmedString(lastQuestion?.questionId, 80);
     const questionIdUpper = questionId.toUpperCase();
     const questionKey = getQuizQuestionKey(entityType, questionId, lastQuestion?.questionKey);
@@ -1544,12 +1548,17 @@ function createAiRouter(deps) {
     const answerText = toTrimmedString(answer?.answerText, 320);
 
     if (!questionId || !answerText) {
-      return normalizedState;
+      return normalizeQuizFactsAndMissing(
+        {
+          ...toProfile(state),
+          facts,
+        },
+        entityType,
+      );
     }
 
     if (questionKey) {
       facts[questionKey] = answerText;
-      missingSet.delete(questionKey);
     }
 
     const isRiskSignalQuestion =
@@ -1559,7 +1568,6 @@ function createAiRouter(deps) {
       questionText.includes('красный флаг');
     if (isRiskSignalQuestion && !questionKey) {
       facts.risk_signal = answerText;
-      missingSet.delete('risk_signal');
     }
 
     const isNextStepQuestion =
@@ -1569,14 +1577,15 @@ function createAiRouter(deps) {
       questionText.includes('next step');
     if (isNextStepQuestion && !questionKey) {
       facts.next_step = answerText;
-      missingSet.delete('next_step');
     }
 
-    return {
-      facts,
-      missing: Array.from(missingSet).slice(0, 20),
-      confidence: computeQuizConfidenceFromFacts(facts, entityType, normalizedState.confidence),
-    };
+    return normalizeQuizFactsAndMissing(
+      {
+        ...toProfile(state),
+        facts,
+      },
+      entityType,
+    );
   }
 
   function hasQuizRequiredStopFacts(state, entityType) {
@@ -2228,9 +2237,14 @@ function createAiRouter(deps) {
       const nowIso = new Date().toISOString();
       const storedState = normalizeStoredQuizState(aiMetadata.quiz_state, entityType, entityName);
       const normalizedStoredState = normalizeQuizFactsAndMissing(storedState, entityType);
+      storedState.level = normalizeQuizLevel(storedState.level);
       storedState.facts = normalizedStoredState.facts;
       storedState.missing = normalizedStoredState.missing;
       storedState.confidence = normalizedStoredState.confidence;
+      const requestedQuestionId = toTrimmedString(
+        req.body?.input?.activeQuestion?.questionId || req.body?.questionId,
+        80,
+      ).toUpperCase();
 
       const persistQuizState = async (nextState, metadataForPatch = aiMetadata) => {
         const nextMetadata = {
@@ -2348,7 +2362,9 @@ function createAiRouter(deps) {
         }
 
         if (storedState.isActive && activeQuestionAlreadyAnswered) {
-          const nextQuestion = chooseNextQuizQuestion(storedState, entityType, entityName);
+          const nextQuestion = chooseNextQuizQuestion(storedState, entityType, entityName, {
+            excludeQuestionId: storedState.activeQuestionId,
+          });
           if (nextQuestion) {
             storedState.active = true;
             storedState.isActive = true;
@@ -2401,7 +2417,7 @@ function createAiRouter(deps) {
       }
 
       const activeQuestionMode = toTrimmedString(storedState.lastQuestion?.mode, 24);
-      const activeQuestion =
+      let activeQuestion =
         activeQuestionMode === 'quiz_stop_check'
           ? stopCheckQuestion
           : findQuizQuestionById(entityType, entityName, storedState.activeQuestionId) ||
@@ -2418,9 +2434,45 @@ function createAiRouter(deps) {
         });
       }
 
-      const requestedQuestionId = toTrimmedString(req.body?.questionId, 80).toUpperCase();
+      let quizDesyncDetected = false;
+      let quizDesyncFixed = false;
       const activeQuestionIdUpper = toTrimmedString(activeQuestion.questionId, 80).toUpperCase();
       if (requestedQuestionId && activeQuestionIdUpper && requestedQuestionId !== activeQuestionIdUpper) {
+        quizDesyncDetected = true;
+        const answeredSet = new Set(
+          (Array.isArray(storedState.answeredQuestionIds) ? storedState.answeredQuestionIds : [])
+            .map((item) => toTrimmedString(item, 80).toUpperCase())
+            .filter(Boolean),
+        );
+        const requestedQuestion =
+          requestedQuestionId === 'STOP_CHECK'
+            ? toTrimmedString(storedState.lastQuestion?.mode, 24) === 'quiz_stop_check'
+              ? stopCheckQuestion
+              : null
+            : findQuizQuestionById(entityType, entityName, requestedQuestionId);
+        const requestedIsAnswered = requestedQuestionId ? answeredSet.has(requestedQuestionId) : false;
+
+        if (requestedQuestion && !requestedIsAnswered) {
+          activeQuestion = requestedQuestion;
+          storedState.active = true;
+          storedState.isActive = true;
+          storedState.activeQuestionId = requestedQuestion.questionId;
+          storedState.lastQuestion = {
+            mode:
+              toTrimmedString(requestedQuestion.questionId, 32).toLowerCase() === 'stop_check'
+                ? 'quiz_stop_check'
+                : 'quiz_step',
+            questionId: requestedQuestion.questionId,
+            questionKey: toTrimmedString(requestedQuestion.questionKey, 64),
+            questionText: requestedQuestion.questionText,
+            options: normalizeQuizOptions(requestedQuestion.options),
+          };
+          storedState.updatedAt = nowIso;
+          quizDesyncFixed = true;
+        }
+      }
+
+      if (requestedQuestionId && !quizDesyncFixed && requestedQuestionId !== toTrimmedString(activeQuestion.questionId, 80).toUpperCase()) {
         if (toTrimmedString(activeQuestion.questionId, 32).toLowerCase() === 'stop_check') {
           return res.status(200).json({
             mode: 'quiz_stop_check',
@@ -2436,6 +2488,18 @@ function createAiRouter(deps) {
             },
             stopCheck: toProfile(storedState.stopSummary || buildQuizStopSummary(storedState, entityType)),
             resumed: true,
+            ...(includeDebug
+              ? {
+                  debug: {
+                    quizSync: {
+                      mismatchDetected: true,
+                      mismatchFixed: false,
+                      requestedQuestionId,
+                      activeQuestionId: toTrimmedString(activeQuestion.questionId, 80),
+                    },
+                  },
+                }
+              : {}),
           });
         }
 
@@ -2447,7 +2511,21 @@ function createAiRouter(deps) {
               description: toTrimmedString(aiMetadata.description, 2200),
               fieldsPatch: {},
             },
-            { resumed: true },
+            {
+              resumed: true,
+              ...(includeDebug
+                ? {
+                    debug: {
+                      quizSync: {
+                        mismatchDetected: true,
+                        mismatchFixed: false,
+                        requestedQuestionId,
+                        activeQuestionId: toTrimmedString(activeQuestion.questionId, 80),
+                      },
+                    },
+                  }
+                : {}),
+            },
           ),
         );
       }
@@ -2519,7 +2597,9 @@ function createAiRouter(deps) {
         storedState.level = 2;
         storedState.active = true;
         storedState.isActive = true;
-        const nextQuestionAfterDeep = chooseNextQuizQuestion(storedState, entityType, entityName);
+        const nextQuestionAfterDeep = chooseNextQuizQuestion(storedState, entityType, entityName, {
+          excludeQuestionId: storedState.activeQuestionId,
+        });
         if (!nextQuestionAfterDeep) {
           storedState.active = false;
           storedState.isActive = false;
@@ -2598,19 +2678,27 @@ function createAiRouter(deps) {
       storedState.missing = updatedStateFromAnswer.missing;
       storedState.confidence = updatedStateFromAnswer.confidence;
 
-      const hasRequiredLevel1Facts = hasQuizRequiredStopFacts(storedState, entityType);
-      const answeredSteps =
-        Math.max(0, Number(storedState.level1Answers) || 0) + Math.max(0, Number(storedState.level2Answers) || 0);
-      const shouldStopCheck =
-        answeredSteps >= QUIZ_STOP_CHECK_MAX_STEPS ||
-        answeredSteps >= QUIZ_STOP_CHECK_MIN_STEPS ||
-        hasRequiredLevel1Facts;
+      const quizStepLimit = Number(storedState.level) >= 2 ? QUIZ_STOP_CHECK_MAX_STEPS + QUIZ_MAX_LEVEL2_QUESTIONS : QUIZ_STOP_CHECK_MAX_STEPS;
+      const shouldStopCheck = storedState.missing.length === 0 || Number(storedState.stepIndex) >= quizStepLimit;
 
       const currentFields = buildEntityAnalyzerCurrentFields(entity.type, aiMetadata);
       const forceStopCheck = shouldStopCheck;
+      const normalizedPromptLevel = normalizeQuizLevel(storedState.level);
+      const quizPromptState = {
+        level: normalizedPromptLevel,
+        stepCount: Math.max(0, Number(storedState.stepCount) || 0),
+        level1Answers: Math.max(0, Number(storedState.level1Answers) || 0),
+        level2Answers: Math.max(0, Number(storedState.level2Answers) || 0),
+        facts: toProfile(storedState.facts),
+        missing: Array.isArray(storedState.missing) ? storedState.missing : [],
+        confidence: Number.isFinite(Number(storedState.confidence))
+          ? Math.min(1, Math.max(0, Number(storedState.confidence)))
+          : 0,
+        history: Array.isArray(storedState.history) ? storedState.history.slice(-18) : [],
+      };
       const systemPrompt = aiPrompts.buildEntityQuizSystemPrompt({
         entityType,
-        level: Number(storedState.level) >= 2 ? 2 : 1,
+        level: normalizedPromptLevel,
         forceStopCheck,
       });
       const userPrompt = aiPrompts.buildEntityQuizUserPrompt({
@@ -2618,16 +2706,7 @@ function createAiRouter(deps) {
         name: entityName,
         currentDescription: toTrimmedString(aiMetadata.description, 2200),
         currentFields,
-        quizState: {
-          level: Number(storedState.level) >= 2 ? 2 : 1,
-          stepCount: storedState.stepCount,
-          level1Answers: storedState.level1Answers,
-          level2Answers: storedState.level2Answers,
-          facts: storedState.facts,
-          missing: storedState.missing,
-          confidence: storedState.confidence,
-          history: storedState.history.slice(-18),
-        },
+        quizState: quizPromptState,
         lastQuestion: {
           questionId: activeQuestion.questionId,
           questionKey: toTrimmedString(activeQuestion.questionKey, 64),
@@ -2637,7 +2716,7 @@ function createAiRouter(deps) {
         },
         answer,
         forceStopCheck,
-        level: Number(storedState.level) >= 2 ? 2 : 1,
+        level: normalizedPromptLevel,
       });
 
       const model =
@@ -2700,7 +2779,9 @@ function createAiRouter(deps) {
           stopCheck: toProfile(storedState.stopSummary),
         };
       } else {
-        const nextQuestion = chooseNextQuizQuestion(storedState, entityType, entityName);
+        const nextQuestion = chooseNextQuizQuestion(storedState, entityType, entityName, {
+          excludeQuestionId: activeQuestion.questionId,
+        });
         if (!nextQuestion) {
           storedState.active = true;
           storedState.isActive = true;
@@ -2758,11 +2839,16 @@ function createAiRouter(deps) {
             },
             input: {
               action,
+              requestedQuestionId,
               answer,
               activeQuestion: {
                 questionId: activeQuestion.questionId,
                 questionKey: toTrimmedString(activeQuestion.questionKey, 64),
                 questionText: activeQuestion.questionText,
+              },
+              quizSync: {
+                mismatchDetected: quizDesyncDetected,
+                mismatchFixed: quizDesyncFixed,
               },
               storedState: {
                 isActive: storedState.isActive,

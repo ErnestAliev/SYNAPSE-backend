@@ -415,6 +415,10 @@ function createAiPrompts(deps) {
     forceStopCheck,
     level,
   }) {
+    const quizStateSource = toProfile(quizState);
+    const normalizedLevel =
+      Number(quizStateSource.level) >= 2 || toTrimmedString(level, 24).toLowerCase() === 'level2' ? 2 : 1;
+
     const payload = {
       entity: {
         entityType: toTrimmedString(entityType, 24),
@@ -423,9 +427,12 @@ function createAiPrompts(deps) {
         currentFields: toProfile(currentFields),
       },
       quiz: {
-        level: toTrimmedString(level, 24),
+        level: normalizedLevel,
         forceStopCheck: forceStopCheck === true,
-        state: toProfile(quizState),
+        state: {
+          ...quizStateSource,
+          level: normalizedLevel,
+        },
         lastQuestion: toProfile(lastQuestion),
         answer: toProfile(answer),
       },
