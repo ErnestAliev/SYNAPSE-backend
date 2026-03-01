@@ -1754,22 +1754,24 @@ function createAiRouter(deps) {
     const options = normalizeQuizOptions(lastQuestion?.options);
     const optionMap = new Map(options.map((item) => [item.id, item.text]));
     const fromOptionId = optionMap.get(optionIdRaw) ? optionIdRaw : '';
+    // Custom (free-text) option is always the LAST option in the list, not hardcoded '4'.
+    const customOptionId = options.length > 0 ? options[options.length - 1].id : '4';
 
     if (fromOptionId) {
       return {
         optionId: fromOptionId,
         answerText: optionMap.get(fromOptionId) || answerText || '',
-        isCustom: fromOptionId === '4',
+        isCustom: fromOptionId === customOptionId,
       };
     }
 
-    const numericMatch = answerText.match(/^\s*(?:ответ\s*)?([1-4])\s*$/i);
+    const numericMatch = answerText.match(/^\s*(?:ответ\s*)?([1-9])\s*$/i);
     if (numericMatch?.[1] && optionMap.get(numericMatch[1])) {
       const optionId = numericMatch[1];
       return {
         optionId,
         answerText: optionMap.get(optionId) || '',
-        isCustom: optionId === '4',
+        isCustom: optionId === customOptionId,
       };
     }
 
@@ -1782,7 +1784,7 @@ function createAiRouter(deps) {
     }
 
     return {
-      optionId: '4',
+      optionId: customOptionId,
       answerText,
       isCustom: true,
     };
