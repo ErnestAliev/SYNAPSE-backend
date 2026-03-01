@@ -1262,7 +1262,8 @@ function createAiRouter(deps) {
     const result = [];
 
     for (const item of source) {
-      if (result.length >= 4) break;
+      // A1: limit raised from 4 to 6 to support ACCESS_ROLE and similar 6-option questions
+      if (result.length >= 6) break;
       const row = toProfile(item);
       const id = toTrimmedString(row.id, 8);
       const text = toTrimmedString(row.text, 220);
@@ -1278,22 +1279,12 @@ function createAiRouter(deps) {
     ];
     if (!result.length) return fallback;
 
-    const normalized = result
-      .slice(0, 4)
-      .map((item, index) => ({
-        id: String(index + 1),
-        text: item.text,
-      }));
-    while (normalized.length < 4) {
-      const nextIndex = normalized.length + 1;
-      normalized.push({
-        id: String(nextIndex),
-        text: nextIndex === 4 ? 'Свой вариант' : fallback[nextIndex - 1].text,
-      });
-    }
-    normalized[3] = { id: '4', text: 'Свой вариант' };
-    return normalized;
+    // A1: preserve original IDs from source — do NOT force-remap to 1-4.
+    // The old code did .slice(0,4) + re-index which broke ACCESS_ROLE (ids became 1-4, lost 5&6).
+    return result;
   }
+
+
 
   function normalizeProcessedQuizEvents(rawEvents) {
     const source = Array.isArray(rawEvents) ? rawEvents : [];
@@ -3711,7 +3702,7 @@ function createAiRouter(deps) {
 
       const accessRoleQuestion = {
         questionId: QUIZ_ACCESS_ROLE_QUESTION_ID,
-        questionText: 'Последний штрих: роль в связях/доступе',
+        questionText: `Последний штрих: ${entityName} для тебя — это…`,
         options: normalizeQuizOptions([
           { id: '1', text: 'Коннектор' },
           { id: '2', text: 'Конденсатор' },
