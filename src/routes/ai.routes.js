@@ -198,6 +198,7 @@ function createAiRouter(deps) {
   });
   const QUIZ_RISK_SIGNAL_QUESTION_IDS = new Set(['P6', 'C5', 'PR5', 'E5', 'R4', 'G4', 'T3', 'T5']);
   const QUIZ_NEXT_STEP_QUESTION_IDS = new Set(['P8', 'C8', 'PR7', 'E6', 'R6', 'G5', 'RS4', 'T6', 'S4']);
+  const QUIZ_ACCESS_ROLE_QUESTION_ID = 'ACCESS_ROLE';
   const QUIZ_FIELDS_PATCH_ALLOWED = new Set([
     'tagsAdd',
     'markersAdd',
@@ -3686,6 +3687,20 @@ function createAiRouter(deps) {
           { id: '4', text: 'Свой вариант' },
         ]),
       };
+
+      const accessRoleQuestion = {
+        questionId: QUIZ_ACCESS_ROLE_QUESTION_ID,
+        questionText: 'Последний штрих: как эта сущность чаще работает для доступа/связей?\nКоннектор — активный, общительный, везде бывает, сводит людей.\nКонденсатор — ресурс/влияние, но сам дальше редко "проводит".\nМост — помогает пройти/подсказывает как попасть.\nБарьер — блокирует/тормозит доступ.',
+        options: normalizeQuizOptions([
+          { id: '1', text: 'Коннектор' },
+          { id: '2', text: 'Конденсатор' },
+          { id: '3', text: 'Мост' },
+          { id: '4', text: 'Барьер' },
+          { id: '5', text: 'Не определено' },
+          { id: '6', text: 'Свой вариант' },
+        ]),
+      };
+
       const profileSummaryQuestion = buildQuizProfileSummaryQuestion(entityName);
 
       if (action === 'start') {
@@ -3974,6 +3989,69 @@ function createAiRouter(deps) {
       );
       if (!answer.answerText) {
         return res.status(400).json({ message: 'answerText or optionId is required' });
+      }
+
+      if (toTrimmedString(activeQuestion.questionId, 32).toUpperCase() === QUIZ_ACCESS_ROLE_QUESTION_ID) {
+        let tag = 'role:unknown';
+        if (answer.optionId === '1') tag = 'role:connector';
+        else if (answer.optionId === '2') tag = 'role:condenser';
+        else if (answer.optionId === '3') tag = 'role:bridge';
+        else if (answer.optionId === '4') tag = 'role:barrier';
+        else if (answer.optionId === '5') tag = 'role:unknown';
+        else if (answer.optionId === '6' || (!answer.optionId && answer.answerText)) {
+          const customRole = toTrimmedString(answer.answerText, 64).replace(/[\r\n]+/g, ' ');
+          tag = `role:custom:${customRole}`;
+        }
+
+        const draftUpdate = normalizeQuizDraftUpdate({
+          description: '',
+          fieldsPatch: {
+            tagsAdd: [tag],
+          },
+        });
+
+        storedState.level = 1;
+        storedState.active = false;
+        storedState.isActive = false;
+        storedState.activeQuestionId = '';
+        storedState.completedAt = nowIso;
+        storedState.updatedAt = nowIso;
+        storedState.lastQuestion = {
+          mode: 'quiz_step',
+          questionId: accessRoleQuestion.questionId,
+          questionKey: '',
+          questionText: accessRoleQuestion.questionText,
+          options: normalizeQuizOptions(accessRoleQuestion.options),
+        };
+
+        const responsePayload = buildQuizCompletedPayload(entityType, 'Роль сохранена. Квиз завершён.', storedState, draftUpdate);
+
+        const responseEnvelope = {
+          ...responsePayload,
+          quizMode: toTrimmedString(responsePayload?.quizMode, 24) || QUIZ_MODE_STANDARD,
+          orchestrator: buildQuizOrchestratorPayload(storedState, false),
+        };
+
+        if (clientEventId) {
+          storedState.processedEvents = rememberProcessedQuizEvent(
+            storedState.processedEvents,
+            clientEventId,
+            responseEnvelope,
+          );
+        }
+
+        const nextMetadata = applyQuizDraftUpdateToMetadata(entity.type, aiMetadata, responsePayload.draftUpdate);
+        nextMetadata.quiz_state = storedState;
+        entity.ai_metadata = nextMetadata;
+        await entity.save();
+        broadcastEntityEvent(ownerId, 'entity.updated', {
+          entity: entity.toObject(),
+        });
+
+        return res.status(200).json({
+          ...responseEnvelope,
+          updatedEntity: entity.toObject(),
+        });
       }
 
       if (toTrimmedString(activeQuestion.questionId, 32).toLowerCase() === 'stop_check') {
@@ -4358,20 +4436,64 @@ function createAiRouter(deps) {
 
       let responsePayload;
       if (isProfileSummaryAnswer) {
-        storedState.level = 1;
-        storedState.active = false;
-        storedState.isActive = false;
-        storedState.activeQuestionId = '';
-        storedState.completedAt = nowIso;
-        storedState.updatedAt = nowIso;
-        storedState.lastQuestion = {
-          mode: 'quiz_step',
-          questionId: profileSummaryQuestion.questionId,
-          questionKey: toTrimmedString(profileSummaryQuestion.questionKey, 64),
-          questionText: profileSummaryQuestion.questionText,
-          options: [],
-        };
-        responsePayload = buildQuizCompletedPayload(entityType, 'Квиз завершён. Данные сохранены.', storedState, draftUpdate);
+        const hasValidAnswer = answer.answerText.trim().length > 0;
+
+        if (!hasValidAnswer) {
+          storedState.level = 1;
+          storedState.active = false;
+          storedState.isActive = false;
+          storedState.activeQuestionId = '';
+          storedState.completedAt = nowIso;
+          storedState.updatedAt = nowIso;
+          storedState.lastQuestion = {
+            mode: 'quiz_step',
+            questionId: profileSummaryQuestion.questionId,
+            questionKey: toTrimmedString(profileSummaryQuestion.questionKey, 64),
+            questionText: profileSummaryQuestion.questionText,
+            options: [],
+          };
+          responsePayload = buildQuizCompletedPayload(entityType, 'Квиз завершён. Данные сохранены.', storedState, draftUpdate);
+        } else {
+          storedState.active = true;
+          storedState.isActive = true;
+          storedState.activeQuestionId = accessRoleQuestion.questionId;
+          storedState.lastQuestion = {
+            mode: 'quiz_step',
+            questionId: accessRoleQuestion.questionId,
+            questionKey: '',
+            questionText: accessRoleQuestion.questionText,
+            options: normalizeQuizOptions(accessRoleQuestion.options),
+          };
+          storedState.updatedAt = nowIso;
+
+          // Compute recommendedOptionId based on markers
+          let recommendedOptionId = '5'; // default to Unknown
+          const analysisText = `${Object.values(draftUpdate.fieldsPatch).flat().join(' ')} ${draftUpdate.description}`.toLowerCase();
+
+          if (/секретарь|ассистент|фильтрует|доступ|не пускает|барьер/.test(analysisText)) {
+            recommendedOptionId = analysisText.includes('помогает пройти') || analysisText.includes('мост') ? '3' : '4';
+          } else if (/нетворк|ивент|знакомит|со всем|комьюнити/.test(analysisText)) {
+            recommendedOptionId = '1';
+          } else if (/владелец|директор|инвестор|ресурс|решает/.test(analysisText)) {
+            recommendedOptionId = '2';
+          }
+
+          responsePayload = {
+            mode: 'quiz_step',
+            quizMode: QUIZ_MODE_STANDARD,
+            quizRunId: toTrimmedString(storedState?.runId, 36),
+            entityType,
+            questionId: accessRoleQuestion.questionId,
+            questionText: accessRoleQuestion.questionText,
+            options: normalizeQuizOptions(accessRoleQuestion.options),
+            expects: { type: 'choice_or_text' },
+            state: normalizeQuizStatePayload(storedState, storedState),
+            draftUpdate: normalizeQuizDraftUpdate(draftUpdate),
+            stopCheck: null,
+            orchestrator: buildQuizOrchestratorPayload(storedState, false),
+            recommendedOptionId,
+          };
+        }
       } else if (shouldStopCheck) {
         storedState.active = true;
         storedState.isActive = true;
