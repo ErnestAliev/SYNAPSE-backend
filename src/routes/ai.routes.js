@@ -1750,44 +1750,43 @@ function createAiRouter(deps) {
 
   function parseQuizAnswer(rawAnswerText, rawOptionId, lastQuestion) {
     const answerText = toTrimmedString(rawAnswerText, 1200);
-    const optionIdRaw = toTrimmedString(rawOptionId, 8);
-    const options = normalizeQuizOptions(lastQuestion?.options);
-    const optionMap = new Map(options.map((item) => [item.id, item.text]));
-    const fromOptionId = optionMap.get(optionIdRaw) ? optionIdRaw : '';
-    // Custom (free-text) option is always the LAST option in the list, not hardcoded '4'.
-    const customOptionId = options.length > 0 ? options[options.length - 1].id : '4';
+    // A1: always coerce to string to handle numeric optionId from client
+    const optionIdRaw = String(toTrimmedString(rawOptionId, 8) || '');
+    // A1: safe options guard - never access .length without checking
+    const safeOptions = Array.isArray(lastQuestion?.options) ? normalizeQuizOptions(lastQuestion.options) : [];
+    const optionMap = new Map(safeOptions.map((o) => [String(o.id), o]));
+    const fromOptionId = optionMap.has(optionIdRaw) ? optionIdRaw : '';
+    // A1: customOptionId = last option dynamically (works for 4-option and 6-option quizzes)
+    const customOptionId = safeOptions.length > 0 ? String(safeOptions[safeOptions.length - 1].id) : '4';
 
     if (fromOptionId) {
+      const opt = optionMap.get(fromOptionId);
       return {
         optionId: fromOptionId,
-        answerText: optionMap.get(fromOptionId) || answerText || '',
+        // answerText = option label (never empty when optionId matched)
+        answerText: toTrimmedString(opt?.text, 320) || answerText || fromOptionId,
         isCustom: fromOptionId === customOptionId,
       };
     }
 
+    // Try to match a bare digit typed as free text (e.g. user typed "1" or "ответ 2")
     const numericMatch = answerText.match(/^\s*(?:ответ\s*)?([1-9])\s*$/i);
-    if (numericMatch?.[1] && optionMap.get(numericMatch[1])) {
+    if (numericMatch?.[1] && optionMap.has(numericMatch[1])) {
       const optionId = numericMatch[1];
+      const opt = optionMap.get(optionId);
       return {
         optionId,
-        answerText: optionMap.get(optionId) || '',
+        answerText: toTrimmedString(opt?.text, 320) || answerText,
         isCustom: optionId === customOptionId,
       };
     }
 
     if (!answerText) {
-      return {
-        optionId: '',
-        answerText: '',
-        isCustom: false,
-      };
+      return { optionId: '', answerText: '', isCustom: false };
     }
 
-    return {
-      optionId: customOptionId,
-      answerText,
-      isCustom: true,
-    };
+    // Free text answer — treat as custom (last option)
+    return { optionId: customOptionId, answerText, isCustom: true };
   }
 
   function hasQuizFactValue(rawValue) {
@@ -3678,17 +3677,18 @@ function createAiRouter(deps) {
       const buildStepResponseFromQuestion = (question, state, draftUpdate, extras = {}) => {
         const expectsType =
           toTrimmedString(question?.expectsType, 24).toLowerCase() === 'text' ? 'text' : 'choice_or_text';
+        // A4: always include options array — never undefined
+        const safeOptions = Array.isArray(question?.options) ? question.options : [];
         return {
           mode: 'quiz_step',
           quizMode: QUIZ_MODE_STANDARD,
-          // quizRunId is the stable dedup key for the entire quiz run.
           quizRunId: toTrimmedString(state?.runId, 36),
           stepVersion: Number(state?.version) || 1,
           updatedEntity: entity.toObject(),
           entityType,
           questionId: question.questionId,
           questionText: question.questionText,
-          options: expectsType === 'text' ? [] : normalizeQuizOptions(question.options),
+          options: expectsType === 'text' ? [] : normalizeQuizOptions(safeOptions),
           expects: { type: expectsType },
           state: normalizeQuizStatePayload(state, state),
           draftUpdate: normalizeQuizDraftUpdate(draftUpdate),
@@ -4043,8 +4043,16 @@ function createAiRouter(deps) {
           options: activeQuestion.options,
         },
       );
+      // A2: don't 400 on empty answerText — return 409 with valid step so frontend can recover
       if (!answer.answerText) {
-        return res.status(400).json({ message: 'answerText or optionId is required' });
+        return res.status(409).json(
+          buildStepResponseFromQuestion(
+            activeQuestion,
+            storedState,
+            { description: toTrimmedString(aiMetadata.description, 2200), fieldsPatch: {} },
+            { syncError: 'invalid_answer', message: 'answerText or optionId is required' },
+          ),
+        );
       }
 
       if (toTrimmedString(activeQuestion.questionId, 32).toUpperCase() === QUIZ_ACCESS_ROLE_QUESTION_ID) {
