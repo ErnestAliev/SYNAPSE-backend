@@ -76,6 +76,7 @@ function createAiRouter(deps) {
   const QUIZ_START_DEDUP_WINDOW_MS = 2_000;
   const QUIZ_MAX_LEVEL2_QUESTIONS = 12;
   const QUIZ_HISTORY_LIMIT = 60;
+  const QUIZ_PROCESSED_EVENT_LIMIT = 80;
   const QUIZ_DEFAULT_MISSING_BY_TYPE = Object.freeze({
     person: ['relation_type', 'usefulness', 'value_type', 'connection_mode', 'trust_level', 'risk_signal', 'desired_outcome', 'next_step'],
     connection: [
@@ -1293,6 +1294,74 @@ function createAiRouter(deps) {
     return normalized;
   }
 
+  function normalizeProcessedQuizEvents(rawEvents) {
+    const source = Array.isArray(rawEvents) ? rawEvents : [];
+    return source
+      .slice(-QUIZ_PROCESSED_EVENT_LIMIT)
+      .map((item) => {
+        const row = toProfile(item);
+        const id = toTrimmedString(row.id, 120);
+        if (!id) return null;
+        const response = toProfile(row.response);
+        const at = toTrimmedString(row.at, 80) || new Date().toISOString();
+        return {
+          id,
+          response,
+          at,
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function findProcessedQuizEvent(processedEvents, eventId) {
+    const normalizedEventId = toTrimmedString(eventId, 120);
+    if (!normalizedEventId) return null;
+    const events = normalizeProcessedQuizEvents(processedEvents);
+    return events.find((item) => item.id === normalizedEventId) || null;
+  }
+
+  function rememberProcessedQuizEvent(processedEvents, eventId, responsePayload) {
+    const normalizedEventId = toTrimmedString(eventId, 120);
+    if (!normalizedEventId) return normalizeProcessedQuizEvents(processedEvents);
+    const events = normalizeProcessedQuizEvents(processedEvents).filter((item) => item.id !== normalizedEventId);
+    events.push({
+      id: normalizedEventId,
+      response: toProfile(responsePayload),
+      at: new Date().toISOString(),
+    });
+    return events.slice(-QUIZ_PROCESSED_EVENT_LIMIT);
+  }
+
+  function buildQuizOrchestratorPayload(state, isMyQuiz = false) {
+    const normalizedState = toProfile(state);
+    return {
+      activeQuestionId: toTrimmedString(normalizedState.activeQuestionId, 80),
+      answeredQuestionIds: Array.isArray(normalizedState.answeredQuestionIds)
+        ? normalizedState.answeredQuestionIds
+            .map((item) => toTrimmedString(item, 80))
+            .filter(Boolean)
+        : [],
+      answers: isMyQuiz ? toProfile(normalizedState.answers) : toProfile(normalizedState.facts),
+      stepIndex: Number.isFinite(Number(normalizedState.stepIndex)) ? Math.max(0, Math.floor(Number(normalizedState.stepIndex))) : 0,
+    };
+  }
+
+  function enforceQuizStateInvariants(state, isMyQuiz = false) {
+    if (!state || typeof state !== 'object') return state;
+    const activeQuestionId = toTrimmedString(state.activeQuestionId, 80);
+    const activeQuestionIdUpper = activeQuestionId.toUpperCase();
+    const answered = Array.isArray(state.answeredQuestionIds) ? state.answeredQuestionIds : [];
+    state.answeredQuestionIds = Array.from(
+      new Set(
+        answered
+          .map((item) => toTrimmedString(item, 80))
+          .filter(Boolean)
+          .filter((item) => item.toUpperCase() !== activeQuestionIdUpper),
+      ),
+    ).slice(0, isMyQuiz ? 120 : 80);
+    return state;
+  }
+
   function getQuizDefaultMissing(entityType) {
     const source = Array.isArray(QUIZ_DEFAULT_MISSING_BY_TYPE[entityType])
       ? QUIZ_DEFAULT_MISSING_BY_TYPE[entityType]
@@ -1537,6 +1606,7 @@ function createAiRouter(deps) {
       active: true,
       activeQuestionId: toTrimmedString(firstQuestion?.questionId, 80) || 'Q1',
       answeredQuestionIds: [],
+      processedEvents: [],
       entityType,
       entityName: toTrimmedString(entityName, 120),
       level: 1,
@@ -1588,7 +1658,7 @@ function createAiRouter(deps) {
       .filter((item) => item.questionId && item.answerText);
     const answeredFromState = Array.isArray(state.answeredQuestionIds) ? state.answeredQuestionIds : [];
     const answeredFromHistory = history.map((item) => item.questionId);
-    const answeredQuestionIds = Array.from(
+    const answeredQuestionIdsRaw = Array.from(
       new Set(
         [...answeredFromState, ...answeredFromHistory]
           .map((item) => toTrimmedString(item, 80))
@@ -1613,6 +1683,10 @@ function createAiRouter(deps) {
     const activeQuestionId =
       toTrimmedString(state.activeQuestionId, 80) ||
       (mode && questionId ? questionId : toTrimmedString(fallbackQuestion.questionId, 80));
+    const activeQuestionIdUpper = toTrimmedString(activeQuestionId, 80).toUpperCase();
+    const answeredQuestionIds = answeredQuestionIdsRaw.filter(
+      (item) => toTrimmedString(item, 80).toUpperCase() !== activeQuestionIdUpper,
+    );
     const isActive = state.isActive === true || state.active === true;
 
     const normalized = {
@@ -1621,6 +1695,7 @@ function createAiRouter(deps) {
       active: isActive,
       activeQuestionId,
       answeredQuestionIds,
+      processedEvents: normalizeProcessedQuizEvents(state.processedEvents),
       entityType: toTrimmedString(state.entityType, 24) || entityType,
       entityName: toTrimmedString(state.entityName, 120) || toTrimmedString(entityName, 120),
       level,
@@ -2127,6 +2202,7 @@ function createAiRouter(deps) {
       isActive: true,
       activeQuestionId: '',
       answeredQuestionIds: [],
+      processedEvents: [],
       answers: {},
       history: [],
       stepIndex: 1,
@@ -2159,7 +2235,7 @@ function createAiRouter(deps) {
       return baseState;
     }
 
-    const answeredQuestionIds = Array.from(
+    const answeredQuestionIdsRaw = Array.from(
       new Set(
         (Array.isArray(state.answeredQuestionIds) ? state.answeredQuestionIds : [])
           .map((item) => toTrimmedString(item, 80))
@@ -2180,6 +2256,12 @@ function createAiRouter(deps) {
       })
       .filter((item) => item.questionId && item.answerText);
 
+    const activeQuestionId = toTrimmedString(state.activeQuestionId, 80);
+    const activeQuestionIdUpper = activeQuestionId.toUpperCase();
+    const answeredQuestionIds = answeredQuestionIdsRaw.filter(
+      (item) => toTrimmedString(item, 80).toUpperCase() !== activeQuestionIdUpper,
+    );
+
     return {
       ...baseState,
       mode: (() => {
@@ -2188,8 +2270,9 @@ function createAiRouter(deps) {
         return 'full';
       })(),
       isActive: state.isActive === true,
-      activeQuestionId: toTrimmedString(state.activeQuestionId, 80),
+      activeQuestionId,
       answeredQuestionIds,
+      processedEvents: normalizeProcessedQuizEvents(state.processedEvents),
       answers: toProfile(state.answers),
       history,
       stepIndex: Number.isFinite(Number(state.stepIndex)) ? Math.max(0, Math.floor(Number(state.stepIndex))) : answeredQuestionIds.length,
@@ -2999,6 +3082,7 @@ function createAiRouter(deps) {
           : toTrimmedString(req.body?.answerText || req.body?.message, 1200)
             ? 'answer'
             : 'start';
+      const clientEventId = toTrimmedString(req.body?.client_event_id, 120);
       const nowIso = new Date().toISOString();
       const myScenario = resolveMyQuizScenario(entityType, entity);
 
@@ -3013,6 +3097,7 @@ function createAiRouter(deps) {
           entityType,
           entityName,
         });
+        myState = enforceQuizStateInvariants(myState, true);
 
         const getQuestionBankByMode = (modeValue) => {
           const mode = toTrimmedString(modeValue, 24).toLowerCase();
@@ -3052,26 +3137,34 @@ function createAiRouter(deps) {
           responsePayload,
           draftUpdate = { description: '', fieldsPatch: {} },
           debugExtra = {},
+          statusCode = 200,
+          eventIdToRemember = '',
         }) => {
           myState.updatedAt = nowIso;
           myState.updated_at = nowIso;
           const normalizedDraftUpdate = normalizeQuizDraftUpdate(draftUpdate);
           const questionBank = getCurrentQuestionBank();
           const nextMetadata = applyQuizDraftUpdateToMetadata(entity.type, aiMetadata, normalizedDraftUpdate);
-          nextMetadata.quiz_my = myState;
-          entity.ai_metadata = nextMetadata;
-          await entity.save();
-          broadcastEntityEvent(ownerId, 'entity.updated', {
-            entity: entity.toObject(),
-          });
-
           const payload = {
             ...responsePayload,
             quizMode: QUIZ_MODE_MY,
             myScenario,
             state: buildMyQuizStatePayload(myState, questionBank),
             draftUpdate: normalizedDraftUpdate,
+            orchestrator: buildQuizOrchestratorPayload(myState, true),
           };
+
+          if (eventIdToRemember) {
+            myState.processedEvents = rememberProcessedQuizEvent(myState.processedEvents, eventIdToRemember, payload);
+          }
+
+          myState = enforceQuizStateInvariants(myState, true);
+          nextMetadata.quiz_my = myState;
+          entity.ai_metadata = nextMetadata;
+          await entity.save();
+          broadcastEntityEvent(ownerId, 'entity.updated', {
+            entity: entity.toObject(),
+          });
 
           if (includeDebug) {
             payload.debug = {
@@ -3085,7 +3178,7 @@ function createAiRouter(deps) {
             };
           }
 
-          return res.status(200).json(payload);
+          return res.status(Number.isFinite(Number(statusCode)) ? Number(statusCode) : 200).json(payload);
         };
 
         const startMyQuizFull = (keepAnswers = false) => {
@@ -3134,14 +3227,35 @@ function createAiRouter(deps) {
 
         const getActiveMyQuestion = () => {
           const questionBank = getCurrentQuestionBank();
-          const requested = findMyQuizQuestionById(questionBank, requestedQuestionId);
-          if (requested) {
-            myState.activeQuestionId = requested.questionId;
-            myState.isActive = true;
-            return requested;
-          }
           return findMyQuizQuestionById(questionBank, myState.activeQuestionId);
         };
+
+        const buildMyCurrentQuestionResponse = (question, extras = {}) =>
+          ({
+            ...buildMyStepPayload(question, extras),
+            quizMode: QUIZ_MODE_MY,
+            myScenario,
+            state: buildMyQuizStatePayload(myState, getCurrentQuestionBank()),
+            draftUpdate: normalizeQuizDraftUpdate({
+              description: '',
+              fieldsPatch: {},
+            }),
+            orchestrator: buildQuizOrchestratorPayload(myState, true),
+          });
+
+        if (action === 'answer' && clientEventId) {
+          const cachedEvent = findProcessedQuizEvent(myState.processedEvents, clientEventId);
+          if (cachedEvent && Object.keys(toProfile(cachedEvent.response)).length) {
+            const cachedResponse = toProfile(cachedEvent.response);
+            const replayPayload = {
+              ...cachedResponse,
+              replayed: true,
+              quizMode: toTrimmedString(cachedResponse.quizMode, 24) || QUIZ_MODE_MY,
+              myScenario: toTrimmedString(cachedResponse.myScenario, 40) || myScenario,
+            };
+            return res.status(200).json(replayPayload);
+          }
+        }
 
         if (action === 'start') {
           if (myState.completed) {
@@ -3220,6 +3334,47 @@ function createAiRouter(deps) {
           });
         }
 
+        const activeQuestionIdUpper = toTrimmedString(activeQuestion.questionId, 80).toUpperCase();
+        if (!requestedQuestionId) {
+          return res.status(409).json({
+            ...buildMyCurrentQuestionResponse(activeQuestion, {
+              resumed: true,
+              syncError: true,
+            }),
+            message: 'quiz_state_out_of_sync',
+            expectedQuestionId: toTrimmedString(activeQuestion.questionId, 80),
+            activeQuestionId: toTrimmedString(activeQuestion.questionId, 80),
+            answeredQuestionIds: Array.isArray(myState.answeredQuestionIds) ? myState.answeredQuestionIds : [],
+          });
+        }
+        if (requestedQuestionId && requestedQuestionId !== activeQuestionIdUpper) {
+          const answeredSet = new Set(
+            (Array.isArray(myState.answeredQuestionIds) ? myState.answeredQuestionIds : [])
+              .map((item) => toTrimmedString(item, 80).toUpperCase())
+              .filter(Boolean),
+          );
+
+          if (answeredSet.has(requestedQuestionId)) {
+            return res.status(200).json(
+              buildMyCurrentQuestionResponse(activeQuestion, {
+                resumed: true,
+                duplicate: true,
+              }),
+            );
+          }
+
+          return res.status(409).json({
+            ...buildMyCurrentQuestionResponse(activeQuestion, {
+              resumed: true,
+              syncError: true,
+            }),
+            message: 'quiz_state_out_of_sync',
+            expectedQuestionId: toTrimmedString(activeQuestion.questionId, 80),
+            activeQuestionId: toTrimmedString(activeQuestion.questionId, 80),
+            answeredQuestionIds: Array.isArray(myState.answeredQuestionIds) ? myState.answeredQuestionIds : [],
+          });
+        }
+
         const answer = parseQuizAnswer(
           req.body?.answerText || req.body?.message,
           req.body?.optionId,
@@ -3230,8 +3385,6 @@ function createAiRouter(deps) {
         if (!answer.answerText) {
           return res.status(400).json({ message: 'answerText or optionId is required' });
         }
-
-        const activeQuestionIdUpper = toTrimmedString(activeQuestion.questionId, 80).toUpperCase();
         const answeredSet = new Set(
           (Array.isArray(myState.answeredQuestionIds) ? myState.answeredQuestionIds : [])
             .map((item) => toTrimmedString(item, 80))
@@ -3275,10 +3428,12 @@ function createAiRouter(deps) {
                   description: '',
                   fieldsPatch: {},
                 }),
+                eventIdToRemember: clientEventId,
               });
             }
             return persistMyQuizStateAndRespond({
               responsePayload: buildMyStepPayload(firstQuestion, { resumed: false }),
+              eventIdToRemember: clientEventId,
             });
           }
 
@@ -3295,10 +3450,12 @@ function createAiRouter(deps) {
                   description: '',
                   fieldsPatch: {},
                 }),
+                eventIdToRemember: clientEventId,
               });
             }
             return persistMyQuizStateAndRespond({
               responsePayload: buildMyStepPayload(firstQuestion, { resumed: false }),
+              eventIdToRemember: clientEventId,
             });
           }
 
@@ -3310,6 +3467,7 @@ function createAiRouter(deps) {
               description: '',
               fieldsPatch: {},
             }),
+            eventIdToRemember: clientEventId,
           });
         }
 
@@ -3325,6 +3483,7 @@ function createAiRouter(deps) {
                 description: '',
                 fieldsPatch: {},
               }),
+              eventIdToRemember: clientEventId,
             });
           }
 
@@ -3340,6 +3499,7 @@ function createAiRouter(deps) {
                 description: '',
                 fieldsPatch: {},
               }),
+              eventIdToRemember: clientEventId,
             });
           }
 
@@ -3359,12 +3519,14 @@ function createAiRouter(deps) {
                 description: '',
                 fieldsPatch: {},
               }),
+              eventIdToRemember: clientEventId,
             });
           }
           myState.isActive = true;
           myState.activeQuestionId = finalQuestion.questionId;
           return persistMyQuizStateAndRespond({
             responsePayload: buildMyStepPayload(finalQuestion, { resumed: false }),
+            eventIdToRemember: clientEventId,
           });
         }
 
@@ -3379,6 +3541,7 @@ function createAiRouter(deps) {
           return persistMyQuizStateAndRespond({
             responsePayload: buildQuizCompletedPayload(entityType, 'Квиз завершён. Данные сохранены.', myState, refreshDraftUpdate),
             draftUpdate: refreshDraftUpdate,
+            eventIdToRemember: clientEventId,
           });
         }
 
@@ -3411,6 +3574,7 @@ function createAiRouter(deps) {
               finalizationResult.draftUpdate,
             ),
             draftUpdate: finalizationResult.draftUpdate,
+            eventIdToRemember: clientEventId,
           });
         }
 
@@ -3427,6 +3591,7 @@ function createAiRouter(deps) {
               description: '',
               fieldsPatch: {},
             }),
+            eventIdToRemember: clientEventId,
           });
         }
 
@@ -3434,6 +3599,7 @@ function createAiRouter(deps) {
         myState.activeQuestionId = nextQuestion.questionId;
         return persistMyQuizStateAndRespond({
           responsePayload: buildMyStepPayload(nextQuestion, { resumed: false }),
+          eventIdToRemember: clientEventId,
         });
       }
 
@@ -3443,12 +3609,26 @@ function createAiRouter(deps) {
       storedState.facts = normalizedStoredState.facts;
       storedState.missing = normalizedStoredState.missing;
       storedState.confidence = normalizedStoredState.confidence;
+      enforceQuizStateInvariants(storedState, false);
       const requestedQuestionId = toTrimmedString(
         req.body?.input?.activeQuestion?.questionId || req.body?.questionId,
         80,
       ).toUpperCase();
 
+      if (action === 'answer' && clientEventId) {
+        const cachedEvent = findProcessedQuizEvent(storedState.processedEvents, clientEventId);
+        if (cachedEvent && Object.keys(toProfile(cachedEvent.response)).length) {
+          const cachedResponse = toProfile(cachedEvent.response);
+          return res.status(200).json({
+            ...cachedResponse,
+            replayed: true,
+            quizMode: toTrimmedString(cachedResponse.quizMode, 24) || QUIZ_MODE_STANDARD,
+          });
+        }
+      }
+
       const persistQuizState = async (nextState, metadataForPatch = aiMetadata) => {
+        enforceQuizStateInvariants(nextState, false);
         const nextMetadata = {
           ...toProfile(metadataForPatch),
           quiz_state: nextState,
@@ -3474,6 +3654,7 @@ function createAiRouter(deps) {
           state: normalizeQuizStatePayload(state, state),
           draftUpdate: normalizeQuizDraftUpdate(draftUpdate),
           stopCheck: null,
+          orchestrator: buildQuizOrchestratorPayload(state, false),
           ...extras,
         };
       };
@@ -3652,51 +3833,77 @@ function createAiRouter(deps) {
       }
 
       let quizDesyncDetected = false;
-      let quizDesyncFixed = false;
+      const quizDesyncFixed = false;
       const activeQuestionIdUpper = toTrimmedString(activeQuestion.questionId, 80).toUpperCase();
-      if (requestedQuestionId && activeQuestionIdUpper && requestedQuestionId !== activeQuestionIdUpper) {
+      if (action === 'answer' && !requestedQuestionId) {
+        return res.status(409).json(
+          buildStepResponseFromQuestion(
+            activeQuestion,
+            storedState,
+            {
+              description: toTrimmedString(aiMetadata.description, 2200),
+              fieldsPatch: {},
+            },
+            {
+              resumed: true,
+              syncError: true,
+              message: 'quiz_state_out_of_sync',
+              expectedQuestionId: toTrimmedString(activeQuestion.questionId, 80),
+              activeQuestionId: toTrimmedString(activeQuestion.questionId, 80),
+              answeredQuestionIds: Array.isArray(storedState.answeredQuestionIds) ? storedState.answeredQuestionIds : [],
+            },
+          ),
+        );
+      }
+      if (action === 'answer' && requestedQuestionId && activeQuestionIdUpper && requestedQuestionId !== activeQuestionIdUpper) {
         quizDesyncDetected = true;
         const answeredSet = new Set(
           (Array.isArray(storedState.answeredQuestionIds) ? storedState.answeredQuestionIds : [])
             .map((item) => toTrimmedString(item, 80).toUpperCase())
             .filter(Boolean),
         );
-        const requestedQuestion =
-          requestedQuestionId === 'STOP_CHECK'
-            ? toTrimmedString(storedState.lastQuestion?.mode, 24) === 'quiz_stop_check'
-              ? stopCheckQuestion
-              : null
-            : isQuizProfileSummaryQuestionId(requestedQuestionId)
-              ? profileSummaryQuestion
-            : findQuizQuestionById(entityType, entityName, requestedQuestionId);
-        const requestedIsAnswered = requestedQuestionId ? answeredSet.has(requestedQuestionId) : false;
+        if (answeredSet.has(requestedQuestionId)) {
+          if (toTrimmedString(activeQuestion.questionId, 32).toLowerCase() === 'stop_check') {
+            return res.status(200).json({
+              mode: 'quiz_stop_check',
+              quizMode: QUIZ_MODE_STANDARD,
+              entityType,
+              questionId: stopCheckQuestion.questionId,
+              questionText: stopCheckQuestion.questionText,
+              options: normalizeQuizOptions(stopCheckQuestion.options),
+              expects: { type: 'choice_or_text' },
+              state: normalizeQuizStatePayload(storedState, storedState),
+              draftUpdate: {
+                description: toTrimmedString(aiMetadata.description, 2200),
+                fieldsPatch: {},
+              },
+              stopCheck: toProfile(storedState.stopSummary || buildQuizStopSummary(storedState, entityType)),
+              resumed: true,
+              duplicate: true,
+              orchestrator: buildQuizOrchestratorPayload(storedState, false),
+            });
+          }
 
-        if (requestedQuestion && !requestedIsAnswered) {
-          activeQuestion = requestedQuestion;
-          storedState.active = true;
-          storedState.isActive = true;
-          storedState.activeQuestionId = requestedQuestion.questionId;
-          storedState.lastQuestion = {
-            mode:
-              toTrimmedString(requestedQuestion.questionId, 32).toLowerCase() === 'stop_check'
-                ? 'quiz_stop_check'
-                : 'quiz_step',
-            questionId: requestedQuestion.questionId,
-            questionKey: toTrimmedString(requestedQuestion.questionKey, 64),
-            questionText: requestedQuestion.questionText,
-            options: isQuizProfileSummaryQuestionId(requestedQuestion.questionId)
-              ? []
-              : normalizeQuizOptions(requestedQuestion.options),
-          };
-          storedState.updatedAt = nowIso;
-          quizDesyncFixed = true;
+          return res.status(200).json(
+            buildStepResponseFromQuestion(
+              activeQuestion,
+              storedState,
+              {
+                description: toTrimmedString(aiMetadata.description, 2200),
+                fieldsPatch: {},
+              },
+              {
+                resumed: true,
+                duplicate: true,
+              },
+            ),
+          );
         }
-      }
 
-      if (requestedQuestionId && !quizDesyncFixed && requestedQuestionId !== toTrimmedString(activeQuestion.questionId, 80).toUpperCase()) {
         if (toTrimmedString(activeQuestion.questionId, 32).toLowerCase() === 'stop_check') {
-          return res.status(200).json({
+          return res.status(409).json({
             mode: 'quiz_stop_check',
+            quizMode: QUIZ_MODE_STANDARD,
             entityType,
             questionId: stopCheckQuestion.questionId,
             questionText: stopCheckQuestion.questionText,
@@ -3709,22 +3916,16 @@ function createAiRouter(deps) {
             },
             stopCheck: toProfile(storedState.stopSummary || buildQuizStopSummary(storedState, entityType)),
             resumed: true,
-            ...(includeDebug
-              ? {
-                  debug: {
-                    quizSync: {
-                      mismatchDetected: true,
-                      mismatchFixed: false,
-                      requestedQuestionId,
-                      activeQuestionId: toTrimmedString(activeQuestion.questionId, 80),
-                    },
-                  },
-                }
-              : {}),
+            syncError: true,
+            message: 'quiz_state_out_of_sync',
+            expectedQuestionId: toTrimmedString(activeQuestion.questionId, 80),
+            activeQuestionId: toTrimmedString(activeQuestion.questionId, 80),
+            answeredQuestionIds: Array.isArray(storedState.answeredQuestionIds) ? storedState.answeredQuestionIds : [],
+            orchestrator: buildQuizOrchestratorPayload(storedState, false),
           });
         }
 
-        return res.status(200).json(
+        return res.status(409).json(
           buildStepResponseFromQuestion(
             activeQuestion,
             storedState,
@@ -3734,18 +3935,11 @@ function createAiRouter(deps) {
             },
             {
               resumed: true,
-              ...(includeDebug
-                ? {
-                    debug: {
-                      quizSync: {
-                        mismatchDetected: true,
-                        mismatchFixed: false,
-                        requestedQuestionId,
-                        activeQuestionId: toTrimmedString(activeQuestion.questionId, 80),
-                      },
-                    },
-                  }
-                : {}),
+              syncError: true,
+              message: 'quiz_state_out_of_sync',
+              expectedQuestionId: toTrimmedString(activeQuestion.questionId, 80),
+              activeQuestionId: toTrimmedString(activeQuestion.questionId, 80),
+              answeredQuestionIds: Array.isArray(storedState.answeredQuestionIds) ? storedState.answeredQuestionIds : [],
             },
           ),
         );
@@ -4226,6 +4420,19 @@ function createAiRouter(deps) {
         }
       }
 
+      const responseEnvelope = {
+        ...responsePayload,
+        quizMode: toTrimmedString(responsePayload?.quizMode, 24) || QUIZ_MODE_STANDARD,
+        orchestrator: buildQuizOrchestratorPayload(storedState, false),
+      };
+      if (action === 'answer' && clientEventId) {
+        storedState.processedEvents = rememberProcessedQuizEvent(
+          storedState.processedEvents,
+          clientEventId,
+          responseEnvelope,
+        );
+      }
+
       const nextMetadata = applyQuizDraftUpdateToMetadata(entity.type, aiMetadata, responsePayload.draftUpdate);
       nextMetadata.quiz_state = storedState;
       entity.ai_metadata = nextMetadata;
@@ -4285,8 +4492,7 @@ function createAiRouter(deps) {
         : undefined;
 
       return res.status(200).json({
-        ...responsePayload,
-        quizMode: toTrimmedString(responsePayload?.quizMode, 24) || QUIZ_MODE_STANDARD,
+        ...responseEnvelope,
         ...(usedModel ? { model: usedModel } : {}),
         ...(aiUsage ? { usage: aiUsage } : {}),
         ...(debugPayload ? { debug: debugPayload } : {}),
