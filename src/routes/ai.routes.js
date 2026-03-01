@@ -3335,6 +3335,19 @@ function createAiRouter(deps) {
         }
 
         const activeQuestionIdUpper = toTrimmedString(activeQuestion.questionId, 80).toUpperCase();
+        const answeredSetUpper = new Set(
+          (Array.isArray(myState.answeredQuestionIds) ? myState.answeredQuestionIds : [])
+            .map((item) => toTrimmedString(item, 80).toUpperCase())
+            .filter(Boolean),
+        );
+        if (requestedQuestionId && answeredSetUpper.has(requestedQuestionId)) {
+          return res.status(200).json(
+            buildMyCurrentQuestionResponse(activeQuestion, {
+              resumed: true,
+              duplicate: true,
+            }),
+          );
+        }
         if (!requestedQuestionId) {
           return res.status(409).json({
             ...buildMyCurrentQuestionResponse(activeQuestion, {
@@ -3348,21 +3361,6 @@ function createAiRouter(deps) {
           });
         }
         if (requestedQuestionId && requestedQuestionId !== activeQuestionIdUpper) {
-          const answeredSet = new Set(
-            (Array.isArray(myState.answeredQuestionIds) ? myState.answeredQuestionIds : [])
-              .map((item) => toTrimmedString(item, 80).toUpperCase())
-              .filter(Boolean),
-          );
-
-          if (answeredSet.has(requestedQuestionId)) {
-            return res.status(200).json(
-              buildMyCurrentQuestionResponse(activeQuestion, {
-                resumed: true,
-                duplicate: true,
-              }),
-            );
-          }
-
           return res.status(409).json({
             ...buildMyCurrentQuestionResponse(activeQuestion, {
               resumed: true,
@@ -3835,6 +3833,48 @@ function createAiRouter(deps) {
       let quizDesyncDetected = false;
       const quizDesyncFixed = false;
       const activeQuestionIdUpper = toTrimmedString(activeQuestion.questionId, 80).toUpperCase();
+      const answeredSetUpper = new Set(
+        (Array.isArray(storedState.answeredQuestionIds) ? storedState.answeredQuestionIds : [])
+          .map((item) => toTrimmedString(item, 80).toUpperCase())
+          .filter(Boolean),
+      );
+      if (action === 'answer' && requestedQuestionId && answeredSetUpper.has(requestedQuestionId)) {
+        if (toTrimmedString(activeQuestion.questionId, 32).toLowerCase() === 'stop_check') {
+          return res.status(200).json({
+            mode: 'quiz_stop_check',
+            quizMode: QUIZ_MODE_STANDARD,
+            entityType,
+            questionId: stopCheckQuestion.questionId,
+            questionText: stopCheckQuestion.questionText,
+            options: normalizeQuizOptions(stopCheckQuestion.options),
+            expects: { type: 'choice_or_text' },
+            state: normalizeQuizStatePayload(storedState, storedState),
+            draftUpdate: {
+              description: toTrimmedString(aiMetadata.description, 2200),
+              fieldsPatch: {},
+            },
+            stopCheck: toProfile(storedState.stopSummary || buildQuizStopSummary(storedState, entityType)),
+            resumed: true,
+            duplicate: true,
+            orchestrator: buildQuizOrchestratorPayload(storedState, false),
+          });
+        }
+
+        return res.status(200).json(
+          buildStepResponseFromQuestion(
+            activeQuestion,
+            storedState,
+            {
+              description: toTrimmedString(aiMetadata.description, 2200),
+              fieldsPatch: {},
+            },
+            {
+              resumed: true,
+              duplicate: true,
+            },
+          ),
+        );
+      }
       if (action === 'answer' && !requestedQuestionId) {
         return res.status(409).json(
           buildStepResponseFromQuestion(
@@ -3857,49 +3897,6 @@ function createAiRouter(deps) {
       }
       if (action === 'answer' && requestedQuestionId && activeQuestionIdUpper && requestedQuestionId !== activeQuestionIdUpper) {
         quizDesyncDetected = true;
-        const answeredSet = new Set(
-          (Array.isArray(storedState.answeredQuestionIds) ? storedState.answeredQuestionIds : [])
-            .map((item) => toTrimmedString(item, 80).toUpperCase())
-            .filter(Boolean),
-        );
-        if (answeredSet.has(requestedQuestionId)) {
-          if (toTrimmedString(activeQuestion.questionId, 32).toLowerCase() === 'stop_check') {
-            return res.status(200).json({
-              mode: 'quiz_stop_check',
-              quizMode: QUIZ_MODE_STANDARD,
-              entityType,
-              questionId: stopCheckQuestion.questionId,
-              questionText: stopCheckQuestion.questionText,
-              options: normalizeQuizOptions(stopCheckQuestion.options),
-              expects: { type: 'choice_or_text' },
-              state: normalizeQuizStatePayload(storedState, storedState),
-              draftUpdate: {
-                description: toTrimmedString(aiMetadata.description, 2200),
-                fieldsPatch: {},
-              },
-              stopCheck: toProfile(storedState.stopSummary || buildQuizStopSummary(storedState, entityType)),
-              resumed: true,
-              duplicate: true,
-              orchestrator: buildQuizOrchestratorPayload(storedState, false),
-            });
-          }
-
-          return res.status(200).json(
-            buildStepResponseFromQuestion(
-              activeQuestion,
-              storedState,
-              {
-                description: toTrimmedString(aiMetadata.description, 2200),
-                fieldsPatch: {},
-              },
-              {
-                resumed: true,
-                duplicate: true,
-              },
-            ),
-          );
-        }
-
         if (toTrimmedString(activeQuestion.questionId, 32).toLowerCase() === 'stop_check') {
           return res.status(409).json({
             mode: 'quiz_stop_check',
