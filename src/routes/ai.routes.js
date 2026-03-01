@@ -3912,6 +3912,25 @@ function createAiRouter(deps) {
         });
       }
 
+      // Item 1.5: guard against race condition where isActive is still stale but quiz was already completed
+      // (e.g. double-tap / duplicate axios retry on final ACCESS_ROLE click)
+      if (action === 'answer' && toTrimmedString(storedState.lastQuestion?.mode, 24) === 'quiz_completed') {
+        // normalise state in case isActive was left truthy by a race
+        storedState.isActive = false;
+        storedState.active = false;
+        storedState.activeQuestionId = '';
+        return res.status(409).json({
+          ...buildQuizCompletedPayload(entityType, 'Квиз завершён. Данные сохранены.', storedState, {
+            description: toTrimmedString(aiMetadata.description, 2200),
+            fieldsPatch: {},
+          }),
+          quizMode: QUIZ_MODE_STANDARD,
+          quizRunId: toTrimmedString(storedState?.runId, 36),
+          stepVersion: Number(storedState?.version) || 1,
+          updatedEntity: entity.toObject(),
+        });
+      }
+
       let quizDesyncDetected = false;
       const quizDesyncFixed = false;
       const activeQuestionIdUpper = toTrimmedString(activeQuestion.questionId, 80).toUpperCase();
@@ -4066,10 +4085,25 @@ function createAiRouter(deps) {
         const filteredTags = existingTags.filter((t) => !toTrimmedString(t, 80).toLowerCase().startsWith('role:'));
         aiMetadata.tags = filteredTags;
 
+        // Map optionId to human-readable role label for the roles field
+        const accessRoleCustomOptionId = '6'; // last option = custom
+        let roleLabel = 'не определено';
+        if (answer.optionId === '1') roleLabel = 'коннектор';
+        else if (answer.optionId === '2') roleLabel = 'конденсатор';
+        else if (answer.optionId === '3') roleLabel = 'мост';
+        else if (answer.optionId === '4') roleLabel = 'барьер';
+        else if (answer.optionId === '5') roleLabel = 'не определено';
+        else if (answer.optionId === accessRoleCustomOptionId) {
+          const customText = toTrimmedString(answer.answerText, 80).replace(/[\r\n]+/g, ' ');
+          roleLabel = customText || 'не определено';
+        }
+
         const draftUpdate = normalizeQuizDraftUpdate({
           description: '',
           fieldsPatch: {
             tagsAdd: [tag],
+            // Item 1.2-1.3: write human-readable role to the roles field (non-destructive, merges)
+            rolesAdd: [roleLabel],
           },
         });
 
