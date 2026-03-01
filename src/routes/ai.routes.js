@@ -3709,7 +3709,7 @@ function createAiRouter(deps) {
 
       const accessRoleQuestion = {
         questionId: QUIZ_ACCESS_ROLE_QUESTION_ID,
-        questionText: 'Последний штрих: как эта сущность чаще работает для доступа/связей?\nКоннектор — активный, общительный, везде бывает, сводит людей.\nКонденсатор — ресурс/влияние, но сам дальше редко "проводит".\nМост — помогает пройти/подсказывает как попасть.\nБарьер — блокирует/тормозит доступ.',
+        questionText: 'Последний штрих: роль в связях/доступе',
         options: normalizeQuizOptions([
           { id: '1', text: 'Коннектор' },
           { id: '2', text: 'Конденсатор' },
@@ -4032,7 +4032,7 @@ function createAiRouter(deps) {
       if (toTrimmedString(activeQuestion.questionId, 32).toUpperCase() === QUIZ_ACCESS_ROLE_QUESTION_ID) {
         let tag = 'role:unknown';
         if (answer.optionId === '1') tag = 'role:connector';
-        else if (answer.optionId === '2') tag = 'role:condenser';
+        else if (answer.optionId === '2') tag = 'role:condensator';
         else if (answer.optionId === '3') tag = 'role:bridge';
         else if (answer.optionId === '4') tag = 'role:barrier';
         else if (answer.optionId === '5') tag = 'role:unknown';
@@ -4040,6 +4040,11 @@ function createAiRouter(deps) {
           const customRole = toTrimmedString(answer.answerText, 64).replace(/[\r\n]+/g, ' ');
           tag = `role:custom:${customRole}`;
         }
+
+        // Remove any existing role:* tags before adding the new one.
+        const existingTags = Array.isArray(aiMetadata?.tags) ? aiMetadata.tags : [];
+        const filteredTags = existingTags.filter((t) => !toTrimmedString(t, 80).toLowerCase().startsWith('role:'));
+        aiMetadata.tags = filteredTags;
 
         const draftUpdate = normalizeQuizDraftUpdate({
           description: '',
@@ -4054,8 +4059,9 @@ function createAiRouter(deps) {
         storedState.activeQuestionId = '';
         storedState.completedAt = nowIso;
         storedState.updatedAt = nowIso;
+        // IMPORTANT: set mode to 'quiz_completed' so 409 checks (lastQuestion.mode === 'quiz_completed') work correctly.
         storedState.lastQuestion = {
-          mode: 'quiz_step',
+          mode: 'quiz_completed',
           questionId: accessRoleQuestion.questionId,
           questionKey: '',
           questionText: accessRoleQuestion.questionText,
@@ -4067,6 +4073,8 @@ function createAiRouter(deps) {
         const responseEnvelope = {
           ...responsePayload,
           quizMode: toTrimmedString(responsePayload?.quizMode, 24) || QUIZ_MODE_STANDARD,
+          quizRunId: toTrimmedString(storedState?.runId, 36),
+          stepVersion: Number(storedState?.version) || 1,
           orchestrator: buildQuizOrchestratorPayload(storedState, false),
         };
 
