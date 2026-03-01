@@ -3252,6 +3252,7 @@ function createAiRouter(deps) {
         ({
           ...buildMyStepPayload(question, extras),
           quizMode: QUIZ_MODE_MY,
+          quizRunId: toTrimmedString(myState.runId, 36),
           myScenario,
           state: buildMyQuizStatePayload(myState, getCurrentQuestionBank()),
           draftUpdate: normalizeQuizDraftUpdate({
@@ -3881,6 +3882,7 @@ function createAiRouter(deps) {
           return res.status(200).json({
             mode: 'quiz_stop_check',
             quizMode: QUIZ_MODE_STANDARD,
+            quizRunId: toTrimmedString(storedState?.runId, 36),
             entityType,
             questionId: stopCheckQuestion.questionId,
             questionText: stopCheckQuestion.questionText,
@@ -3939,6 +3941,7 @@ function createAiRouter(deps) {
           return res.status(409).json({
             mode: 'quiz_stop_check',
             quizMode: QUIZ_MODE_STANDARD,
+            quizRunId: toTrimmedString(storedState?.runId, 36),
             entityType,
             questionId: stopCheckQuestion.questionId,
             questionText: stopCheckQuestion.questionText,
