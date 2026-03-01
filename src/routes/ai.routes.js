@@ -3168,6 +3168,7 @@ function createAiRouter(deps) {
             state: buildMyQuizStatePayload(myState, questionBank),
             draftUpdate: normalizedDraftUpdate,
             orchestrator: buildQuizOrchestratorPayload(myState, true),
+            updatedEntity: entity.toObject(),
           };
 
           if (eventIdToRemember) {
@@ -4512,6 +4513,7 @@ function createAiRouter(deps) {
 
       return res.status(200).json({
         ...responseEnvelope,
+        updatedEntity: entity.toObject(),
         ...(usedModel ? { model: usedModel } : {}),
         ...(aiUsage ? { usage: aiUsage } : {}),
         ...(debugPayload ? { debug: debugPayload } : {}),
