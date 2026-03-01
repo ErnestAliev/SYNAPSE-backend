@@ -3154,6 +3154,7 @@ function createAiRouter(deps) {
           statusCode = 200,
           eventIdToRemember = '',
         }) => {
+          myState.version = (Number(myState.version) || 0) + 1;
           myState.updatedAt = nowIso;
           myState.updated_at = nowIso;
           const normalizedDraftUpdate = normalizeQuizDraftUpdate(draftUpdate);
@@ -3253,6 +3254,8 @@ function createAiRouter(deps) {
           ...buildMyStepPayload(question, extras),
           quizMode: QUIZ_MODE_MY,
           quizRunId: toTrimmedString(myState.runId, 36),
+          stepVersion: Number(myState.version) || 1,
+          updatedEntity: entity.toObject(),
           myScenario,
           state: buildMyQuizStatePayload(myState, getCurrentQuestionBank()),
           draftUpdate: normalizeQuizDraftUpdate({
@@ -3318,6 +3321,18 @@ function createAiRouter(deps) {
 
         if (!myState.isActive) {
           if (myState.completed) {
+            if (action === 'answer') {
+              return res.status(409).json({
+                ...buildQuizCompletedPayload(entityType, 'Квиз завершён. Данные сохранены.', myState, {
+                  description: '',
+                  fieldsPatch: {},
+                }),
+                quizMode: QUIZ_MODE_MY,
+                quizRunId: toTrimmedString(myState.runId, 36),
+                stepVersion: Number(myState.version) || 1,
+                updatedEntity: entity.toObject(),
+              });
+            }
             const chooserQuestion = openMyQuizChooser();
             return persistMyQuizStateAndRespond({
               responsePayload: buildMyStepPayload(chooserQuestion, { resumed: true }),
@@ -3645,6 +3660,7 @@ function createAiRouter(deps) {
       }
 
       const persistQuizState = async (nextState, metadataForPatch = aiMetadata) => {
+        nextState.version = (Number(nextState.version) || 0) + 1;
         enforceQuizStateInvariants(nextState, false);
         const nextMetadata = {
           ...toProfile(metadataForPatch),
@@ -3665,6 +3681,8 @@ function createAiRouter(deps) {
           quizMode: QUIZ_MODE_STANDARD,
           // quizRunId is the stable dedup key for the entire quiz run.
           quizRunId: toTrimmedString(state?.runId, 36),
+          stepVersion: Number(state?.version) || 1,
+          updatedEntity: entity.toObject(),
           entityType,
           questionId: question.questionId,
           questionText: question.questionText,
@@ -3869,6 +3887,19 @@ function createAiRouter(deps) {
         });
       }
 
+      if (action === 'answer' && !storedState.isActive && toTrimmedString(storedState.lastQuestion?.mode, 24) === 'quiz_completed') {
+        return res.status(409).json({
+          ...buildQuizCompletedPayload(entityType, 'Квиз завершён. Данные сохранены.', storedState, {
+            description: toTrimmedString(aiMetadata.description, 2200),
+            fieldsPatch: {},
+          }),
+          quizMode: QUIZ_MODE_STANDARD,
+          quizRunId: toTrimmedString(storedState?.runId, 36),
+          stepVersion: Number(storedState?.version) || 1,
+          updatedEntity: entity.toObject(),
+        });
+      }
+
       let quizDesyncDetected = false;
       const quizDesyncFixed = false;
       const activeQuestionIdUpper = toTrimmedString(activeQuestion.questionId, 80).toUpperCase();
@@ -3883,6 +3914,8 @@ function createAiRouter(deps) {
             mode: 'quiz_stop_check',
             quizMode: QUIZ_MODE_STANDARD,
             quizRunId: toTrimmedString(storedState?.runId, 36),
+            stepVersion: Number(storedState?.version) || 1,
+            updatedEntity: entity.toObject(),
             entityType,
             questionId: stopCheckQuestion.questionId,
             questionText: stopCheckQuestion.questionText,
@@ -3942,6 +3975,8 @@ function createAiRouter(deps) {
             mode: 'quiz_stop_check',
             quizMode: QUIZ_MODE_STANDARD,
             quizRunId: toTrimmedString(storedState?.runId, 36),
+            stepVersion: Number(storedState?.version) || 1,
+            updatedEntity: entity.toObject(),
             entityType,
             questionId: stopCheckQuestion.questionId,
             questionText: stopCheckQuestion.questionText,
