@@ -68,6 +68,8 @@ function createAiRouter(deps) {
   const PROJECT_CHAT_FIELD_KEYS = Object.freeze(Object.keys(PROJECT_CHAT_FIELD_CONFIGS));
   const QUIZ_ALLOWED_MODES = new Set(['quiz_step', 'quiz_stop_check']);
   const QUIZ_PROFILE_SUMMARY_QUESTION_ID = 'P9_PROFILE_SUMMARY';
+  const QUIZ_MODE_STANDARD = 'standard';
+  const QUIZ_MODE_MY = 'my';
   const QUIZ_MIN_LEVEL1_QUESTIONS = 7;
   const QUIZ_STOP_CHECK_MIN_STEPS = 8;
   const QUIZ_STOP_CHECK_MAX_STEPS = 10;
@@ -645,6 +647,194 @@ function createAiRouter(deps) {
       },
     ],
   });
+  const MY_QUIZ_SCENARIOS = Object.freeze({
+    PERSON: 'MY_PERSON',
+    COMPANY: 'MY_COMPANY',
+    GENERIC: 'MY_GENERIC',
+  });
+  const MY_QUIZ_REENTRY_QUESTION_ID = 'MY_REENTRY';
+  const MY_QUIZ_REENTRY_QUESTION = Object.freeze({
+    questionId: MY_QUIZ_REENTRY_QUESTION_ID,
+    questionKey: 'reentry_action',
+    questionText: 'Квиз уже проходили. Что сделать?',
+    options: [
+      { id: '1', text: 'Освежить (2 вопроса)' },
+      { id: '2', text: 'Пройти заново' },
+    ],
+    expectsType: 'choice_or_text',
+  });
+  const MY_QUIZ_REFRESH_BANK = Object.freeze([
+    {
+      questionId: 'R1',
+      questionKey: 'refresh_status',
+      questionText: 'Статус',
+      options: ['В работе', 'На паузе', 'Не актуально', 'Свой вариант'],
+      expectsType: 'choice_or_text',
+    },
+    {
+      questionId: 'R2',
+      questionKey: 'refresh_next_step',
+      questionText: 'Следующий шаг',
+      options: ['Ничего', 'Маленький шаг', 'Активный шаг', 'Свой вариант'],
+      expectsType: 'choice_or_text',
+    },
+  ]);
+  const MY_QUIZ_GENERIC_M1_TEXT_BY_TYPE = Object.freeze({
+    project: 'Проект {name} — это…',
+    goal: 'Цель {name} — это…',
+    task: 'Задача {name} — это…',
+    resource: 'Ресурс {name} — это…',
+    event: 'Событие {name} — это…',
+    result: 'Результат {name} — это…',
+    shape: 'Заметка {name} — это…',
+    connection: 'Контакт {name} — это…',
+  });
+  const MY_QUIZ_BANK_BY_SCENARIO = Object.freeze({
+    [MY_QUIZ_SCENARIOS.PERSON]: [
+      {
+        questionId: 'P1',
+        questionKey: 'role_current',
+        questionText: 'Твоя основная роль сейчас',
+        options: ['Владелец/предприниматель', 'Руководитель/оператор', 'Эксперт/специалист', 'Свой вариант'],
+      },
+      {
+        questionId: 'P2',
+        questionKey: 'focus_main',
+        questionText: 'Твой главный фокус',
+        options: ['Деньги/рост', 'Порядок/контроль', 'Продукт/проекты', 'Свой вариант'],
+      },
+      {
+        questionId: 'P3',
+        questionKey: 'priority_main',
+        questionText: 'Что тебе сейчас важнее всего',
+        options: ['Увеличить доход/прибыль', 'Снизить хаос/навести систему', 'Найти возможности/партнёров', 'Свой вариант'],
+      },
+      {
+        questionId: 'P4',
+        questionKey: 'red_line',
+        questionText: 'Твоя главная “красная линия” (ограничение)',
+        options: ['Деньги/ресурсы (лимиты, бюджет, касса)', 'Закон/штрафы/риски', 'Репутация/конфликт', 'Время/выгорание'],
+      },
+      {
+        questionId: 'P5',
+        questionKey: 'support_style',
+        questionText: 'Какой стиль помощи тебе нужен',
+        options: ['Коротко и по шагам', 'Варианты + риски + вероятности', 'Жёстко: “делай/не делай”', 'Свой вариант'],
+      },
+      {
+        questionId: 'P6',
+        questionKey: 'strength_competency',
+        questionText: 'Твоя сильная компетенция',
+        options: ['Деньги/учёт/управление', 'Продажи/маркетинг/переговоры', 'Продукт/IT/системы', 'Свой вариант'],
+      },
+      {
+        questionId: 'P7',
+        questionKey: 'completion_decision',
+        questionText: 'Данных достаточно?',
+        options: ['Достаточно — завершить', 'Углубить', 'Пауза', 'Свой вариант'],
+      },
+      {
+        questionId: 'P8',
+        questionKey: 'profile_summary',
+        questionText: 'Скажи 3–7 предложений: чем занимаешься, что умеешь, какой софт/инструменты используешь чаще всего.',
+        options: [],
+        expectsType: 'text',
+      },
+    ],
+    [MY_QUIZ_SCENARIOS.COMPANY]: [
+      {
+        questionId: 'C1',
+        questionKey: 'company_kind',
+        questionText: 'Компания {name} — это',
+        options: ['Основной бизнес', 'Дочка/проект', 'Инвестиция/доля', 'Свой вариант'],
+      },
+      {
+        questionId: 'C2',
+        questionKey: 'company_audience',
+        questionText: 'Кому компания продаёт',
+        options: ['B2B', 'B2C', 'Смешанно', 'Свой вариант'],
+      },
+      {
+        questionId: 'C3',
+        questionKey: 'company_focus',
+        questionText: 'Что сейчас важнее всего для компании',
+        options: ['Продажи/клиенты', 'Маржа/прибыль', 'Порядок/операционка', 'Свой вариант'],
+      },
+      {
+        questionId: 'C4',
+        questionKey: 'company_main_risk',
+        questionText: 'Главный риск/ограничение',
+        options: ['Деньги/касса', 'Закон/проверки', 'Люди/качество', 'Свой вариант'],
+      },
+      {
+        questionId: 'C5',
+        questionKey: 'company_strength',
+        questionText: 'Сильная сторона компании',
+        options: ['Продажи/маркетинг', 'Продукт/экспертиза', 'Операционка/финансы', 'Свой вариант'],
+      },
+      {
+        questionId: 'C6',
+        questionKey: 'completion_decision',
+        questionText: 'Данных достаточно?',
+        options: ['Достаточно — завершить', 'Углубить', 'Пауза', 'Свой вариант'],
+      },
+      {
+        questionId: 'C7',
+        questionKey: 'profile_summary',
+        questionText: '3–7 предложений: что делает компания, на чём зарабатывает, кто клиент, в чём сила.',
+        options: [],
+        expectsType: 'text',
+      },
+    ],
+    [MY_QUIZ_SCENARIOS.GENERIC]: [
+      {
+        questionId: 'M1',
+        questionKey: 'generic_type',
+        questionText: '{generic_m1}',
+        options: ['Про деньги/выгоду', 'Про результат/ускорение дел', 'Про порядок/контроль', 'Свой вариант'],
+      },
+      {
+        questionId: 'M2',
+        questionKey: 'generic_goal',
+        questionText: 'Зачем это тебе',
+        options: ['Прибыль/эффект', 'Ускорить дела', 'Зафиксировать/не забыть', 'Свой вариант'],
+      },
+      {
+        questionId: 'M3',
+        questionKey: 'generic_risk',
+        questionText: 'Главный риск/минус',
+        options: ['Потеря времени', 'Потеря денег/ресурсов', 'Хаос/распыление', 'Свой вариант'],
+      },
+      {
+        questionId: 'M4',
+        questionKey: 'generic_status',
+        questionText: 'Статус',
+        options: ['В работе', 'На паузе', 'Не актуально', 'Свой вариант'],
+      },
+      {
+        questionId: 'M5',
+        questionKey: 'generic_next_step',
+        questionText: 'Следующий шаг',
+        options: ['Ничего', 'Маленький шаг', 'Активный шаг', 'Свой вариант'],
+      },
+      {
+        questionId: 'M6',
+        questionKey: 'completion_decision',
+        questionText: 'Данных достаточно?',
+        options: ['Достаточно — завершить', 'Углубить', 'Пауза', 'Свой вариант'],
+      },
+      {
+        questionId: 'M7',
+        questionKey: 'profile_summary',
+        questionText: '1–3 предложения: что это и что хочешь получить на выходе.',
+        options: [],
+        expectsType: 'text',
+      },
+    ],
+  });
+  const MY_QUIZ_SUFFICIENCY_IDS = new Set(['P7', 'C6', 'M6']);
+  const MY_QUIZ_FINAL_FREEFORM_IDS = new Set(['P8', 'C7', 'M7']);
+  const MY_QUIZ_REFRESH_FINAL_ID = 'R2';
 
   function normalizeScope(rawScope) {
     const scope = toProfile(rawScope);
@@ -1856,6 +2046,271 @@ function createAiRouter(deps) {
     };
   }
 
+  function resolveMyQuizScenario(entityType, entity) {
+    const normalizedType = toTrimmedString(entityType, 24).toLowerCase();
+    if (!normalizedType) return '';
+    const isMe = normalizedType === 'person' && entity?.is_me === true;
+    if (isMe) return MY_QUIZ_SCENARIOS.PERSON;
+    if (normalizedType === 'person') return '';
+    const isMine = entity?.is_mine === true;
+    if (!isMine) return '';
+    if (normalizedType === 'company') return MY_QUIZ_SCENARIOS.COMPANY;
+    return MY_QUIZ_SCENARIOS.GENERIC;
+  }
+
+  function normalizeMyQuizOptions(rawOptions) {
+    const source = Array.isArray(rawOptions) ? rawOptions : [];
+    const normalized = source
+      .slice(0, 4)
+      .map((item, index) => {
+        if (typeof item === 'string') {
+          const text = toTrimmedString(item, 220);
+          if (!text) return null;
+          return {
+            id: String(index + 1),
+            text,
+          };
+        }
+        const row = toProfile(item);
+        const text = toTrimmedString(row.text, 220);
+        if (!text) return null;
+        const id = toTrimmedString(row.id, 8) || String(index + 1);
+        return { id, text };
+      })
+      .filter(Boolean);
+
+    return normalized;
+  }
+
+  function buildMyQuizBankForScenario(scenario, entityType, entityName, mode = 'full') {
+    const normalizedMode = toTrimmedString(mode, 24).toLowerCase();
+    if (normalizedMode === 'refresh') {
+      return MY_QUIZ_REFRESH_BANK.map((row) => ({
+        questionId: toTrimmedString(row.questionId, 80),
+        questionKey: toTrimmedString(row.questionKey, 64),
+        questionText: toTrimmedString(row.questionText, 320),
+        options: normalizeMyQuizOptions(row.options),
+        expectsType: toTrimmedString(row.expectsType, 24) === 'text' ? 'text' : 'choice_or_text',
+      }));
+    }
+
+    const source = Array.isArray(MY_QUIZ_BANK_BY_SCENARIO[scenario]) ? MY_QUIZ_BANK_BY_SCENARIO[scenario] : [];
+    const normalizedType = toTrimmedString(entityType, 24).toLowerCase();
+    const name = toTrimmedString(entityName, 120) || 'Эта сущность';
+    const genericM1Template = toTrimmedString(MY_QUIZ_GENERIC_M1_TEXT_BY_TYPE[normalizedType], 220) || 'Сущность {name} — это…';
+
+    return source
+      .map((row) => {
+        const questionId = toTrimmedString(row.questionId, 80);
+        if (!questionId) return null;
+        let questionText = toTrimmedString(row.questionText, 320);
+        questionText = questionText.replace('{name}', name).replace('{generic_m1}', genericM1Template.replace('{name}', name));
+        return {
+          questionId,
+          questionKey: toTrimmedString(row.questionKey, 64),
+          questionText,
+          options: normalizeMyQuizOptions(row.options),
+          expectsType: toTrimmedString(row.expectsType, 24) === 'text' ? 'text' : 'choice_or_text',
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function createInitialMyQuizState({ scenario, entityType, entityName, mode = 'full' }) {
+    const nowIso = new Date().toISOString();
+    return {
+      version: 1,
+      scenario,
+      entityType: toTrimmedString(entityType, 24),
+      entityName: toTrimmedString(entityName, 120),
+      mode: toTrimmedString(mode, 24) || 'full',
+      isActive: true,
+      activeQuestionId: '',
+      answeredQuestionIds: [],
+      answers: {},
+      history: [],
+      stepIndex: 1,
+      completed: false,
+      startedAt: nowIso,
+      started_at: nowIso,
+      updatedAt: nowIso,
+      updated_at: nowIso,
+      completedAt: '',
+      completed_at: '',
+    };
+  }
+
+  function normalizeStoredMyQuizState(rawState, { scenario, entityType, entityName }) {
+    const baseState = createInitialMyQuizState({
+      scenario,
+      entityType,
+      entityName,
+      mode: 'full',
+    });
+    baseState.isActive = false;
+    baseState.activeQuestionId = '';
+    baseState.stepIndex = 0;
+    baseState.startedAt = '';
+    baseState.updatedAt = '';
+
+    const state = toProfile(rawState);
+    const storedScenario = toTrimmedString(state.scenario, 40);
+    if (!storedScenario || storedScenario !== scenario) {
+      return baseState;
+    }
+
+    const answeredQuestionIds = Array.from(
+      new Set(
+        (Array.isArray(state.answeredQuestionIds) ? state.answeredQuestionIds : [])
+          .map((item) => toTrimmedString(item, 80))
+          .filter(Boolean),
+      ),
+    ).slice(0, 120);
+    const history = (Array.isArray(state.history) ? state.history : [])
+      .slice(-QUIZ_HISTORY_LIMIT)
+      .map((row) => {
+        const item = toProfile(row);
+        return {
+          questionId: toTrimmedString(item.questionId, 80),
+          questionKey: toTrimmedString(item.questionKey, 64),
+          answerText: toTrimmedString(item.answerText, 320),
+          optionId: toTrimmedString(item.optionId, 8),
+          at: toTrimmedString(item.at, 80) || new Date().toISOString(),
+        };
+      })
+      .filter((item) => item.questionId && item.answerText);
+
+    return {
+      ...baseState,
+      mode: (() => {
+        const mode = toTrimmedString(state.mode, 24).toLowerCase();
+        if (mode === 'chooser' || mode === 'refresh') return mode;
+        return 'full';
+      })(),
+      isActive: state.isActive === true,
+      activeQuestionId: toTrimmedString(state.activeQuestionId, 80),
+      answeredQuestionIds,
+      answers: toProfile(state.answers),
+      history,
+      stepIndex: Number.isFinite(Number(state.stepIndex)) ? Math.max(0, Math.floor(Number(state.stepIndex))) : answeredQuestionIds.length,
+      completed: state.completed === true,
+      startedAt: toTrimmedString(state.startedAt || state.started_at, 80),
+      started_at: toTrimmedString(state.started_at || state.startedAt, 80),
+      updatedAt: toTrimmedString(state.updatedAt || state.updated_at, 80),
+      updated_at: toTrimmedString(state.updated_at || state.updatedAt, 80),
+      completedAt: toTrimmedString(state.completedAt || state.completed_at, 80),
+      completed_at: toTrimmedString(state.completed_at || state.completedAt, 80),
+    };
+  }
+
+  function findMyQuizQuestionById(questionBank, questionId) {
+    const normalizedQuestionId = toTrimmedString(questionId, 80).toUpperCase();
+    if (!normalizedQuestionId) return null;
+    return (
+      (Array.isArray(questionBank) ? questionBank : []).find(
+        (item) => toTrimmedString(item?.questionId, 80).toUpperCase() === normalizedQuestionId,
+      ) || null
+    );
+  }
+
+  function pickNextMyQuizQuestion(questionBank, answeredQuestionIds, excludedQuestionId = '') {
+    const answeredSet = new Set(
+      (Array.isArray(answeredQuestionIds) ? answeredQuestionIds : [])
+        .map((item) => toTrimmedString(item, 80).toUpperCase())
+        .filter(Boolean),
+    );
+    const excluded = toTrimmedString(excludedQuestionId, 80).toUpperCase();
+    if (excluded) answeredSet.add(excluded);
+
+    for (const question of Array.isArray(questionBank) ? questionBank : []) {
+      const questionId = toTrimmedString(question?.questionId, 80).toUpperCase();
+      if (!questionId || answeredSet.has(questionId)) continue;
+      return question;
+    }
+    return null;
+  }
+
+  function buildMyQuizStatePayload(state, questionBank) {
+    const facts = toProfile(state?.answers);
+    const expectedKeys = (Array.isArray(questionBank) ? questionBank : [])
+      .map((item) => toTrimmedString(item?.questionKey, 64))
+      .filter(Boolean);
+    const missing = expectedKeys.filter((key) => !hasQuizFactValue(facts[key]));
+    const confidence = expectedKeys.length ? Math.min(1, Math.max(0, 1 - missing.length / expectedKeys.length)) : 0;
+    return normalizeQuizStatePayload(
+      {
+        facts,
+        missing,
+        confidence,
+      },
+      {
+        facts: {},
+        missing: [],
+        confidence: 0,
+      },
+    );
+  }
+
+  function buildMyQuizDescriptionFromText(text, fallback = '') {
+    const normalizedText = toTrimmedString(text, 2200);
+    if (!normalizedText) return toTrimmedString(fallback, 2200);
+    const sentences = normalizedText
+      .split(/(?<=[.!?])\s+/g)
+      .map((item) => toTrimmedString(item, 420))
+      .filter(Boolean);
+    if (!sentences.length) return normalizedText;
+    return toTrimmedString(sentences.slice(0, 3).join(' '), 2200);
+  }
+
+  function buildMyQuizDraftUpdate(entityType, entityName, answers, finalText) {
+    const facts = toProfile(answers);
+    const summary = buildMyQuizDescriptionFromText(finalText);
+    if (summary) {
+      return normalizeQuizDraftUpdate({
+        description: summary,
+        fieldsPatch: {},
+      });
+    }
+
+    const role = toTrimmedString(facts.role_current, 120);
+    const focus = toTrimmedString(facts.focus_main || facts.company_focus || facts.generic_goal, 120);
+    const risk = toTrimmedString(facts.red_line || facts.company_main_risk || facts.generic_risk, 120);
+    const fragments = [role, focus, risk].filter(Boolean);
+    const description = fragments.length
+      ? `${toTrimmedString(entityName, 120) || 'Сущность'}: ${fragments.join('. ')}.`
+      : '';
+
+    const fieldsPatch = {};
+    if (focus) {
+      fieldsPatch.tagsAdd = [focus];
+    }
+    if (risk) {
+      fieldsPatch.risksAdd = [risk];
+    }
+    if (toTrimmedString(facts.generic_next_step || facts.refresh_next_step, 120)) {
+      fieldsPatch.tasksAdd = [toTrimmedString(facts.generic_next_step || facts.refresh_next_step, 120)];
+    }
+    if (entityType === 'person' && role) {
+      fieldsPatch.rolesAdd = [role];
+    }
+
+    return normalizeQuizDraftUpdate({
+      description: buildMyQuizDescriptionFromText(description),
+      fieldsPatch,
+    });
+  }
+
+  function buildMyQuizRefreshDraftUpdate(answers) {
+    const facts = toProfile(answers);
+    return normalizeQuizDraftUpdate({
+      description: '',
+      fieldsPatch: {
+        statusAdd: [toTrimmedString(facts.refresh_status, 120)].filter(Boolean),
+        tasksAdd: [toTrimmedString(facts.refresh_next_step, 120)].filter(Boolean),
+      },
+    });
+  }
+
   function mapHistoryMessagesToResponse(messages) {
     return (Array.isArray(messages) ? messages : []).map((message) => ({
       id: toTrimmedString(message.id, 120),
@@ -2309,6 +2764,423 @@ function createAiRouter(deps) {
             ? 'answer'
             : 'start';
       const nowIso = new Date().toISOString();
+      const myScenario = resolveMyQuizScenario(entityType, entity);
+
+      if (myScenario) {
+        const requestedQuestionId = toTrimmedString(
+          req.body?.input?.activeQuestion?.questionId || req.body?.questionId,
+          80,
+        ).toUpperCase();
+        let myState = normalizeStoredMyQuizState(aiMetadata.quiz_my, {
+          scenario: myScenario,
+          entityType,
+          entityName,
+        });
+
+        const getQuestionBankByMode = (modeValue) => {
+          const mode = toTrimmedString(modeValue, 24).toLowerCase();
+          if (mode === 'chooser') return [MY_QUIZ_REENTRY_QUESTION];
+          return buildMyQuizBankForScenario(myScenario, entityType, entityName, mode === 'refresh' ? 'refresh' : 'full');
+        };
+
+        const getCurrentQuestionBank = () => getQuestionBankByMode(myState.mode);
+
+        const toDebugState = (state) => ({
+          scenario: toTrimmedString(state?.scenario, 40),
+          mode: toTrimmedString(state?.mode, 24),
+          isActive: state?.isActive === true,
+          completed: state?.completed === true,
+          activeQuestionId: toTrimmedString(state?.activeQuestionId, 80),
+          answeredQuestionIds: Array.isArray(state?.answeredQuestionIds) ? state.answeredQuestionIds : [],
+          answers: toProfile(state?.answers),
+          stepIndex: Number.isFinite(Number(state?.stepIndex)) ? Number(state.stepIndex) : 0,
+          updatedAt: toTrimmedString(state?.updatedAt, 80),
+        });
+
+        const buildMyStepPayload = (question, extras = {}) => {
+          const expectsType = toTrimmedString(question?.expectsType, 24).toLowerCase() === 'text' ? 'text' : 'choice_or_text';
+          return {
+            mode: 'quiz_step',
+            entityType,
+            questionId: toTrimmedString(question?.questionId, 80),
+            questionText: toTrimmedString(question?.questionText, 320),
+            options: expectsType === 'text' ? [] : normalizeMyQuizOptions(question?.options),
+            expects: { type: expectsType },
+            stopCheck: null,
+            ...extras,
+          };
+        };
+
+        const persistMyQuizStateAndRespond = async ({
+          responsePayload,
+          draftUpdate = { description: '', fieldsPatch: {} },
+          debugExtra = {},
+        }) => {
+          myState.updatedAt = nowIso;
+          myState.updated_at = nowIso;
+          const normalizedDraftUpdate = normalizeQuizDraftUpdate(draftUpdate);
+          const questionBank = getCurrentQuestionBank();
+          const nextMetadata = applyQuizDraftUpdateToMetadata(entity.type, aiMetadata, normalizedDraftUpdate);
+          nextMetadata.quiz_my = myState;
+          entity.ai_metadata = nextMetadata;
+          await entity.save();
+          broadcastEntityEvent(ownerId, 'entity.updated', {
+            entity: entity.toObject(),
+          });
+
+          const payload = {
+            ...responsePayload,
+            quizMode: QUIZ_MODE_MY,
+            myScenario,
+            state: buildMyQuizStatePayload(myState, questionBank),
+            draftUpdate: normalizedDraftUpdate,
+          };
+
+          if (includeDebug) {
+            payload.debug = {
+              quizMode: QUIZ_MODE_MY,
+              scenario: myScenario,
+              action,
+              requestedQuestionId,
+              state: toDebugState(myState),
+              ...toProfile(debugExtra),
+            };
+          }
+
+          return res.status(200).json(payload);
+        };
+
+        const startMyQuizFull = (keepAnswers = false) => {
+          const preservedAnswers = keepAnswers ? toProfile(myState.answers) : {};
+          const previousStartedAt = keepAnswers ? toTrimmedString(myState.startedAt, 80) : '';
+          myState = createInitialMyQuizState({
+            scenario: myScenario,
+            entityType,
+            entityName,
+            mode: 'full',
+          });
+          myState.answers = preservedAnswers;
+          if (previousStartedAt) {
+            myState.startedAt = previousStartedAt;
+          }
+          const questionBank = getCurrentQuestionBank();
+          const firstQuestion = questionBank[0] || null;
+          if (!firstQuestion) return null;
+          myState.activeQuestionId = firstQuestion.questionId;
+          return firstQuestion;
+        };
+
+        const startMyQuizRefresh = () => {
+          myState.mode = 'refresh';
+          myState.isActive = true;
+          myState.completed = false;
+          myState.completedAt = '';
+          myState.completed_at = '';
+          myState.answeredQuestionIds = [];
+          myState.history = [];
+          myState.stepIndex = 1;
+          const questionBank = getCurrentQuestionBank();
+          const firstQuestion = questionBank[0] || null;
+          if (!firstQuestion) return null;
+          myState.activeQuestionId = firstQuestion.questionId;
+          return firstQuestion;
+        };
+
+        const openMyQuizChooser = () => {
+          myState.mode = 'chooser';
+          myState.isActive = true;
+          myState.activeQuestionId = MY_QUIZ_REENTRY_QUESTION_ID;
+          myState.stepIndex = Math.max(1, Number(myState.stepIndex) || 1);
+          return MY_QUIZ_REENTRY_QUESTION;
+        };
+
+        const getActiveMyQuestion = () => {
+          const questionBank = getCurrentQuestionBank();
+          const requested = findMyQuizQuestionById(questionBank, requestedQuestionId);
+          if (requested) {
+            myState.activeQuestionId = requested.questionId;
+            myState.isActive = true;
+            return requested;
+          }
+          return findMyQuizQuestionById(questionBank, myState.activeQuestionId);
+        };
+
+        if (action === 'start') {
+          if (myState.completed) {
+            const chooserQuestion = openMyQuizChooser();
+            return persistMyQuizStateAndRespond({
+              responsePayload: buildMyStepPayload(chooserQuestion, { resumed: true }),
+            });
+          }
+
+          const activeQuestion = getActiveMyQuestion();
+          if (myState.isActive && activeQuestion) {
+            return persistMyQuizStateAndRespond({
+              responsePayload: buildMyStepPayload(activeQuestion, { resumed: true }),
+            });
+          }
+
+          if (Array.isArray(myState.answeredQuestionIds) && myState.answeredQuestionIds.length) {
+            myState.isActive = true;
+            const nextQuestion = pickNextMyQuizQuestion(getCurrentQuestionBank(), myState.answeredQuestionIds);
+            if (nextQuestion) {
+              myState.activeQuestionId = nextQuestion.questionId;
+              return persistMyQuizStateAndRespond({
+                responsePayload: buildMyStepPayload(nextQuestion, { resumed: true }),
+              });
+            }
+          }
+
+          const firstQuestion = startMyQuizFull(false);
+          if (!firstQuestion) {
+            return persistMyQuizStateAndRespond({
+              responsePayload: buildQuizCompletedPayload(entityType, 'Квиз завершён. Данные сохранены.', myState, {
+                description: '',
+                fieldsPatch: {},
+              }),
+            });
+          }
+          return persistMyQuizStateAndRespond({
+            responsePayload: buildMyStepPayload(firstQuestion, { resumed: false }),
+          });
+        }
+
+        if (!myState.isActive) {
+          if (myState.completed) {
+            const chooserQuestion = openMyQuizChooser();
+            return persistMyQuizStateAndRespond({
+              responsePayload: buildMyStepPayload(chooserQuestion, { resumed: true }),
+            });
+          }
+          const firstQuestion = startMyQuizFull(true);
+          if (!firstQuestion) {
+            return persistMyQuizStateAndRespond({
+              responsePayload: buildQuizCompletedPayload(entityType, 'Квиз завершён. Данные сохранены.', myState, {
+                description: '',
+                fieldsPatch: {},
+              }),
+            });
+          }
+          return persistMyQuizStateAndRespond({
+            responsePayload: buildMyStepPayload(firstQuestion, { resumed: false }),
+          });
+        }
+
+        const activeQuestion = getActiveMyQuestion();
+        if (!activeQuestion) {
+          const firstQuestion = startMyQuizFull(false);
+          if (!firstQuestion) {
+            return persistMyQuizStateAndRespond({
+              responsePayload: buildQuizCompletedPayload(entityType, 'Квиз завершён. Данные сохранены.', myState, {
+                description: '',
+                fieldsPatch: {},
+              }),
+            });
+          }
+          return persistMyQuizStateAndRespond({
+            responsePayload: buildMyStepPayload(firstQuestion, { resumed: false }),
+          });
+        }
+
+        const answer = parseQuizAnswer(
+          req.body?.answerText || req.body?.message,
+          req.body?.optionId,
+          {
+            options: normalizeMyQuizOptions(activeQuestion.options),
+          },
+        );
+        if (!answer.answerText) {
+          return res.status(400).json({ message: 'answerText or optionId is required' });
+        }
+
+        const activeQuestionIdUpper = toTrimmedString(activeQuestion.questionId, 80).toUpperCase();
+        const answeredSet = new Set(
+          (Array.isArray(myState.answeredQuestionIds) ? myState.answeredQuestionIds : [])
+            .map((item) => toTrimmedString(item, 80))
+            .filter(Boolean),
+        );
+        answeredSet.add(activeQuestion.questionId);
+        myState.answeredQuestionIds = Array.from(answeredSet).slice(0, 120);
+        if (toTrimmedString(activeQuestion.questionKey, 64)) {
+          myState.answers = {
+            ...toProfile(myState.answers),
+            [activeQuestion.questionKey]: answer.answerText,
+          };
+        }
+        myState.history = [
+          ...(Array.isArray(myState.history) ? myState.history : []),
+          {
+            questionId: activeQuestion.questionId,
+            questionKey: toTrimmedString(activeQuestion.questionKey, 64),
+            answerText: answer.answerText,
+            optionId: answer.optionId || '',
+            at: nowIso,
+          },
+        ].slice(-QUIZ_HISTORY_LIMIT);
+        myState.stepIndex = Math.max(1, Number(myState.stepIndex) || 1) + 1;
+
+        if (activeQuestionIdUpper === MY_QUIZ_REENTRY_QUESTION_ID) {
+          const answerLower = answer.answerText.toLowerCase();
+          const chooseRefresh = answer.optionId === '1' || answerLower.includes('освеж');
+          const chooseRestart = answer.optionId === '2' || answerLower.includes('занов') || answerLower.includes('сначала');
+          if (chooseRefresh) {
+            const firstQuestion = startMyQuizRefresh();
+            if (!firstQuestion) {
+              myState.isActive = false;
+              myState.completed = true;
+              myState.completedAt = nowIso;
+              myState.completed_at = nowIso;
+              myState.activeQuestionId = '';
+              myState.mode = 'full';
+              return persistMyQuizStateAndRespond({
+                responsePayload: buildQuizCompletedPayload(entityType, 'Квиз завершён. Данные сохранены.', myState, {
+                  description: '',
+                  fieldsPatch: {},
+                }),
+              });
+            }
+            return persistMyQuizStateAndRespond({
+              responsePayload: buildMyStepPayload(firstQuestion, { resumed: false }),
+            });
+          }
+
+          if (chooseRestart) {
+            const firstQuestion = startMyQuizFull(false);
+            if (!firstQuestion) {
+              myState.isActive = false;
+              myState.completed = true;
+              myState.completedAt = nowIso;
+              myState.completed_at = nowIso;
+              myState.activeQuestionId = '';
+              return persistMyQuizStateAndRespond({
+                responsePayload: buildQuizCompletedPayload(entityType, 'Квиз завершён. Данные сохранены.', myState, {
+                  description: '',
+                  fieldsPatch: {},
+                }),
+              });
+            }
+            return persistMyQuizStateAndRespond({
+              responsePayload: buildMyStepPayload(firstQuestion, { resumed: false }),
+            });
+          }
+
+          myState.isActive = false;
+          myState.activeQuestionId = '';
+          myState.mode = 'full';
+          return persistMyQuizStateAndRespond({
+            responsePayload: buildQuizCompletedPayload(entityType, 'Пауза. Данные сохранены.', myState, {
+              description: '',
+              fieldsPatch: {},
+            }),
+          });
+        }
+
+        if (MY_QUIZ_SUFFICIENCY_IDS.has(activeQuestionIdUpper)) {
+          const answerLower = answer.answerText.toLowerCase();
+          const chooseDeep = answer.optionId === '2' || answerLower.includes('углуб');
+          const choosePause = answer.optionId === '3' || answerLower.includes('пауза');
+          if (choosePause) {
+            myState.isActive = false;
+            myState.activeQuestionId = '';
+            return persistMyQuizStateAndRespond({
+              responsePayload: buildQuizCompletedPayload(entityType, 'Пауза. Данные сохранены.', myState, {
+                description: '',
+                fieldsPatch: {},
+              }),
+            });
+          }
+
+          if (chooseDeep) {
+            myState.isActive = false;
+            myState.activeQuestionId = '';
+            myState.completed = true;
+            myState.completedAt = nowIso;
+            myState.completed_at = nowIso;
+            myState.mode = 'full';
+            return persistMyQuizStateAndRespond({
+              responsePayload: buildQuizCompletedPayload(entityType, 'Ок, углубление добавим позже.', myState, {
+                description: '',
+                fieldsPatch: {},
+              }),
+            });
+          }
+
+          const questionBank = getCurrentQuestionBank();
+          const finalQuestion =
+            questionBank.find((item) => MY_QUIZ_FINAL_FREEFORM_IDS.has(toTrimmedString(item?.questionId, 80).toUpperCase())) ||
+            null;
+          if (!finalQuestion) {
+            myState.isActive = false;
+            myState.activeQuestionId = '';
+            myState.completed = true;
+            myState.completedAt = nowIso;
+            myState.completed_at = nowIso;
+            myState.mode = 'full';
+            return persistMyQuizStateAndRespond({
+              responsePayload: buildQuizCompletedPayload(entityType, 'Квиз завершён. Данные сохранены.', myState, {
+                description: '',
+                fieldsPatch: {},
+              }),
+            });
+          }
+          myState.isActive = true;
+          myState.activeQuestionId = finalQuestion.questionId;
+          return persistMyQuizStateAndRespond({
+            responsePayload: buildMyStepPayload(finalQuestion, { resumed: false }),
+          });
+        }
+
+        if (activeQuestionIdUpper === MY_QUIZ_REFRESH_FINAL_ID && toTrimmedString(myState.mode, 24).toLowerCase() === 'refresh') {
+          const refreshDraftUpdate = buildMyQuizRefreshDraftUpdate(myState.answers);
+          myState.isActive = false;
+          myState.activeQuestionId = '';
+          myState.completed = true;
+          myState.completedAt = nowIso;
+          myState.completed_at = nowIso;
+          myState.mode = 'full';
+          return persistMyQuizStateAndRespond({
+            responsePayload: buildQuizCompletedPayload(entityType, 'Квиз завершён. Данные сохранены.', myState, refreshDraftUpdate),
+            draftUpdate: refreshDraftUpdate,
+          });
+        }
+
+        if (MY_QUIZ_FINAL_FREEFORM_IDS.has(activeQuestionIdUpper)) {
+          const finalDraftUpdate = buildMyQuizDraftUpdate(entityType, entityName, myState.answers, answer.answerText);
+          myState.isActive = false;
+          myState.activeQuestionId = '';
+          myState.completed = true;
+          myState.completedAt = nowIso;
+          myState.completed_at = nowIso;
+          myState.mode = 'full';
+          return persistMyQuizStateAndRespond({
+            responsePayload: buildQuizCompletedPayload(entityType, 'Квиз завершён. Данные сохранены.', myState, finalDraftUpdate),
+            draftUpdate: finalDraftUpdate,
+          });
+        }
+
+        const nextQuestion = pickNextMyQuizQuestion(getCurrentQuestionBank(), myState.answeredQuestionIds, activeQuestion.questionId);
+        if (!nextQuestion) {
+          myState.isActive = false;
+          myState.activeQuestionId = '';
+          myState.completed = true;
+          myState.completedAt = nowIso;
+          myState.completed_at = nowIso;
+          myState.mode = 'full';
+          return persistMyQuizStateAndRespond({
+            responsePayload: buildQuizCompletedPayload(entityType, 'Квиз завершён. Данные сохранены.', myState, {
+              description: '',
+              fieldsPatch: {},
+            }),
+          });
+        }
+
+        myState.isActive = true;
+        myState.activeQuestionId = nextQuestion.questionId;
+        return persistMyQuizStateAndRespond({
+          responsePayload: buildMyStepPayload(nextQuestion, { resumed: false }),
+        });
+      }
+
       const storedState = normalizeStoredQuizState(aiMetadata.quiz_state, entityType, entityName);
       const normalizedStoredState = normalizeQuizFactsAndMissing(storedState, entityType);
       storedState.level = normalizeQuizLevel(storedState.level);
@@ -2337,6 +3209,7 @@ function createAiRouter(deps) {
           toTrimmedString(question?.expectsType, 24).toLowerCase() === 'text' ? 'text' : 'choice_or_text';
         return {
           mode: 'quiz_step',
+          quizMode: QUIZ_MODE_STANDARD,
           entityType,
           questionId: question.questionId,
           questionText: question.questionText,
@@ -3157,6 +4030,7 @@ function createAiRouter(deps) {
 
       return res.status(200).json({
         ...responsePayload,
+        quizMode: toTrimmedString(responsePayload?.quizMode, 24) || QUIZ_MODE_STANDARD,
         ...(usedModel ? { model: usedModel } : {}),
         ...(aiUsage ? { usage: aiUsage } : {}),
         ...(debugPayload ? { debug: debugPayload } : {}),
