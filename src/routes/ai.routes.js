@@ -4087,15 +4087,15 @@ function createAiRouter(deps) {
 
         // Map optionId to human-readable role label for the roles field
         const accessRoleCustomOptionId = '6'; // last option = custom
-        let roleLabel = 'не определено';
-        if (answer.optionId === '1') roleLabel = 'коннектор';
-        else if (answer.optionId === '2') roleLabel = 'конденсатор';
-        else if (answer.optionId === '3') roleLabel = 'мост';
-        else if (answer.optionId === '4') roleLabel = 'барьер';
-        else if (answer.optionId === '5') roleLabel = 'не определено';
-        else if (answer.optionId === accessRoleCustomOptionId) {
-          const customText = toTrimmedString(answer.answerText, 80).replace(/[\r\n]+/g, ' ');
-          roleLabel = customText || 'не определено';
+        const customText = toTrimmedString(answer.answerText, 80).replace(/[\r\n]+/g, ' ');
+        let roleLabel = 'Не определено';
+        if (answer.optionId === '1') roleLabel = 'Коннектор';
+        else if (answer.optionId === '2') roleLabel = 'Конденсатор';
+        else if (answer.optionId === '3') roleLabel = 'Мост';
+        else if (answer.optionId === '4') roleLabel = 'Барьер';
+        else if (answer.optionId === '5') roleLabel = 'Не определено';
+        else if (answer.optionId === accessRoleCustomOptionId || (!answer.optionId && customText)) {
+          roleLabel = customText ? `Свой вариант: ${customText}` : 'Свой вариант';
         }
 
         const draftUpdate = normalizeQuizDraftUpdate({
