@@ -2262,16 +2262,8 @@ function createAiRouter(deps) {
     return toTrimmedString(sentences.slice(0, 3).join(' '), 2200);
   }
 
-  function buildMyQuizDraftUpdate(entityType, entityName, answers, finalText) {
+  function buildMyQuizDraftUpdate(entityType, entityName, answers, existingDescription = '') {
     const facts = toProfile(answers);
-    const summary = buildMyQuizDescriptionFromText(finalText);
-    if (summary) {
-      return normalizeQuizDraftUpdate({
-        description: summary,
-        fieldsPatch: {},
-      });
-    }
-
     const role = toTrimmedString(facts.role_current, 120);
     const focus = toTrimmedString(facts.focus_main || facts.company_focus || facts.generic_goal, 120);
     const risk = toTrimmedString(facts.red_line || facts.company_main_risk || facts.generic_risk, 120);
@@ -2295,7 +2287,7 @@ function createAiRouter(deps) {
     }
 
     return normalizeQuizDraftUpdate({
-      description: buildMyQuizDescriptionFromText(description),
+      description: buildMyQuizDescriptionFromText(description, existingDescription),
       fieldsPatch,
     });
   }
@@ -2309,6 +2301,250 @@ function createAiRouter(deps) {
         tasksAdd: [toTrimmedString(facts.refresh_next_step, 120)].filter(Boolean),
       },
     });
+  }
+
+  function normalizeMyQuizStringList(rawValue, maxItems = 24, maxLength = 160) {
+    const source = Array.isArray(rawValue) ? rawValue : [rawValue];
+    const dedup = new Set();
+    const result = [];
+
+    for (const item of source) {
+      const value = toTrimmedString(item, maxLength);
+      if (!value) continue;
+      const key = value.toLowerCase();
+      if (dedup.has(key)) continue;
+      dedup.add(key);
+      result.push(value);
+      if (result.length >= maxItems) break;
+    }
+
+    return result;
+  }
+
+  function mapMyQuizModelFieldsToPatch(entityType, rawFields) {
+    const allowedFields = getAllowedQuizFieldSet(entityType);
+    const source = toProfile(rawFields);
+    const patch = {};
+
+    for (const [key, value] of Object.entries(source)) {
+      const normalizedKey = toTrimmedString(key, 64);
+      if (!normalizedKey) continue;
+
+      let patchKey = '';
+      if (QUIZ_FIELDS_PATCH_ALLOWED.has(normalizedKey)) {
+        const fieldName = normalizedKey.endsWith('Add') ? normalizedKey.slice(0, -3) : '';
+        if (fieldName && allowedFields.has(fieldName)) {
+          patchKey = normalizedKey;
+        }
+      } else if (allowedFields.has(normalizedKey)) {
+        patchKey = `${normalizedKey}Add`;
+      }
+
+      if (!patchKey) continue;
+      const values = Array.isArray(value) ? value : [value];
+      const maxLength = patchKey === 'linksAdd' ? 240 : 96;
+      const normalizedValues = values
+        .map((item) => toTrimmedString(item, maxLength))
+        .filter(Boolean)
+        .slice(0, 18);
+      if (!normalizedValues.length) continue;
+      patch[patchKey] = normalizedValues;
+    }
+
+    return patch;
+  }
+
+  function isLikelyRawMyQuizDescription(description, finalNotes) {
+    const desc = toTrimmedString(description, 2200);
+    const notes = toTrimmedString(finalNotes, 2200);
+    if (!desc || !notes) return false;
+    const normalize = (value) => value.replace(/\s+/g, ' ').trim().toLowerCase();
+    const normalizedDesc = normalize(desc);
+    const normalizedNotes = normalize(notes);
+    if (!normalizedDesc || !normalizedNotes) return false;
+    if (normalizedDesc === normalizedNotes) return true;
+    if (normalizedNotes.length >= 300 && normalizedDesc.length >= Math.floor(normalizedNotes.length * 0.85)) {
+      return true;
+    }
+    return false;
+  }
+
+  async function runMyQuizSmartFinalization({
+    entity,
+    entityType,
+    entityName,
+    aiMetadata,
+    quizAnswers,
+    finalNotes,
+    includeDebug,
+  }) {
+    const currentDescription = toTrimmedString(aiMetadata.description, 2200);
+    const currentFields = buildEntityAnalyzerCurrentFields(entity.type, aiMetadata);
+    const baseSnapshot = {
+      base_description: currentDescription,
+      base_fields: currentFields,
+      quiz_answers: toProfile(quizAnswers),
+      new_notes: toTrimmedString(finalNotes, 2200),
+    };
+
+    const systemPrompt = [
+      'Ты Synapse12 MY-Quiz Finalizer.',
+      `Текущий тип сущности: ${entityType}.`,
+      'Работай только с переданным контекстом.',
+      'Задача: обновить профиль сущности через MERGE+ENRICH, а не REPLACE.',
+      'Критично: НЕ копируй new_notes в description. Description должен быть сжатым резюме (1-3 предложения), а не стенограмма.',
+      'Сохрани существующие факты: добавляй новые теги/роли/поля, не удаляй старые.',
+      'При противоречиях не затирай данные молча: верни conflicts и needs_review=true.',
+      'Верни СТРОГО JSON без markdown.',
+      'Формат:',
+      '{',
+      '  "updated_description": "string",',
+      '  "updated_fields": {',
+      '    "tags": [], "markers": [], "roles": [], "skills": [], "links": [], "importance": [],',
+      '    "industry": [], "departments": [], "stage": [], "risks": [], "date": [], "location": [],',
+      '    "participants": [], "outcomes": [], "resources": [], "priority": [], "status": [], "owners": [], "metrics": []',
+      '  },',
+      '  "changed_fields": [],',
+      '  "confidence": {},',
+      '  "conflicts": [],',
+      '  "needs_review": false',
+      '}',
+    ].join('\n');
+
+    const userPrompt = [
+      'Контекст MY-quiz finalization (JSON):',
+      JSON.stringify(
+        {
+          entity: {
+            id: String(entity._id),
+            type: entityType,
+            name: entityName,
+          },
+          ...baseSnapshot,
+        },
+        null,
+        2,
+      ),
+    ].join('\n');
+
+    const model = toTrimmedString(OPENAI_QUIZ_SMART_MODEL, 120) || toTrimmedString(OPENAI_MODEL, 120);
+    let llmError = '';
+    let aiRawReply = '';
+    let aiParsedResponse = {};
+    let aiUsage = null;
+    let usedModel = '';
+    let providerDebug = {};
+    let draftUpdate = normalizeQuizDraftUpdate({
+      description: '',
+      fieldsPatch: {},
+    });
+    let changedFields = [];
+    let confidence = {};
+    let conflicts = [];
+    let needsReview = false;
+
+    try {
+      const aiResponse = await aiProvider.requestOpenAiAgentReply({
+        systemPrompt,
+        userPrompt,
+        includeRawPayload: includeDebug,
+        model,
+        temperature: 0.2,
+        maxOutputTokens: 2600,
+        timeoutMs: 90_000,
+      });
+      usedModel = toTrimmedString(aiResponse?.debug?.response?.model, 120) || model;
+      aiUsage = aiResponse.usage;
+      aiRawReply = aiResponse.reply || '';
+      providerDebug = aiResponse.debug || {};
+      aiParsedResponse = extractJsonObjectFromText(aiResponse.reply);
+      const parsed = toProfile(aiParsedResponse);
+
+      const hasAnalyzerShape =
+        typeof parsed.status === 'string' ||
+        (parsed.fields && typeof parsed.fields === 'object' && !parsed.updated_fields);
+      if (hasAnalyzerShape) {
+        const normalizedAnalysis = normalizeEntityAnalysisOutput(entity.type, parsed);
+        const patch = mapMyQuizModelFieldsToPatch(entityType, normalizedAnalysis.fields);
+        if (Array.isArray(normalizedAnalysis.ignoredNoise) && normalizedAnalysis.ignoredNoise.length) {
+          patch.ignoredNoiseAdd = normalizeMyQuizStringList(normalizedAnalysis.ignoredNoise, 18, 120);
+        }
+        draftUpdate = normalizeQuizDraftUpdate({
+          description: toTrimmedString(normalizedAnalysis.description, 2200),
+          fieldsPatch: patch,
+        });
+        changedFields = Object.keys(patch)
+          .map((key) => (key.endsWith('Add') ? key.slice(0, -3) : key))
+          .filter(Boolean);
+        confidence = toProfile(normalizedAnalysis.confidence);
+        conflicts = normalizeMyQuizStringList(parsed.conflicts || normalizedAnalysis.ignoredNoise, 12, 180);
+        needsReview = conflicts.length > 0;
+      } else {
+        const mappedPatch = mapMyQuizModelFieldsToPatch(
+          entityType,
+          parsed.updated_fields || parsed.fieldsPatch || parsed.fields || {},
+        );
+        if (Array.isArray(parsed.ignoredNoise) && parsed.ignoredNoise.length) {
+          mappedPatch.ignoredNoiseAdd = normalizeMyQuizStringList(parsed.ignoredNoise, 18, 120);
+        }
+        draftUpdate = normalizeQuizDraftUpdate({
+          description: toTrimmedString(parsed.updated_description || parsed.description, 2200),
+          fieldsPatch: mappedPatch,
+        });
+        changedFields = normalizeMyQuizStringList(
+          Array.isArray(parsed.changed_fields)
+            ? parsed.changed_fields
+            : Object.keys(mappedPatch).map((key) => (key.endsWith('Add') ? key.slice(0, -3) : key)),
+          32,
+          64,
+        );
+        confidence = toProfile(parsed.confidence);
+        conflicts = normalizeMyQuizStringList(parsed.conflicts, 12, 180);
+        needsReview = parsed.needs_review === true || conflicts.length > 0;
+      }
+    } catch (error) {
+      llmError = toTrimmedString(error?.message, 220) || 'my_quiz_smart_finalization_failed';
+    }
+
+    if (isLikelyRawMyQuizDescription(draftUpdate.description, finalNotes)) {
+      draftUpdate = normalizeQuizDraftUpdate({
+        ...draftUpdate,
+        description: '',
+      });
+    }
+
+    if (!toTrimmedString(draftUpdate.description, 2200) && !hasQuizPatchValues(draftUpdate.fieldsPatch)) {
+      const fallbackDraftUpdate = buildMyQuizDraftUpdate(entityType, entityName, quizAnswers, currentDescription);
+      draftUpdate = mergeQuizDraftUpdates(draftUpdate, fallbackDraftUpdate);
+    }
+
+    return {
+      draftUpdate: normalizeQuizDraftUpdate(draftUpdate),
+      summary: {
+        changed_fields: normalizeMyQuizStringList(changedFields, 32, 64),
+        confidence: toProfile(confidence),
+        conflicts,
+        needs_review: needsReview,
+        base_description: currentDescription,
+        new_notes: toTrimmedString(finalNotes, 2200),
+        updated_description: toTrimmedString(draftUpdate.description, 2200),
+        updated_at: new Date().toISOString(),
+      },
+      llm: {
+        model: usedModel || model,
+        usage: aiUsage,
+        llmError,
+        aiRawReply,
+        aiParsedResponse,
+        provider: providerDebug,
+        prompts: includeDebug
+          ? {
+              systemPrompt,
+              userPrompt,
+            }
+          : undefined,
+      },
+    };
   }
 
   function mapHistoryMessagesToResponse(messages) {
@@ -2771,6 +3007,7 @@ function createAiRouter(deps) {
           req.body?.input?.activeQuestion?.questionId || req.body?.questionId,
           80,
         ).toUpperCase();
+        let myFinalizationDebug = null;
         let myState = normalizeStoredMyQuizState(aiMetadata.quiz_my, {
           scenario: myScenario,
           entityType,
@@ -2843,6 +3080,7 @@ function createAiRouter(deps) {
               action,
               requestedQuestionId,
               state: toDebugState(myState),
+              finalization: myFinalizationDebug,
               ...toProfile(debugExtra),
             };
           }
@@ -3145,7 +3383,20 @@ function createAiRouter(deps) {
         }
 
         if (MY_QUIZ_FINAL_FREEFORM_IDS.has(activeQuestionIdUpper)) {
-          const finalDraftUpdate = buildMyQuizDraftUpdate(entityType, entityName, myState.answers, answer.answerText);
+          const finalizationResult = await runMyQuizSmartFinalization({
+            entity,
+            entityType,
+            entityName,
+            aiMetadata,
+            quizAnswers: myState.answers,
+            finalNotes: answer.answerText,
+            includeDebug,
+          });
+          myFinalizationDebug = includeDebug ? finalizationResult.llm : null;
+          myState.summary = {
+            ...toProfile(finalizationResult.summary),
+            completed: true,
+          };
           myState.isActive = false;
           myState.activeQuestionId = '';
           myState.completed = true;
@@ -3153,8 +3404,13 @@ function createAiRouter(deps) {
           myState.completed_at = nowIso;
           myState.mode = 'full';
           return persistMyQuizStateAndRespond({
-            responsePayload: buildQuizCompletedPayload(entityType, 'Квиз завершён. Данные сохранены.', myState, finalDraftUpdate),
-            draftUpdate: finalDraftUpdate,
+            responsePayload: buildQuizCompletedPayload(
+              entityType,
+              'Квиз завершён. Данные сохранены.',
+              myState,
+              finalizationResult.draftUpdate,
+            ),
+            draftUpdate: finalizationResult.draftUpdate,
           });
         }
 
