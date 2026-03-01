@@ -1338,8 +1338,8 @@ function createAiRouter(deps) {
       activeQuestionId: toTrimmedString(normalizedState.activeQuestionId, 80),
       answeredQuestionIds: Array.isArray(normalizedState.answeredQuestionIds)
         ? normalizedState.answeredQuestionIds
-            .map((item) => toTrimmedString(item, 80))
-            .filter(Boolean)
+          .map((item) => toTrimmedString(item, 80))
+          .filter(Boolean)
         : [],
       answers: isMyQuiz ? toProfile(normalizedState.answers) : toProfile(normalizedState.facts),
       stepIndex: Number.isFinite(Number(normalizedState.stepIndex)) ? Math.max(0, Math.floor(Number(normalizedState.stepIndex))) : 0,
@@ -1604,6 +1604,10 @@ function createAiRouter(deps) {
       version: 1,
       isActive: true,
       active: true,
+      // quizRunId uniquely identifies this quiz run. Generated once at start
+      // and carried through every response so the client can use it as a
+      // dedup key: the same (quizRunId, questionId) must never appear twice.
+      runId: crypto.randomUUID(),
       activeQuestionId: toTrimmedString(firstQuestion?.questionId, 80) || 'Q1',
       answeredQuestionIds: [],
       processedEvents: [],
@@ -1691,6 +1695,9 @@ function createAiRouter(deps) {
 
     const normalized = {
       version: Number.isFinite(Number(state.version)) ? Math.max(1, Math.floor(Number(state.version))) : 1,
+      // Pass through the quizRunId so the frontend dedup key stays stable
+      // across the entire quiz run (including 409 recovery).
+      runId: toTrimmedString(state.runId, 36),
       isActive,
       active: isActive,
       activeQuestionId,
@@ -1718,19 +1725,19 @@ function createAiRouter(deps) {
       lastQuestion:
         mode && questionId && questionText
           ? {
-              mode: QUIZ_ALLOWED_MODES.has(mode) ? mode : 'quiz_step',
-              questionId,
-              questionKey: questionKey || getQuizQuestionKey(entityType, questionId),
-              questionText,
-              options,
-            }
+            mode: QUIZ_ALLOWED_MODES.has(mode) ? mode : 'quiz_step',
+            questionId,
+            questionKey: questionKey || getQuizQuestionKey(entityType, questionId),
+            questionText,
+            options,
+          }
           : {
-              mode: fallbackQuestion.mode,
-              questionId: fallbackQuestion.questionId,
-              questionKey: toTrimmedString(fallbackQuestion.questionKey, 64),
-              questionText: fallbackQuestion.questionText,
-              options: normalizeQuizOptions(fallbackQuestion.options),
-            },
+            mode: fallbackQuestion.mode,
+            questionId: fallbackQuestion.questionId,
+            questionKey: toTrimmedString(fallbackQuestion.questionKey, 64),
+            questionText: fallbackQuestion.questionText,
+            options: normalizeQuizOptions(fallbackQuestion.options),
+          },
       startedAt: toTrimmedString(state.startedAt, 80) || new Date().toISOString(),
       updatedAt: toTrimmedString(state.updatedAt, 80) || new Date().toISOString(),
       completedAt: toTrimmedString(state.completedAt, 80),
@@ -2199,6 +2206,9 @@ function createAiRouter(deps) {
       entityType: toTrimmedString(entityType, 24),
       entityName: toTrimmedString(entityName, 120),
       mode: toTrimmedString(mode, 24) || 'full',
+      // quizRunId: unique ID for this quiz run (generated fresh at every
+      // quiz start / restart so (runId, questionId) can safely dedup).
+      runId: crypto.randomUUID(),
       isActive: true,
       activeQuestionId: '',
       answeredQuestionIds: [],
@@ -2264,6 +2274,9 @@ function createAiRouter(deps) {
 
     return {
       ...baseState,
+      // Pass through runId from stored state so the dedup key (runId, questionId)
+      // stays stable for the entire quiz run even after a resume or recovery.
+      runId: toTrimmedString(state.runId, 36) || baseState.runId,
       mode: (() => {
         const mode = toTrimmedString(state.mode, 24).toLowerCase();
         if (mode === 'chooser' || mode === 'refresh') return mode;
@@ -2622,9 +2635,9 @@ function createAiRouter(deps) {
         provider: providerDebug,
         prompts: includeDebug
           ? {
-              systemPrompt,
-              userPrompt,
-            }
+            systemPrompt,
+            userPrompt,
+          }
           : undefined,
       },
     };
@@ -2871,46 +2884,46 @@ function createAiRouter(deps) {
 
       const debugPayload = includeDebug
         ? {
-            timestamp: new Date().toISOString(),
-            scope: {
-              type: scopeContext.scopeType,
-              entityType: scopeContext.entityType,
+          timestamp: new Date().toISOString(),
+          scope: {
+            type: scopeContext.scopeType,
+            entityType: scopeContext.entityType,
+            projectId: scopeContext.projectId,
+            totalEntities: scopeContext.totalEntities,
+          },
+          input: {
+            message,
+            history,
+            attachments,
+          },
+          semanticRouter: {
+            model: usedRouterModel,
+            prompt: {
+              system: routerSystemPrompt,
+              user: routerPrompt,
+            },
+            detectedRoleRaw,
+            detectedRole,
+            usage: routerResponse.usage,
+            provider: routerResponse.debug || {},
+          },
+          prompts: {
+            systemPrompt,
+            userPrompt,
+          },
+          response: {
+            reply: aiResponse.reply,
+            usage: aiResponse.usage,
+            model: usedModel,
+          },
+          projectAutoEnrichment: scopeContext.scopeType === 'project'
+            ? {
+              queued: true,
               projectId: scopeContext.projectId,
-              totalEntities: scopeContext.totalEntities,
-            },
-            input: {
-              message,
-              history,
-              attachments,
-            },
-            semanticRouter: {
-              model: usedRouterModel,
-              prompt: {
-                system: routerSystemPrompt,
-                user: routerPrompt,
-              },
-              detectedRoleRaw,
-              detectedRole,
-              usage: routerResponse.usage,
-              provider: routerResponse.debug || {},
-            },
-            prompts: {
-              systemPrompt,
-              userPrompt,
-            },
-            response: {
-              reply: aiResponse.reply,
-              usage: aiResponse.usage,
-              model: usedModel,
-            },
-            projectAutoEnrichment: scopeContext.scopeType === 'project'
-              ? {
-                  queued: true,
-                  projectId: scopeContext.projectId,
-                }
-              : null,
-            provider: aiResponse.debug || {},
-          }
+            }
+            : null,
+          provider: aiResponse.debug || {},
+        }
         : undefined;
 
       return res.status(200).json({
@@ -3009,35 +3022,35 @@ function createAiRouter(deps) {
 
       const debugPayload = includeDebug
         ? {
-            entity: {
-              id: String(entity._id),
-              type: entity.type,
-              name: entity.name || '',
-            },
-            input: {
-              message,
-              voiceInput,
-              history,
-              attachments,
-              documents,
-              currentFields,
-            },
-            prompts: {
-              systemPrompt,
-              userPrompt,
-            },
-            response: {
-              raw: aiResponse.reply,
-              parsed: parsedResponse,
-              normalized: analysis,
-              reply,
-              usage: aiResponse.usage,
-              model: usedModel,
-            },
-            provider: aiResponse.debug || {},
-            vector: vector || null,
-            vectorWarning: vectorWarning || '',
-          }
+          entity: {
+            id: String(entity._id),
+            type: entity.type,
+            name: entity.name || '',
+          },
+          input: {
+            message,
+            voiceInput,
+            history,
+            attachments,
+            documents,
+            currentFields,
+          },
+          prompts: {
+            systemPrompt,
+            userPrompt,
+          },
+          response: {
+            raw: aiResponse.reply,
+            parsed: parsedResponse,
+            normalized: analysis,
+            reply,
+            usage: aiResponse.usage,
+            model: usedModel,
+          },
+          provider: aiResponse.debug || {},
+          vector: vector || null,
+          vectorWarning: vectorWarning || '',
+        }
         : undefined;
 
       return res.status(200).json({
@@ -3148,6 +3161,9 @@ function createAiRouter(deps) {
           const payload = {
             ...responsePayload,
             quizMode: QUIZ_MODE_MY,
+            // quizRunId: stable unique ID for this my-quiz run, used by the
+            // client as primary dedup key: (quizRunId, questionId) is unique.
+            quizRunId: toTrimmedString(myState.runId, 36),
             myScenario,
             state: buildMyQuizStatePayload(myState, questionBank),
             draftUpdate: normalizedDraftUpdate,
@@ -3231,17 +3247,17 @@ function createAiRouter(deps) {
         };
 
         const buildMyCurrentQuestionResponse = (question, extras = {}) =>
-          ({
-            ...buildMyStepPayload(question, extras),
-            quizMode: QUIZ_MODE_MY,
-            myScenario,
-            state: buildMyQuizStatePayload(myState, getCurrentQuestionBank()),
-            draftUpdate: normalizeQuizDraftUpdate({
-              description: '',
-              fieldsPatch: {},
-            }),
-            orchestrator: buildQuizOrchestratorPayload(myState, true),
-          });
+        ({
+          ...buildMyStepPayload(question, extras),
+          quizMode: QUIZ_MODE_MY,
+          myScenario,
+          state: buildMyQuizStatePayload(myState, getCurrentQuestionBank()),
+          draftUpdate: normalizeQuizDraftUpdate({
+            description: '',
+            fieldsPatch: {},
+          }),
+          orchestrator: buildQuizOrchestratorPayload(myState, true),
+        });
 
         if (action === 'answer' && clientEventId) {
           const cachedEvent = findProcessedQuizEvent(myState.processedEvents, clientEventId);
@@ -3644,6 +3660,8 @@ function createAiRouter(deps) {
         return {
           mode: 'quiz_step',
           quizMode: QUIZ_MODE_STANDARD,
+          // quizRunId is the stable dedup key for the entire quiz run.
+          quizRunId: toTrimmedString(state?.runId, 36),
           entityType,
           questionId: question.questionId,
           questionText: question.questionText,
@@ -3689,6 +3707,7 @@ function createAiRouter(deps) {
 
           return res.status(200).json({
             mode: 'quiz_stop_check',
+            quizRunId: toTrimmedString(storedState.runId, 36),
             entityType,
             questionId: stopCheckQuestion.questionId,
             questionText: stopCheckQuestion.questionText,
@@ -3710,7 +3729,7 @@ function createAiRouter(deps) {
         const activeQuestion = hasProfileSummaryActiveQuestion
           ? profileSummaryQuestion
           : findQuizQuestionById(entityType, entityName, storedState.activeQuestionId) ||
-            findQuizQuestionById(entityType, entityName, storedState.lastQuestion?.questionId);
+          findQuizQuestionById(entityType, entityName, storedState.lastQuestion?.questionId);
         const activeQuestionId = toTrimmedString(activeQuestion?.questionId, 80).toUpperCase();
         const answeredSet = new Set(
           (Array.isArray(storedState.answeredQuestionIds) ? storedState.answeredQuestionIds : [])
@@ -3790,6 +3809,7 @@ function createAiRouter(deps) {
 
         return res.status(200).json({
           ...firstQuestion,
+          quizRunId: toTrimmedString(nextState.runId, 36),
           state: normalizeQuizStatePayload(nextState, nextState),
           resumed: false,
         });
@@ -3802,6 +3822,7 @@ function createAiRouter(deps) {
         await persistQuizState(nextState);
         return res.status(200).json({
           ...firstQuestion,
+          quizRunId: toTrimmedString(nextState.runId, 36),
           state: normalizeQuizStatePayload(nextState, nextState),
           resumed: false,
         });
@@ -3817,7 +3838,7 @@ function createAiRouter(deps) {
           : hasProfileSummaryActiveQuestion
             ? profileSummaryQuestion
             : findQuizQuestionById(entityType, entityName, storedState.activeQuestionId) ||
-              findQuizQuestionById(entityType, entityName, storedState.lastQuestion?.questionId);
+            findQuizQuestionById(entityType, entityName, storedState.lastQuestion?.questionId);
       if (!activeQuestion) {
         const firstQuestion = getQuizFirstQuestion(entityType, entityName);
         const nextState = createInitialQuizState(entityType, entityName, firstQuestion);
@@ -3825,6 +3846,7 @@ function createAiRouter(deps) {
         await persistQuizState(nextState);
         return res.status(200).json({
           ...firstQuestion,
+          quizRunId: toTrimmedString(nextState.runId, 36),
           state: normalizeQuizStatePayload(nextState, nextState),
           resumed: false,
         });
@@ -4116,70 +4138,70 @@ function createAiRouter(deps) {
       };
       const systemPrompt = isProfileSummaryAnswer
         ? [
-            'Ты Synapse12 Quiz Finalizer.',
-            `Текущий тип сущности: ${entityType}.`,
-            'Нужно финализировать профиль сущности после квиза.',
-            'Используй ТОЛЬКО данные из входного JSON.',
-            'Не обнуляй ранее собранные факты квиза: они остаются валидными и должны быть учтены.',
-            'Если в финальном тексте есть противоречия к ранее собранным фактам, не стирай факты; добавь риск в risksAdd и помести спорный фрагмент в ignoredNoiseAdd.',
-            'Верни строго JSON без markdown.',
-            'Формат:',
-            '{',
-            '  "description": "string",',
-            '  "fieldsPatch": {',
-            '    "tagsAdd": [], "markersAdd": [], "rolesAdd": [], "skillsAdd": [], "risksAdd": [],',
-            '    "statusAdd": [], "tasksAdd": [], "metricsAdd": [], "ownersAdd": [],',
-            '    "participantsAdd": [], "resourcesAdd": [], "outcomesAdd": [], "industryAdd": [],',
-            '    "departmentsAdd": [], "stageAdd": [], "dateAdd": [], "locationAdd": [],',
-            '    "phonesAdd": [], "linksAdd": [], "importanceAdd": [], "ignoredNoiseAdd": []',
-            '  }',
-            '}',
-          ].join('\n')
+          'Ты Synapse12 Quiz Finalizer.',
+          `Текущий тип сущности: ${entityType}.`,
+          'Нужно финализировать профиль сущности после квиза.',
+          'Используй ТОЛЬКО данные из входного JSON.',
+          'Не обнуляй ранее собранные факты квиза: они остаются валидными и должны быть учтены.',
+          'Если в финальном тексте есть противоречия к ранее собранным фактам, не стирай факты; добавь риск в risksAdd и помести спорный фрагмент в ignoredNoiseAdd.',
+          'Верни строго JSON без markdown.',
+          'Формат:',
+          '{',
+          '  "description": "string",',
+          '  "fieldsPatch": {',
+          '    "tagsAdd": [], "markersAdd": [], "rolesAdd": [], "skillsAdd": [], "risksAdd": [],',
+          '    "statusAdd": [], "tasksAdd": [], "metricsAdd": [], "ownersAdd": [],',
+          '    "participantsAdd": [], "resourcesAdd": [], "outcomesAdd": [], "industryAdd": [],',
+          '    "departmentsAdd": [], "stageAdd": [], "dateAdd": [], "locationAdd": [],',
+          '    "phonesAdd": [], "linksAdd": [], "importanceAdd": [], "ignoredNoiseAdd": []',
+          '  }',
+          '}',
+        ].join('\n')
         : aiPrompts.buildEntityQuizSystemPrompt({
-            entityType,
-            level: normalizedPromptLevel,
-            forceStopCheck,
-          });
+          entityType,
+          level: normalizedPromptLevel,
+          forceStopCheck,
+        });
       const userPrompt = isProfileSummaryAnswer
         ? [
-            'Контекст финализации квиза (JSON):',
-            JSON.stringify(
-              {
-                entity: {
-                  id: String(entity._id),
-                  type: entityType,
-                  name: entityName,
-                  currentDescription: toTrimmedString(aiMetadata.description, 2200),
-                  currentFields,
-                },
-                quiz: {
-                  facts: toProfile(storedState.facts),
-                  missing: Array.isArray(storedState.missing) ? storedState.missing : [],
-                  history: Array.isArray(storedState.history) ? storedState.history.slice(-24) : [],
-                  profileSummary: answer.answerText,
-                },
+          'Контекст финализации квиза (JSON):',
+          JSON.stringify(
+            {
+              entity: {
+                id: String(entity._id),
+                type: entityType,
+                name: entityName,
+                currentDescription: toTrimmedString(aiMetadata.description, 2200),
+                currentFields,
               },
-              null,
-              2,
-            ),
-          ].join('\n')
-        : aiPrompts.buildEntityQuizUserPrompt({
-            entityType,
-            name: entityName,
-            currentDescription: toTrimmedString(aiMetadata.description, 2200),
-            currentFields,
-            quizState: quizPromptState,
-            lastQuestion: {
-              questionId: activeQuestion.questionId,
-              questionKey: toTrimmedString(activeQuestion.questionKey, 64),
-              questionText: activeQuestion.questionText,
-              options: normalizeQuizOptions(activeQuestion.options),
-              mode: 'quiz_step',
+              quiz: {
+                facts: toProfile(storedState.facts),
+                missing: Array.isArray(storedState.missing) ? storedState.missing : [],
+                history: Array.isArray(storedState.history) ? storedState.history.slice(-24) : [],
+                profileSummary: answer.answerText,
+              },
             },
-            answer,
-            forceStopCheck,
-            level: normalizedPromptLevel,
-          });
+            null,
+            2,
+          ),
+        ].join('\n')
+        : aiPrompts.buildEntityQuizUserPrompt({
+          entityType,
+          name: entityName,
+          currentDescription: toTrimmedString(aiMetadata.description, 2200),
+          currentFields,
+          quizState: quizPromptState,
+          lastQuestion: {
+            questionId: activeQuestion.questionId,
+            questionKey: toTrimmedString(activeQuestion.questionKey, 64),
+            questionText: activeQuestion.questionText,
+            options: normalizeQuizOptions(activeQuestion.options),
+            mode: 'quiz_step',
+          },
+          answer,
+          forceStopCheck,
+          level: normalizedPromptLevel,
+        });
 
       const model = isProfileSummaryAnswer
         ? toTrimmedString(OPENAI_QUIZ_SMART_MODEL, 120) || toTrimmedString(OPENAI_MODEL, 120)
@@ -4440,52 +4462,52 @@ function createAiRouter(deps) {
 
       const debugPayload = includeDebug
         ? {
-            entity: {
-              id: String(entity._id),
-              type: entity.type,
-              name: entity.name || '',
+          entity: {
+            id: String(entity._id),
+            type: entity.type,
+            name: entity.name || '',
+          },
+          input: {
+            action,
+            requestedQuestionId,
+            answer,
+            activeQuestion: {
+              questionId: activeQuestion.questionId,
+              questionKey: toTrimmedString(activeQuestion.questionKey, 64),
+              questionText: activeQuestion.questionText,
             },
-            input: {
-              action,
-              requestedQuestionId,
-              answer,
-              activeQuestion: {
-                questionId: activeQuestion.questionId,
-                questionKey: toTrimmedString(activeQuestion.questionKey, 64),
-                questionText: activeQuestion.questionText,
-              },
-              quizSync: {
-                mismatchDetected: quizDesyncDetected,
-                mismatchFixed: quizDesyncFixed,
-              },
-              storedState: {
-                isActive: storedState.isActive,
-                activeQuestionId: storedState.activeQuestionId,
-                answeredQuestionIds: storedState.answeredQuestionIds,
-                stepIndex: storedState.stepIndex,
-                level: storedState.level,
-                missing: storedState.missing,
-              },
+            quizSync: {
+              mismatchDetected: quizDesyncDetected,
+              mismatchFixed: quizDesyncFixed,
             },
-            prompts: {
-              systemPrompt,
-              userPrompt,
+            storedState: {
+              isActive: storedState.isActive,
+              activeQuestionId: storedState.activeQuestionId,
+              answeredQuestionIds: storedState.answeredQuestionIds,
+              stepIndex: storedState.stepIndex,
+              level: storedState.level,
+              missing: storedState.missing,
             },
-            response: {
-              mode: responsePayload.mode,
-              questionId: responsePayload.questionId,
-              questionText: responsePayload.questionText,
-              draftUpdate: responsePayload.draftUpdate,
-              stopCheck: responsePayload.stopCheck,
-              model: usedModel,
-              usage: aiUsage,
-              llmError,
-              aiRawReply,
-              aiParsedResponse,
-              profileSummaryFallback: profileSummaryFallbackDebug,
-            },
-            provider: aiProviderDebug,
-          }
+          },
+          prompts: {
+            systemPrompt,
+            userPrompt,
+          },
+          response: {
+            mode: responsePayload.mode,
+            questionId: responsePayload.questionId,
+            questionText: responsePayload.questionText,
+            draftUpdate: responsePayload.draftUpdate,
+            stopCheck: responsePayload.stopCheck,
+            model: usedModel,
+            usage: aiUsage,
+            llmError,
+            aiRawReply,
+            aiParsedResponse,
+            profileSummaryFallback: profileSummaryFallbackDebug,
+          },
+          provider: aiProviderDebug,
+        }
         : undefined;
 
       return res.status(200).json({
