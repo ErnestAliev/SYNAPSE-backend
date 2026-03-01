@@ -3090,7 +3090,10 @@ function createAiRouter(deps) {
             : 'start';
       const clientEventId = toTrimmedString(req.body?.client_event_id, 120);
       const nowIso = new Date().toISOString();
-      const myScenario = resolveMyQuizScenario(entityType, entity);
+      // Item 2: normalize quizMode so standard never accidentally enters 'my' branch
+      const rawQuizMode = toTrimmedString(req.body?.quizMode, 20).toLowerCase();
+      const quizModeFromClient = rawQuizMode === 'my' ? 'my' : 'standard';
+      const myScenario = quizModeFromClient === 'my' ? resolveMyQuizScenario(entityType, entity) : null;
 
       if (myScenario) {
         const requestedQuestionId = toTrimmedString(
