@@ -3851,6 +3851,22 @@ function createAiRouter(deps) {
       }
 
       if (!storedState.isActive || !storedState.activeQuestionId) {
+        // Guard: if quiz was already completed (ACCESS_ROLE answered or any other completion),
+        // do NOT restart. Return quiz_completed so frontend shows finished state.
+        const lastMode = toTrimmedString(storedState.lastQuestion?.mode, 24);
+        if (lastMode === 'quiz_completed') {
+          return res.status(200).json({
+            ...buildQuizCompletedPayload(entityType, 'Квиз завершён. Данные сохранены.', storedState, {
+              description: toTrimmedString(aiMetadata.description, 2200),
+              fieldsPatch: {},
+            }),
+            quizMode: QUIZ_MODE_STANDARD,
+            quizRunId: toTrimmedString(storedState?.runId, 36),
+            stepVersion: Number(storedState?.version) || 1,
+            updatedEntity: entity.toObject(),
+          });
+        }
+
         const firstQuestion = getQuizFirstQuestion(entityType, entityName);
         const nextState = createInitialQuizState(entityType, entityName, firstQuestion);
         nextState.updatedAt = nowIso;
