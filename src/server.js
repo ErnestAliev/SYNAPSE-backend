@@ -2342,6 +2342,8 @@ function createBaseWhatsappSession(ownerId, connector) {
     client: null,
     store: null,
     authDir: '',
+    authResetAttempted: false,
+    authResetInProgress: false,
     connectionListener: null,
     credsListener: null,
     historyListener: null,
@@ -2508,7 +2510,7 @@ async function ensureOwnerWhatsappSessionBaileys(ownerId) {
   fs.mkdirSync(authBaseDir, { recursive: true });
   fs.mkdirSync(authDir, { recursive: true });
 
-  const { state, saveCreds } = await useMultiFileAuthState(authDir);
+  let authState = await useMultiFileAuthState(authDir);
   const versionData =
     typeof fetchLatestBaileysVersion === 'function'
       ? await fetchLatestBaileysVersion().catch(() => ({ version: undefined }))
@@ -2532,7 +2534,7 @@ async function ensureOwnerWhatsappSessionBaileys(ownerId) {
 
   function createSocket() {
     return makeWASocket({
-      auth: state,
+      auth: authState.state,
       printQRInTerminal: false,
       markOnlineOnConnect: false,
       syncFullHistory: true,
@@ -2610,6 +2612,41 @@ async function ensureOwnerWhatsappSessionBaileys(ownerId) {
     }
   }
 
+  async function resetAuthAndRestart(reasonCode = 0) {
+    if (session.authResetInProgress) return;
+    session.authResetInProgress = true;
+    appendWhatsappSessionLog(session, 'session.auth.reset', { statusCode: reasonCode });
+
+    try {
+      const previousSocket = session.client;
+      detachSocketListeners(previousSocket);
+      await closeSocket(previousSocket, 'Resetting auth state');
+
+      try {
+        fs.rmSync(authDir, { recursive: true, force: true });
+      } catch {
+        // Ignore stale auth cleanup failures.
+      }
+      fs.mkdirSync(authDir, { recursive: true });
+      authState = await useMultiFileAuthState(authDir);
+
+      clearWhatsappSessionInitTimer(session);
+      clearWhatsappSessionReconnectTimer(session);
+      session.restartAttempts = 0;
+      session.status = 'initializing';
+      session.qrCodeDataUrl = '';
+      session.error = '';
+      touchWhatsappSession(session, ownerId);
+
+      const nextSocket = createSocket();
+      bindSocket(nextSocket);
+      attachWhatsappInitTimeout(ownerId, session, 'Initialization timed out. Socket did not return QR in time.');
+      touchWhatsappSession(session, ownerId);
+    } finally {
+      session.authResetInProgress = false;
+    }
+  }
+
   async function restartSocket(delayMs = 800) {
     const activeSession = getOwnerWhatsappSession(ownerId);
     if (!activeSession || activeSession.id !== session.id) {
@@ -2651,7 +2688,7 @@ async function ensureOwnerWhatsappSessionBaileys(ownerId) {
     }
 
     session.credsListener = () => {
-      saveCreds().catch(() => {
+      authState.saveCreds().catch(() => {
         // Ignore auth state persistence errors.
       });
     };
@@ -2744,6 +2781,7 @@ async function ensureOwnerWhatsappSessionBaileys(ownerId) {
         clearWhatsappSessionInitTimer(session);
         clearWhatsappSessionReconnectTimer(session);
         session.restartAttempts = 0;
+        session.authResetAttempted = false;
         session.status = 'ready';
         session.qrCodeDataUrl = '';
         session.error = '';
@@ -2783,6 +2821,11 @@ async function ensureOwnerWhatsappSessionBaileys(ownerId) {
         }
 
         if (isLoggedOut) {
+          if (!session.authResetAttempted) {
+            session.authResetAttempted = true;
+            await resetAuthAndRestart(statusCode);
+            return;
+          }
           session.status = 'disconnected';
           session.error = 'Logged out from WhatsApp. Scan QR again.';
           appendWhatsappSessionLog(session, 'session.logged_out', { statusCode });
