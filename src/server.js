@@ -4300,7 +4300,7 @@ app.post('/api/integrations/whatsapp/import/background/pause', requireAuth, asyn
       return res.status(404).json({ message: 'WhatsApp session not found. Start a session first.' });
     }
     const state = ensureWhatsappBackgroundImportState(session);
-    if (!state || state.state !== 'running') {
+    if (!state || !['running', 'paused'].includes(state.state)) {
       return res.status(409).json({
         message: 'Background import is not running.',
         session: toWhatsappSessionStatus(session),
@@ -4308,6 +4308,11 @@ app.post('/api/integrations/whatsapp/import/background/pause', requireAuth, asyn
     }
 
     state.pauseRequested = true;
+    if (state.state !== 'paused') {
+      // Confirm pause in API response immediately so UI does not flap between
+      // running/paused while the current batch is finishing.
+      state.state = 'paused';
+    }
     touchWhatsappBackgroundImport(session);
     touchWhatsappSession(session, ownerId);
     appendWhatsappSessionLog(session, 'import.background.pause.request');
