@@ -115,10 +115,12 @@ const WHATSAPP_IMPORT_CONCURRENCY = Math.max(1, Number(process.env.WHATSAPP_IMPO
 const WHATSAPP_IMPORT_BATCH_SIZE = Math.max(1, Number(process.env.WHATSAPP_IMPORT_BATCH_SIZE) || 80);
 const WHATSAPP_IMAGE_MAX_BYTES = Math.max(40_000, Number(process.env.WHATSAPP_IMAGE_MAX_BYTES) || 260_000);
 const WHATSAPP_MEDIA_TIMEOUT_MS = Math.max(5_000, Number(process.env.WHATSAPP_MEDIA_TIMEOUT_MS) || 15_000);
-const WHATSAPP_SESSION_IDLE_TIMEOUT_MS = Math.max(
-  60_000,
-  Number(process.env.WHATSAPP_SESSION_IDLE_TIMEOUT_MS) || 5 * 60 * 1000,
-);
+const WHATSAPP_SESSION_IDLE_TIMEOUT_RAW = Number(process.env.WHATSAPP_SESSION_IDLE_TIMEOUT_MS);
+const WHATSAPP_SESSION_IDLE_TIMEOUT_MS = Number.isFinite(WHATSAPP_SESSION_IDLE_TIMEOUT_RAW)
+  ? WHATSAPP_SESSION_IDLE_TIMEOUT_RAW <= 0
+    ? 0
+    : Math.max(60_000, WHATSAPP_SESSION_IDLE_TIMEOUT_RAW)
+  : 0;
 const WHATSAPP_IMAGE_FETCH_ENABLED =
   String(process.env.WHATSAPP_IMAGE_FETCH_ENABLED || 'true').toLowerCase() !== 'false';
 const WHATSAPP_IMAGE_IMPORT_MAX_COUNT = Math.max(
@@ -157,6 +159,10 @@ const WHATSAPP_DEBUG_LOG_LIMIT = Math.max(
   50,
   Number(process.env.WHATSAPP_DEBUG_LOG_LIMIT) || 400,
 );
+const WHATSAPP_BACKGROUND_IMPORT_POLL_MS = Math.max(
+  600,
+  Number(process.env.WHATSAPP_BACKGROUND_IMPORT_POLL_MS) || 1200,
+);
 const PUPPETEER_BROWSER_WS_ENDPOINT = String(process.env.PUPPETEER_BROWSER_WS_ENDPOINT || '').trim().slice(0, 2048);
 const WHATSAPP_ALLOW_LOCAL_CHROME =
   String(process.env.WHATSAPP_ALLOW_LOCAL_CHROME || (!IS_PRODUCTION ? 'true' : 'false')).toLowerCase() === 'true';
@@ -177,13 +183,13 @@ const ENTITY_TYPES = new Set([
 ]);
 const ENTITY_ANALYZER_FIELDS = Object.freeze({
   connection: ['tags', 'markers', 'roles', 'links', 'phones', 'status', 'importance'],
-  person: ['tags', 'markers', 'roles', 'skills', 'links', 'importance', 'risks', 'ignoredNoise'],
+  person: ['tags', 'markers', 'roles', 'skills', 'links', 'phones', 'importance', 'risks', 'ignoredNoise'],
   company: ['tags', 'markers', 'industry', 'departments', 'stage', 'risks', 'links', 'phones', 'importance'],
-  event: ['tags', 'markers', 'date', 'location', 'participants', 'outcomes', 'links', 'importance'],
-  resource: ['tags', 'markers', 'resources', 'status', 'owners', 'links', 'importance'],
-  goal: ['tags', 'markers', 'priority', 'metrics', 'owners', 'status', 'links', 'importance'],
-  result: ['tags', 'markers', 'outcomes', 'metrics', 'owners', 'links', 'importance'],
-  task: ['tags', 'markers', 'priority', 'status', 'owners', 'date', 'links', 'importance'],
+  event: ['tags', 'markers', 'date', 'location', 'participants', 'outcomes', 'links', 'phones', 'importance'],
+  resource: ['tags', 'markers', 'resources', 'status', 'owners', 'links', 'phones', 'importance'],
+  goal: ['tags', 'markers', 'priority', 'metrics', 'owners', 'status', 'links', 'phones', 'importance'],
+  result: ['tags', 'markers', 'outcomes', 'metrics', 'owners', 'links', 'phones', 'importance'],
+  task: ['tags', 'markers', 'priority', 'status', 'owners', 'date', 'links', 'phones', 'importance'],
   project: [
     'tags',
     'markers',
@@ -208,7 +214,7 @@ const ENTITY_ANALYZER_FIELDS = Object.freeze({
     'importance',
     'ignoredNoise',
   ],
-  shape: ['tags', 'markers', 'status', 'links', 'importance'],
+  shape: ['tags', 'markers', 'status', 'links', 'phones', 'importance'],
 });
 const ENTITY_IMPORTANCE_VALUES = ['Низкая', 'Средняя', 'Высокая'];
 const DESCRIPTION_CHANGE_TYPES = new Set(['initial', 'addition', 'update']);
@@ -2163,6 +2169,28 @@ function toWhatsappSessionStatus(session) {
           percent: Math.max(0, Math.min(100, Number(session.importProgress.percent) || 0)),
         }
       : null;
+  const backgroundImport =
+    session?.backgroundImport && typeof session.backgroundImport === 'object'
+      ? {
+          state: toTrimmedString(session.backgroundImport.state, 24) || 'idle',
+          includeImages: session.backgroundImport.includeImages !== false,
+          overwriteNames: session.backgroundImport.overwriteNames === true,
+          cursor: Math.max(0, Number(session.backgroundImport.cursor) || 0),
+          total: Math.max(0, Number(session.backgroundImport.total) || 0),
+          imported: Math.max(0, Number(session.backgroundImport.imported) || 0),
+          matched: Math.max(0, Number(session.backgroundImport.matched) || 0),
+          newWithName: Math.max(0, Number(session.backgroundImport.newWithName) || 0),
+          newWithoutName: Math.max(0, Number(session.backgroundImport.newWithoutName) || 0),
+          importedWithImage: Math.max(0, Number(session.backgroundImport.importedWithImage) || 0),
+          updatedNames: Math.max(0, Number(session.backgroundImport.updatedNames) || 0),
+          updatedImages: Math.max(0, Number(session.backgroundImport.updatedImages) || 0),
+          batchSize: Math.max(1, Number(session.backgroundImport.batchSize) || WHATSAPP_IMPORT_BATCH_SIZE),
+          startedAt: toTrimmedString(session.backgroundImport.startedAt, 80),
+          updatedAt: toTrimmedString(session.backgroundImport.updatedAt, 80),
+          endedAt: toTrimmedString(session.backgroundImport.endedAt, 80),
+          error: toTrimmedString(session.backgroundImport.error, 260),
+        }
+      : null;
 
   return {
     sessionId: session.id,
@@ -2179,6 +2207,7 @@ function toWhatsappSessionStatus(session) {
     debugLogCount: Array.isArray(session.debugLog) ? session.debugLog.length : 0,
     ...(Array.isArray(session.debugLog) && session.debugLog.length ? { lastLog: session.debugLog[session.debugLog.length - 1] } : {}),
     ...(importProgress ? { importProgress } : {}),
+    ...(backgroundImport ? { backgroundImport } : {}),
   };
 }
 
@@ -2206,6 +2235,7 @@ function clearWhatsappSessionReconnectTimer(session) {
 function scheduleWhatsappSessionIdleTimer(ownerId, session) {
   clearWhatsappSessionIdleTimer(session);
   if (!ownerId || !session) return;
+  if (!WHATSAPP_SESSION_IDLE_TIMEOUT_MS) return;
 
   session.idleTimer = setTimeout(() => {
     stopOwnerWhatsappSession(ownerId, 'Session timed out due to inactivity').catch(() => {
@@ -2242,11 +2272,28 @@ function getActiveWhatsappSessionCount() {
 async function stopOwnerWhatsappSession(ownerId, reason = '') {
   const session = getOwnerWhatsappSession(ownerId);
   if (!session) return;
+  const backgroundImport = ensureWhatsappBackgroundImportState(session);
+  if (backgroundImport) {
+    backgroundImport.stopRequested = true;
+    backgroundImport.pauseRequested = false;
+  }
 
   appendWhatsappSessionLog(session, 'session.stop', { reason: reason || 'manual' });
   clearWhatsappSessionInitTimer(session);
   clearWhatsappSessionIdleTimer(session);
   clearWhatsappSessionReconnectTimer(session);
+
+  if (backgroundImport?.workerPromise) {
+    try {
+      await Promise.race([
+        backgroundImport.workerPromise,
+        delay(2_000),
+      ]);
+    } catch {
+      // Ignore background import shutdown errors.
+    }
+  }
+
   whatsappSessionsByOwner.delete(ownerId);
 
   if (session.client) {
@@ -2350,6 +2397,28 @@ function createBaseWhatsappSession(ownerId, connector) {
     contactsUpsertListener: null,
     contactsUpdateListener: null,
     chatsUpsertListener: null,
+    backgroundImport: {
+      state: 'idle',
+      includeImages: true,
+      overwriteNames: false,
+      cursor: 0,
+      total: 0,
+      imported: 0,
+      matched: 0,
+      newWithName: 0,
+      newWithoutName: 0,
+      importedWithImage: 0,
+      updatedNames: 0,
+      updatedImages: 0,
+      batchSize: WHATSAPP_IMPORT_BATCH_SIZE,
+      startedAt: '',
+      updatedAt: '',
+      endedAt: '',
+      error: '',
+      stopRequested: false,
+      pauseRequested: false,
+      workerPromise: null,
+    },
   };
 }
 
@@ -3208,6 +3277,77 @@ function normalizeWhatsappContact(rawContact, index) {
   };
 }
 
+function pickPreferredWhatsappName(...rawValues) {
+  const values = rawValues
+    .map((value) => toTrimmedString(value, 120))
+    .filter(Boolean);
+  if (!values.length) return '';
+
+  const nonGenerated = values.find((value) => !isGeneratedWhatsappContactName(value));
+  return nonGenerated || values[0];
+}
+
+function shouldReplaceExistingWhatsappName(existingName, nextName) {
+  const current = toTrimmedString(existingName, 120);
+  const incoming = toTrimmedString(nextName, 120);
+  if (!incoming) return false;
+  if (!current) return true;
+
+  const currentGenerated = isGeneratedWhatsappContactName(current);
+  const incomingGenerated = isGeneratedWhatsappContactName(incoming);
+  if (currentGenerated && !incomingGenerated) return true;
+  return false;
+}
+
+function shouldForceReplaceWhatsappName(existingName, nextName) {
+  const current = toTrimmedString(existingName, 120);
+  const incoming = toTrimmedString(nextName, 120);
+  if (!incoming) return false;
+  if (current === incoming) return false;
+  const currentGenerated = isGeneratedWhatsappContactName(current);
+  const incomingGenerated = isGeneratedWhatsappContactName(incoming);
+  if (!currentGenerated && incomingGenerated) return false;
+  return true;
+}
+
+function ensureWhatsappBackgroundImportState(session) {
+  if (!session || typeof session !== 'object') return null;
+  if (!session.backgroundImport || typeof session.backgroundImport !== 'object') {
+    session.backgroundImport = {
+      state: 'idle',
+      includeImages: true,
+      overwriteNames: false,
+      cursor: 0,
+      total: 0,
+      imported: 0,
+      matched: 0,
+      newWithName: 0,
+      newWithoutName: 0,
+      importedWithImage: 0,
+      updatedNames: 0,
+      updatedImages: 0,
+      batchSize: WHATSAPP_IMPORT_BATCH_SIZE,
+      startedAt: '',
+      updatedAt: '',
+      endedAt: '',
+      error: '',
+      stopRequested: false,
+      pauseRequested: false,
+      workerPromise: null,
+    };
+  }
+  if (typeof session.backgroundImport.overwriteNames !== 'boolean') {
+    session.backgroundImport.overwriteNames = false;
+  }
+  return session.backgroundImport;
+}
+
+function touchWhatsappBackgroundImport(session) {
+  const state = ensureWhatsappBackgroundImportState(session);
+  if (!state) return;
+  state.updatedAt = new Date().toISOString();
+}
+
 async function migrateLegacyShapeNames() {
   const legacyShapeEntities = await Entity.find(
     {
@@ -3247,6 +3387,23 @@ app.post('/api/integrations/whatsapp/session/start', requireAuth, async (req, re
   } catch (error) {
     return next(error);
   }
+});
+
+app.get('/api/integrations/whatsapp/session/current', requireAuth, async (req, res) => {
+  const ownerId = requireOwnerId(req);
+  const session = getOwnerWhatsappSession(ownerId);
+  if (!session) {
+    return res.status(200).json({
+      integration: 'whatsapp',
+      session: null,
+    });
+  }
+
+  touchWhatsappSession(session, ownerId);
+  return res.status(200).json({
+    integration: 'whatsapp',
+    session: toWhatsappSessionStatus(session),
+  });
 });
 
 app.get('/api/integrations/whatsapp/session/:sessionId', requireAuth, async (req, res) => {
@@ -3300,11 +3457,630 @@ app.delete('/api/integrations/whatsapp/session/:sessionId', requireAuth, async (
   }
 });
 
+async function performWhatsappImportBatch({
+  ownerId,
+  session,
+  includeImages = true,
+  overwriteNames = false,
+  requestedCursor = 0,
+  batchSize = WHATSAPP_IMPORT_BATCH_SIZE,
+  setSessionImporting = true,
+  runSource = 'manual',
+}) {
+  if (!session) {
+    throw Object.assign(new Error('WhatsApp session not found. Start a session first.'), { status: 404 });
+  }
+  if (!session.client) {
+    throw Object.assign(new Error('WhatsApp client is unavailable for this session.'), { status: 500 });
+  }
+
+  const setImportProgress = (stage, percent, processed, total, note = '') => {
+    session.importProgress = {
+      stage: toTrimmedString(stage, 32) || 'import',
+      percent: Math.max(0, Math.min(100, Number(percent) || 0)),
+      processed: Math.max(0, Number(processed) || 0),
+      total: Math.max(0, Number(total) || 0),
+      note: toTrimmedString(note, 220),
+    };
+    touchWhatsappSession(session, ownerId);
+  };
+
+  if (setSessionImporting) {
+    session.status = 'importing';
+  }
+  session.error = '';
+  setImportProgress('prepare', 5, 0, 0, runSource === 'background' ? 'Фоновая подготовка импорта' : 'Подготовка импорта');
+  appendWhatsappSessionLog(session, 'import.start', {
+    connector: session.connector,
+    sessionId: session.id,
+    includeImages,
+    overwriteNames,
+    cursor: requestedCursor,
+    batchSize,
+    runSource,
+    receivedPendingNotifications: session.receivedPendingNotifications,
+    mirroredContacts: session?.contactsMirror instanceof Map ? session.contactsMirror.size : 0,
+    mirroredChats: session?.chatsMirror instanceof Map ? session.chatsMirror.size : 0,
+    imageFetchEnabled: WHATSAPP_IMAGE_FETCH_ENABLED,
+    imageMaxCount: WHATSAPP_IMAGE_IMPORT_MAX_COUNT,
+  });
+
+  if (session.connector === 'baileys' && !session.receivedPendingNotifications) {
+    setImportProgress('prepare', 8, 0, 0, 'Ожидание синхронизации уведомлений');
+    const pendingReady = await waitForBaileysPendingNotifications(session, 15_000, 600);
+    appendWhatsappSessionLog(session, 'import.pending_notifications.wait', {
+      pendingReady,
+      receivedPendingNotifications: session.receivedPendingNotifications,
+    });
+  }
+
+  const allContacts =
+    session.connector === 'baileys'
+      ? await syncBaileysContactsWithRetry(session, { timeoutMs: 18_000, pollMs: 900, minContacts: 1 })
+      : await session.client.getContacts();
+  appendWhatsappSessionLog(session, 'import.raw_contacts', {
+    count: Array.isArray(allContacts) ? allContacts.length : 0,
+    connector: session.connector,
+    storeContacts: getBaileysCollectionSize(session?.store?.contacts),
+    storeChats: getBaileysCollectionSize(session?.store?.chats),
+    mirroredContacts: session?.contactsMirror instanceof Map ? session.contactsMirror.size : 0,
+    mirroredChats: session?.chatsMirror instanceof Map ? session.chatsMirror.size : 0,
+    sample: (Array.isArray(allContacts) ? allContacts : [])
+      .slice(0, 5)
+      .map((row) => ({
+        jid: toTrimmedString(row?.jid || row?.id?._serialized || row?.id, 160),
+        number: toTrimmedString(row?.number || row?.phone || row?.id?.user, 60),
+        name: toTrimmedString(row?.name || row?.notify || row?.pushname || row?.displayName, 120),
+      })),
+  });
+  setImportProgress('scan', 20, 0, allContacts.length || 0, 'Сканирование контактов');
+
+  const importCandidates = allContacts
+    .filter((contact) => {
+      if (!contact || typeof contact !== 'object') return false;
+      if (contact.isGroup || contact.isBroadcast || contact.isMe) return false;
+      const jid = toTrimmedString(contact.jid || contact.id?._serialized || contact.id, 200);
+      if (jid.endsWith('@g.us') || jid.endsWith('@broadcast') || jid.endsWith('@newsletter')) return false;
+      const number = toTrimmedString(
+        contact.number || contact.phone || contact.id?.user || normalizeWhatsappJidToPhone(jid),
+        60,
+      );
+      const name = toTrimmedString(
+        pickPreferredWhatsappName(
+          contact.notify,
+          contact.verifiedName,
+          contact.pushname,
+          contact.shortName,
+          contact.displayName,
+          contact.name,
+        ),
+        120,
+      );
+      const hasIdentity = Boolean(number || jid || name);
+      if (!hasIdentity) return false;
+      return true;
+    })
+    .slice(0, WHATSAPP_CONTACT_IMPORT_LIMIT);
+  appendWhatsappSessionLog(session, 'import.candidates', {
+    count: importCandidates.length,
+    limit: WHATSAPP_CONTACT_IMPORT_LIMIT,
+  });
+
+  const totalCandidates = importCandidates.length;
+  const cursor = Math.min(requestedCursor, totalCandidates);
+  const nextCursor = Math.min(totalCandidates, cursor + batchSize);
+  const hasMore = nextCursor < totalCandidates;
+  const batchCandidates = importCandidates.slice(cursor, nextCursor);
+  appendWhatsappSessionLog(session, 'import.batch', {
+    cursor,
+    nextCursor,
+    hasMore,
+    batchSize,
+    batchCount: batchCandidates.length,
+    totalCandidates,
+  });
+  setImportProgress('scan', 30, cursor, totalCandidates, 'Контакты подготовлены');
+
+  const preparedContactsMap = (
+    await mapWithConcurrency(batchCandidates, WHATSAPP_IMPORT_CONCURRENCY, async (contact, index) => {
+      const about =
+        session.connector === 'baileys'
+          ? toTrimmedString(contact.status, 1200)
+          : await readWhatsappContactAbout(contact);
+      const businessProfile = session.connector === 'baileys' ? {} : toProfile(contact.businessProfile);
+      const websites = Array.isArray(businessProfile.websites)
+        ? businessProfile.websites
+        : [businessProfile.websites].filter(Boolean);
+
+      const normalized = normalizeWhatsappContact(
+        {
+          name: pickPreferredWhatsappName(contact.notify, contact.verifiedName, contact.name),
+          displayName: pickPreferredWhatsappName(contact.pushname, contact.shortName, contact.displayName),
+          fullName: pickPreferredWhatsappName(contact.verifiedName, contact.shortName, contact.displayName),
+          phone:
+            contact.number ||
+            contact.phone ||
+            contact.id?.user ||
+            normalizeWhatsappJidToPhone(contact.jid || contact.id?._serialized || contact.id),
+          id: contact.id?._serialized || contact.jid || contact.id,
+          description: about || businessProfile.description || '',
+          links: websites,
+          markers: [contact.isBusiness ? 'Бизнес' : '', contact.isMyContact ? 'Мой контакт' : ''].filter(Boolean),
+          roles: [],
+          statuses: [contact.isBlocked ? 'blocked' : '', contact.isBusiness ? 'business' : ''].filter(Boolean),
+          image: '',
+        },
+        cursor + index,
+      );
+
+      if (!normalized) {
+        return null;
+      }
+
+      return {
+        ...normalized,
+        _contact: contact,
+      };
+    }, (completed, total) => {
+      setImportProgress(
+        'normalize',
+        30 + Math.round((Math.max(0, Math.min(1, total ? completed / total : 1))) * 30),
+        cursor + completed,
+        totalCandidates,
+        'Нормализация контактов',
+      );
+    })
+  )
+    .filter(Boolean)
+    .reduce((map, item) => {
+      map.set(item.importKey, item);
+      return map;
+    }, new Map());
+
+  const uniqueContacts = Array.from(preparedContactsMap.values());
+  appendWhatsappSessionLog(session, 'import.normalized', {
+    count: uniqueContacts.length,
+  });
+  setImportProgress('dedupe', 65, nextCursor, totalCandidates, 'Удаление дубликатов');
+
+  if (!uniqueContacts.length) {
+    if (setSessionImporting) {
+      session.status = 'ready';
+    }
+    session.error = '';
+    setImportProgress('done', 100, nextCursor, totalCandidates, 'Батч обработан');
+    session.importProgress = null;
+    touchWhatsappSession(session, ownerId);
+    return {
+      source: 'whatsapp',
+      imported: 0,
+      skipped: 0,
+      total: totalCandidates,
+      cursor,
+      nextCursor,
+      hasMore,
+      batchSize,
+      batchCount: batchCandidates.length,
+      matched: 0,
+      matchedByPhone: 0,
+      matchedByImportKey: 0,
+      matchedByJid: 0,
+      matchedByName: 0,
+      newAvailable: 0,
+      newWithName: 0,
+      newWithoutName: 0,
+      importedWithImage: 0,
+      updatedNames: 0,
+      updatedImages: 0,
+      entities: [],
+      session: toWhatsappSessionStatus(session),
+    };
+  }
+
+  const importKeys = uniqueContacts.map((item) => item.importKey);
+  const importJids = Array.from(
+    new Set(
+      uniqueContacts
+        .map((item) => resolveWhatsappContactJid({ jid: item.id, phone: item.phone }))
+        .filter(Boolean),
+    ),
+  );
+  const importNameKeys = Array.from(
+    new Set(
+      uniqueContacts
+        .map((item) => ({
+          normalizedName: normalizeEntityNameForMatch(item.name),
+          generatedName: isGeneratedWhatsappContactName(item.name),
+        }))
+        .filter((item) => item.normalizedName && !item.generatedName && item.normalizedName.length >= 4)
+        .map((item) => item.normalizedName),
+    ),
+  );
+  const importPhones = Array.from(
+    new Set(
+      uniqueContacts
+        .map((item) => normalizePhone(item.phone))
+        .filter(Boolean),
+    ),
+  );
+  const importPhoneSet = new Set(importPhones);
+  const importPhoneVariants = Array.from(
+    new Set(
+      importPhones.flatMap((phone) => {
+        if (!phone) return [];
+        if (phone.startsWith('+')) {
+          return [phone, phone.slice(1)].filter(Boolean);
+        }
+        return [phone, `+${phone}`];
+      }),
+    ),
+  );
+
+  const importIdentityFilters = [{ 'profile.import_key': { $in: importKeys } }];
+  if (importJids.length) {
+    importIdentityFilters.push({ 'profile.import_jid': { $in: importJids } });
+  }
+
+  const existingImportIdentityEntities = await Entity.find(
+    {
+      owner_id: ownerId,
+      type: 'connection',
+      'profile.source': 'whatsapp',
+      $or: importIdentityFilters,
+    },
+    { _id: 1, profile: 1, name: 1 },
+  ).lean();
+
+  let existingPhoneEntities = [];
+  if (importPhoneVariants.length) {
+    existingPhoneEntities = await Entity.find(
+      {
+        owner_id: ownerId,
+        type: 'connection',
+        'profile.source': 'whatsapp',
+        $or: [{ 'profile.phone': { $in: importPhoneVariants } }, { 'profile.phones': { $in: importPhoneVariants } }],
+      },
+      { _id: 1, profile: 1, type: 1, name: 1 },
+    ).lean();
+  }
+
+  let existingNameEntities = [];
+  if (importNameKeys.length) {
+    existingNameEntities = await Entity.find(
+      {
+        owner_id: ownerId,
+        type: 'connection',
+        'profile.source': 'whatsapp',
+        name: { $exists: true, $ne: '' },
+      },
+      { _id: 1, name: 1 },
+    ).lean();
+  }
+  setImportProgress('match', 75, cursor, totalCandidates, 'Сопоставление с базой');
+
+  const existingKeySet = new Set();
+  const existingJidSet = new Set();
+  const existingPhoneSet = new Set();
+  const existingNameSet = new Set();
+  const existingEntityByImportKey = new Map();
+  const existingEntityByImportJid = new Map();
+  const existingConnectionByPhone = new Map();
+
+  for (const entity of existingImportIdentityEntities) {
+    const profile = toProfile(entity.profile);
+    const importKey = toTrimmedString(profile.import_key, 180);
+    const importJid = toTrimmedString(profile.import_jid, 220);
+    if (importKey) {
+      existingKeySet.add(importKey);
+      if (!existingEntityByImportKey.has(importKey)) {
+        existingEntityByImportKey.set(importKey, entity);
+      }
+    }
+    if (importJid) {
+      existingJidSet.add(importJid);
+      if (!existingEntityByImportJid.has(importJid)) {
+        existingEntityByImportJid.set(importJid, entity);
+      }
+    }
+  }
+
+  for (const entity of existingPhoneEntities) {
+    const profile = toProfile(entity.profile);
+    const isWhatsappConnection =
+      toTrimmedString(entity.type, 32) === 'connection' &&
+      toTrimmedString(profile.source, 40).toLowerCase() === 'whatsapp';
+    for (const phone of extractNormalizedPhonesFromProfile(profile)) {
+      if (importPhoneSet.has(phone) || importPhoneSet.has(phone.startsWith('+') ? phone.slice(1) : `+${phone}`)) {
+        existingPhoneSet.add(phone);
+        if (isWhatsappConnection && !existingConnectionByPhone.has(phone)) {
+          existingConnectionByPhone.set(phone, entity);
+        }
+      }
+    }
+  }
+
+  for (const entity of existingNameEntities) {
+    const normalizedName = normalizeEntityNameForMatch(entity.name);
+    if (!normalizedName || normalizedName.length < 4) continue;
+    if (isGeneratedWhatsappContactName(entity.name)) continue;
+    existingNameSet.add(normalizedName);
+  }
+
+  let matchedByImportKey = 0;
+  let matchedByJid = 0;
+  let matchedByPhone = 0;
+  let matchedByName = 0;
+  let matchedTotal = 0;
+  const toCreate = [];
+  let newWithName = 0;
+  let newWithoutName = 0;
+  const matchedUpdateCandidates = new Map();
+
+  for (const item of uniqueContacts) {
+    const normalizedPhone = normalizePhone(item.phone);
+    const normalizedJid = resolveWhatsappContactJid({ jid: item.id, phone: item.phone });
+    const normalizedName = normalizeEntityNameForMatch(item.name);
+    const hasGeneratedName = isGeneratedWhatsappContactName(item.name);
+    const hasImportKeyMatch = existingKeySet.has(item.importKey);
+    const hasJidMatch = normalizedJid ? existingJidSet.has(normalizedJid) : false;
+    const hasPhoneMatch = normalizedPhone
+      ? existingPhoneSet.has(normalizedPhone) ||
+        (normalizedPhone.startsWith('+')
+          ? existingPhoneSet.has(normalizedPhone.slice(1))
+          : existingPhoneSet.has(`+${normalizedPhone}`))
+      : false;
+    const hasNameMatch =
+      normalizedName && normalizedName.length >= 4 && !hasGeneratedName
+        ? existingNameSet.has(normalizedName)
+        : false;
+
+    if (hasImportKeyMatch || hasJidMatch || hasPhoneMatch || hasNameMatch) {
+      matchedTotal += 1;
+      if (hasImportKeyMatch) {
+        matchedByImportKey += 1;
+      }
+      if (hasJidMatch) {
+        matchedByJid += 1;
+      }
+      if (hasPhoneMatch) {
+        matchedByPhone += 1;
+      }
+      if (hasNameMatch) {
+        matchedByName += 1;
+      }
+
+      const matchedEntity =
+        existingEntityByImportKey.get(item.importKey) ||
+        (normalizedJid ? existingEntityByImportJid.get(normalizedJid) : null) ||
+        (normalizedPhone
+          ? existingConnectionByPhone.get(normalizedPhone) ||
+            existingConnectionByPhone.get(
+              normalizedPhone.startsWith('+') ? normalizedPhone.slice(1) : `+${normalizedPhone}`,
+            )
+          : null);
+      if (matchedEntity) {
+        const existingProfile = toProfile(matchedEntity.profile);
+        const shouldUpdateName = overwriteNames
+          ? shouldForceReplaceWhatsappName(matchedEntity.name, item.name)
+          : shouldReplaceExistingWhatsappName(matchedEntity.name, item.name);
+        const hasImage = Boolean(toTrimmedString(existingProfile.image, 10_000_000));
+        const shouldTryImage = includeImages && WHATSAPP_IMAGE_FETCH_ENABLED && !hasImage;
+        if (shouldUpdateName || shouldTryImage) {
+          matchedUpdateCandidates.set(String(matchedEntity._id), {
+            id: matchedEntity._id,
+            item,
+            shouldUpdateName,
+            shouldTryImage,
+          });
+        }
+      }
+      continue;
+    }
+
+    if (hasGeneratedName) {
+      newWithoutName += 1;
+    } else {
+      newWithName += 1;
+    }
+    toCreate.push(item);
+  }
+  appendWhatsappSessionLog(session, 'import.matches', {
+    matchedTotal,
+    matchedByPhone,
+    matchedByImportKey,
+    matchedByJid,
+    matchedByName,
+    newWithName,
+    newWithoutName,
+    toCreate: toCreate.length,
+    matchedUpdateCandidates: matchedUpdateCandidates.size,
+  });
+  setImportProgress('match', 82, nextCursor, totalCandidates, 'Сопоставление завершено');
+
+  let updatedNames = 0;
+  let updatedImages = 0;
+  if (matchedUpdateCandidates.size) {
+    const updates = await mapWithConcurrency(
+      Array.from(matchedUpdateCandidates.values()),
+      WHATSAPP_IMAGE_IMPORT_CONCURRENCY,
+      async (row) => {
+        const setFields = {};
+        if (row.shouldUpdateName) {
+          setFields.name = row.item.name;
+        }
+
+        let image = '';
+        if (row.shouldTryImage) {
+          image = await fetchWhatsappContactImage(session, row.item);
+          if (image) {
+            setFields['profile.image'] = image;
+            setFields['profile.avatar_synced_at'] = new Date().toISOString();
+          }
+        }
+
+        if (!Object.keys(setFields).length) {
+          return null;
+        }
+        return {
+          id: row.id,
+          setFields,
+          updatedName: Boolean(row.shouldUpdateName),
+          updatedImage: Boolean(image),
+        };
+      },
+    );
+
+    const validUpdates = updates.filter(Boolean);
+    if (validUpdates.length) {
+      await Entity.bulkWrite(
+        validUpdates.map((item) => ({
+          updateOne: {
+            filter: { _id: item.id, owner_id: ownerId, type: 'connection', 'profile.source': 'whatsapp' },
+            update: {
+              $set: item.setFields,
+            },
+          },
+        })),
+        { ordered: false },
+      );
+      updatedNames = validUpdates.reduce((total, item) => total + (item.updatedName ? 1 : 0), 0);
+      updatedImages = validUpdates.reduce((total, item) => total + (item.updatedImage ? 1 : 0), 0);
+    }
+  }
+
+  let createdEntities = [];
+  let importedWithImage = 0;
+  if (toCreate.length) {
+    const contactsWithImages = await mapWithConcurrency(
+      toCreate,
+      WHATSAPP_IMAGE_IMPORT_CONCURRENCY,
+      async (item, index) => {
+        let image = '';
+        if (includeImages && WHATSAPP_IMAGE_FETCH_ENABLED && index < WHATSAPP_IMAGE_IMPORT_MAX_COUNT) {
+          image = await fetchWhatsappContactImage(session, item);
+        }
+
+        return {
+          importKey: item.importKey,
+          jid: resolveWhatsappContactJid(item),
+          name: item.name,
+          phone: item.phone,
+          description: item.description,
+          tags: item.tags,
+          markers: item.markers,
+          roles: item.roles,
+          links: item.links,
+          status: item.status,
+          image,
+        };
+      },
+      (completed, total) => {
+        setImportProgress(
+          'enrich',
+          82 + Math.round((Math.max(0, Math.min(1, total ? completed / total : 1))) * 10),
+          cursor + completed,
+          totalCandidates,
+          'Подготовка к записи',
+        );
+      },
+    );
+    importedWithImage = contactsWithImages.reduce((total, row) => total + (row.image ? 1 : 0), 0);
+
+    setImportProgress('save', 95, nextCursor, totalCandidates, 'Сохранение в базу');
+    createdEntities = await Entity.insertMany(
+      contactsWithImages.map((item) => ({
+        owner_id: ownerId,
+        type: 'connection',
+        name: item.name,
+        profile: {
+          color: '#1058ff',
+          source: 'whatsapp',
+          import_key: item.importKey,
+          import_jid: item.jid || '',
+          phone: item.phone,
+          phones: item.phone ? [item.phone] : [],
+          image: item.image || '',
+          categoryLocked: false,
+          imported_at: new Date().toISOString(),
+        },
+        ai_metadata: {
+          description: item.description,
+          tags: item.tags,
+          markers: item.markers,
+          roles: item.roles,
+          links: item.links,
+          phones: item.phone ? [item.phone] : [],
+          status: item.status,
+        },
+      })),
+      { ordered: false },
+    );
+    appendWhatsappSessionLog(session, 'import.saved', {
+      created: createdEntities.length,
+    });
+  }
+
+  setImportProgress('done', 100, nextCursor, totalCandidates, 'Батч импортирован');
+  if (setSessionImporting) {
+    session.status = 'ready';
+  }
+  session.error = '';
+  session.lastImportedAt = new Date().toISOString();
+  session.importProgress = null;
+  appendWhatsappSessionLog(session, 'import.result', {
+    imported: createdEntities.length,
+    matched: matchedTotal,
+    total: totalCandidates,
+    matchedByPhone,
+    matchedByImportKey,
+    matchedByJid,
+    matchedByName,
+    newAvailable: toCreate.length,
+    newWithName,
+    newWithoutName,
+    importedWithImage,
+    updatedNames,
+    updatedImages,
+    cursor,
+    nextCursor,
+    hasMore,
+    batchSize,
+    batchCount: batchCandidates.length,
+  });
+  touchWhatsappSession(session, ownerId);
+
+  return {
+    source: 'whatsapp',
+    imported: createdEntities.length,
+    skipped: matchedTotal,
+    total: totalCandidates,
+    cursor,
+    nextCursor,
+    hasMore,
+    batchSize,
+    batchCount: batchCandidates.length,
+    matched: matchedTotal,
+    matchedByPhone,
+    matchedByImportKey,
+    matchedByJid,
+    matchedByName,
+    newAvailable: toCreate.length,
+    newWithName,
+    newWithoutName,
+    importedWithImage,
+    updatedNames,
+    updatedImages,
+    entities: createdEntities,
+    session: toWhatsappSessionStatus(session),
+  };
+}
+
 app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next) => {
   try {
     const ownerId = requireOwnerId(req);
     const sessionId = toTrimmedString(req.body?.sessionId, 120);
     const includeImages = req.body?.includeImages === true;
+    const overwriteNames = req.body?.overwriteNames === true;
     const requestedCursor = Math.max(0, Number(req.body?.cursor) || 0);
     const requestedBatchSize = Math.max(1, Number(req.body?.batchSize) || WHATSAPP_IMPORT_BATCH_SIZE);
     const batchSize = Math.min(requestedBatchSize, WHATSAPP_CONTACT_IMPORT_LIMIT);
@@ -3320,502 +4096,24 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
         session: toWhatsappSessionStatus(session),
       });
     }
-
-    if (!session.client) {
-      return res.status(500).json({ message: 'WhatsApp client is unavailable for this session.' });
-    }
-
-    const setImportProgress = (stage, percent, processed, total, note = '') => {
-      session.importProgress = {
-        stage: toTrimmedString(stage, 32) || 'import',
-        percent: Math.max(0, Math.min(100, Number(percent) || 0)),
-        processed: Math.max(0, Number(processed) || 0),
-        total: Math.max(0, Number(total) || 0),
-        note: toTrimmedString(note, 220),
-      };
-      touchWhatsappSession(session, ownerId);
-    };
-
-    session.status = 'importing';
-    session.error = '';
-    setImportProgress('prepare', 5, 0, 0, 'Подготовка импорта');
-    appendWhatsappSessionLog(session, 'import.start', {
-      connector: session.connector,
-      sessionId: session.id,
-      includeImages,
-      cursor: requestedCursor,
-      batchSize,
-      receivedPendingNotifications: session.receivedPendingNotifications,
-      mirroredContacts: session?.contactsMirror instanceof Map ? session.contactsMirror.size : 0,
-      mirroredChats: session?.chatsMirror instanceof Map ? session.chatsMirror.size : 0,
-      imageFetchEnabled: WHATSAPP_IMAGE_FETCH_ENABLED,
-      imageMaxCount: WHATSAPP_IMAGE_IMPORT_MAX_COUNT,
-    });
-
-    if (session.connector === 'baileys' && !session.receivedPendingNotifications) {
-      setImportProgress('prepare', 8, 0, 0, 'Ожидание синхронизации уведомлений');
-      const pendingReady = await waitForBaileysPendingNotifications(session, 15_000, 600);
-      appendWhatsappSessionLog(session, 'import.pending_notifications.wait', {
-        pendingReady,
-        receivedPendingNotifications: session.receivedPendingNotifications,
-      });
-    }
-
-    const allContacts =
-      session.connector === 'baileys'
-        ? await syncBaileysContactsWithRetry(session, { timeoutMs: 18_000, pollMs: 900, minContacts: 1 })
-        : await session.client.getContacts();
-    appendWhatsappSessionLog(session, 'import.raw_contacts', {
-      count: Array.isArray(allContacts) ? allContacts.length : 0,
-      connector: session.connector,
-      storeContacts: getBaileysCollectionSize(session?.store?.contacts),
-      storeChats: getBaileysCollectionSize(session?.store?.chats),
-      mirroredContacts: session?.contactsMirror instanceof Map ? session.contactsMirror.size : 0,
-      mirroredChats: session?.chatsMirror instanceof Map ? session.chatsMirror.size : 0,
-      sample: (Array.isArray(allContacts) ? allContacts : [])
-        .slice(0, 5)
-        .map((row) => ({
-          jid: toTrimmedString(row?.jid || row?.id?._serialized || row?.id, 160),
-          number: toTrimmedString(row?.number || row?.phone || row?.id?.user, 60),
-          name: toTrimmedString(row?.name || row?.notify || row?.pushname || row?.displayName, 120),
-        })),
-    });
-    setImportProgress('scan', 20, 0, allContacts.length || 0, 'Сканирование контактов');
-
-    const importCandidates = allContacts
-      .filter((contact) => {
-        if (!contact || typeof contact !== 'object') return false;
-        if (contact.isGroup || contact.isBroadcast || contact.isMe) return false;
-        const jid = toTrimmedString(contact.jid || contact.id?._serialized || contact.id, 200);
-        if (jid.endsWith('@g.us') || jid.endsWith('@broadcast') || jid.endsWith('@newsletter')) return false;
-        const number = toTrimmedString(
-          contact.number || contact.phone || contact.id?.user || normalizeWhatsappJidToPhone(jid),
-          60,
-        );
-        const name = toTrimmedString(
-          contact.name || contact.notify || contact.pushname || contact.shortName || contact.displayName,
-          120,
-        );
-        const hasIdentity = Boolean(number || jid || name);
-        if (!hasIdentity) return false;
-        return true;
-      })
-      .slice(0, WHATSAPP_CONTACT_IMPORT_LIMIT);
-    appendWhatsappSessionLog(session, 'import.candidates', {
-      count: importCandidates.length,
-      limit: WHATSAPP_CONTACT_IMPORT_LIMIT,
-    });
-    const totalCandidates = importCandidates.length;
-    const cursor = Math.min(requestedCursor, totalCandidates);
-    const nextCursor = Math.min(totalCandidates, cursor + batchSize);
-    const hasMore = nextCursor < totalCandidates;
-    const batchCandidates = importCandidates.slice(cursor, nextCursor);
-    appendWhatsappSessionLog(session, 'import.batch', {
-      cursor,
-      nextCursor,
-      hasMore,
-      batchSize,
-      batchCount: batchCandidates.length,
-      totalCandidates,
-    });
-    setImportProgress('scan', 30, cursor, totalCandidates, 'Контакты подготовлены');
-
-    const preparedContactsMap = (
-      await mapWithConcurrency(batchCandidates, WHATSAPP_IMPORT_CONCURRENCY, async (contact, index) => {
-        const about =
-          session.connector === 'baileys'
-            ? toTrimmedString(contact.status, 1200)
-            : await readWhatsappContactAbout(contact);
-        const businessProfile =
-          session.connector === 'baileys' ? {} : toProfile(contact.businessProfile);
-        const websites = Array.isArray(businessProfile.websites)
-          ? businessProfile.websites
-          : [businessProfile.websites].filter(Boolean);
-
-        const normalized = normalizeWhatsappContact(
-          {
-            name: contact.name || contact.notify,
-            displayName: contact.pushname || contact.verifiedName,
-            fullName: contact.shortName || contact.displayName,
-            phone:
-              contact.number ||
-              contact.phone ||
-              contact.id?.user ||
-              normalizeWhatsappJidToPhone(contact.jid || contact.id?._serialized || contact.id),
-            id: contact.id?._serialized || contact.jid || contact.id,
-            description: about || businessProfile.description || '',
-            links: websites,
-            tags: ['WhatsApp'],
-            markers: [contact.isBusiness ? 'Бизнес' : '', contact.isMyContact ? 'Мой контакт' : ''].filter(Boolean),
-            roles: [],
-            statuses: [contact.isBlocked ? 'blocked' : '', contact.isBusiness ? 'business' : ''].filter(Boolean),
-            image: '',
-          },
-          cursor + index,
-        );
-
-        if (!normalized) {
-          return null;
-        }
-
-        return {
-          ...normalized,
-          _contact: contact,
-        };
-      }, (completed, total) => {
-        setImportProgress(
-          'normalize',
-          30 + Math.round((Math.max(0, Math.min(1, total ? completed / total : 1))) * 30),
-          cursor + completed,
-          totalCandidates,
-          'Нормализация контактов',
-        );
-      })
-    )
-      .filter(Boolean)
-      .reduce((map, item) => {
-        map.set(item.importKey, item);
-        return map;
-      }, new Map());
-
-    const uniqueContacts = Array.from(preparedContactsMap.values());
-    appendWhatsappSessionLog(session, 'import.normalized', {
-      count: uniqueContacts.length,
-    });
-    setImportProgress('dedupe', 65, nextCursor, totalCandidates, 'Удаление дубликатов');
-
-    if (!uniqueContacts.length) {
-      appendWhatsappSessionLog(session, 'import.result', {
-        imported: 0,
-        matched: 0,
-        total: totalCandidates,
-        cursor,
-        nextCursor,
-        hasMore,
-        reason: 'normalized_contacts_empty_batch',
-      });
-      session.status = 'ready';
-      session.error = '';
-      setImportProgress('done', 100, nextCursor, totalCandidates, 'Батч обработан');
-      session.importProgress = null;
-      touchWhatsappSession(session, ownerId);
-      return res.status(200).json({
-        source: 'whatsapp',
-        imported: 0,
-        skipped: 0,
-        total: totalCandidates,
-        cursor,
-        nextCursor,
-        hasMore,
-        batchSize,
-        batchCount: batchCandidates.length,
-        matched: 0,
-        matchedByPhone: 0,
-        matchedByImportKey: 0,
-        matchedByJid: 0,
-        matchedByName: 0,
-        newAvailable: 0,
-        newWithName: 0,
-        newWithoutName: 0,
-        importedWithImage: 0,
-        entities: [],
+    const backgroundState = ensureWhatsappBackgroundImportState(session);
+    if (backgroundState && ['running', 'paused'].includes(backgroundState.state)) {
+      return res.status(409).json({
+        message: 'Background import is active. Pause or stop it before starting manual import.',
         session: toWhatsappSessionStatus(session),
       });
     }
-
-    const importKeys = uniqueContacts.map((item) => item.importKey);
-    const importJids = Array.from(
-      new Set(
-        uniqueContacts
-          .map((item) => resolveWhatsappContactJid({ jid: item.id, phone: item.phone }))
-          .filter(Boolean),
-      ),
-    );
-    const importNameKeys = Array.from(
-      new Set(
-        uniqueContacts
-          .map((item) => ({
-            normalizedName: normalizeEntityNameForMatch(item.name),
-            generatedName: isGeneratedWhatsappContactName(item.name),
-          }))
-          .filter((item) => item.normalizedName && !item.generatedName && item.normalizedName.length >= 4)
-          .map((item) => item.normalizedName),
-      ),
-    );
-    const importPhones = Array.from(
-      new Set(
-        uniqueContacts
-          .map((item) => normalizePhone(item.phone))
-          .filter(Boolean),
-      ),
-    );
-    const importPhoneSet = new Set(importPhones);
-    const importPhoneVariants = Array.from(
-      new Set(
-        importPhones.flatMap((phone) => {
-          if (!phone) return [];
-          if (phone.startsWith('+')) {
-            return [phone, phone.slice(1)].filter(Boolean);
-          }
-          return [phone, `+${phone}`];
-        }),
-      ),
-    );
-
-    const importIdentityFilters = [{ 'profile.import_key': { $in: importKeys } }];
-    if (importJids.length) {
-      importIdentityFilters.push({ 'profile.import_jid': { $in: importJids } });
-    }
-
-    const existingImportIdentityEntities = await Entity.find(
-      {
-        owner_id: ownerId,
-        type: 'connection',
-        $or: importIdentityFilters,
-      },
-      { _id: 1, profile: 1, name: 1 },
-    ).lean();
-
-    let existingPhoneEntities = [];
-    if (importPhoneVariants.length) {
-      existingPhoneEntities = await Entity.find(
-        {
-          owner_id: ownerId,
-          type: { $in: ['connection', 'person', 'company'] },
-          $or: [{ 'profile.phone': { $in: importPhoneVariants } }, { 'profile.phones': { $in: importPhoneVariants } }],
-        },
-        { _id: 1, profile: 1 },
-      ).lean();
-    }
-
-    let existingNameEntities = [];
-    if (importNameKeys.length) {
-      existingNameEntities = await Entity.find(
-        {
-          owner_id: ownerId,
-          type: { $in: ['connection', 'person', 'company'] },
-          name: { $exists: true, $ne: '' },
-        },
-        { _id: 1, name: 1 },
-      ).lean();
-    }
-    setImportProgress('match', 75, cursor, totalCandidates, 'Сопоставление с базой');
-
-    const existingKeySet = new Set();
-    const existingJidSet = new Set();
-    const existingPhoneSet = new Set();
-    const existingNameSet = new Set();
-
-    for (const entity of existingImportIdentityEntities) {
-      const profile = toProfile(entity.profile);
-      const importKey = toTrimmedString(profile.import_key, 180);
-      const importJid = toTrimmedString(profile.import_jid, 220);
-      if (importKey) {
-        existingKeySet.add(importKey);
-      }
-      if (importJid) {
-        existingJidSet.add(importJid);
-      }
-    }
-
-    for (const entity of existingPhoneEntities) {
-      const profile = toProfile(entity.profile);
-      for (const phone of extractNormalizedPhonesFromProfile(profile)) {
-        if (importPhoneSet.has(phone) || importPhoneSet.has(phone.startsWith('+') ? phone.slice(1) : `+${phone}`)) {
-          existingPhoneSet.add(phone);
-        }
-      }
-    }
-
-    for (const entity of existingNameEntities) {
-      const normalizedName = normalizeEntityNameForMatch(entity.name);
-      if (!normalizedName || normalizedName.length < 4) continue;
-      if (isGeneratedWhatsappContactName(entity.name)) continue;
-      existingNameSet.add(normalizedName);
-    }
-
-    let matchedByImportKey = 0;
-    let matchedByJid = 0;
-    let matchedByPhone = 0;
-    let matchedByName = 0;
-    let matchedTotal = 0;
-    const toCreate = [];
-    let newWithName = 0;
-    let newWithoutName = 0;
-
-    for (const item of uniqueContacts) {
-      const normalizedPhone = normalizePhone(item.phone);
-      const normalizedJid = resolveWhatsappContactJid({ jid: item.id, phone: item.phone });
-      const normalizedName = normalizeEntityNameForMatch(item.name);
-      const hasGeneratedName = isGeneratedWhatsappContactName(item.name);
-      const hasImportKeyMatch = existingKeySet.has(item.importKey);
-      const hasJidMatch = normalizedJid ? existingJidSet.has(normalizedJid) : false;
-      const hasPhoneMatch = normalizedPhone
-        ? existingPhoneSet.has(normalizedPhone) ||
-          (normalizedPhone.startsWith('+')
-            ? existingPhoneSet.has(normalizedPhone.slice(1))
-            : existingPhoneSet.has(`+${normalizedPhone}`))
-        : false;
-      const hasNameMatch =
-        normalizedName && normalizedName.length >= 4 && !hasGeneratedName
-          ? existingNameSet.has(normalizedName)
-          : false;
-
-      if (hasImportKeyMatch || hasJidMatch || hasPhoneMatch || hasNameMatch) {
-        matchedTotal += 1;
-        if (hasImportKeyMatch) {
-          matchedByImportKey += 1;
-        }
-        if (hasJidMatch) {
-          matchedByJid += 1;
-        }
-        if (hasPhoneMatch) {
-          matchedByPhone += 1;
-        }
-        if (hasNameMatch) {
-          matchedByName += 1;
-        }
-        continue;
-      }
-
-      if (hasGeneratedName) {
-        newWithoutName += 1;
-      } else {
-        newWithName += 1;
-      }
-      toCreate.push(item);
-    }
-    appendWhatsappSessionLog(session, 'import.matches', {
-      matchedTotal,
-      matchedByPhone,
-      matchedByImportKey,
-      matchedByJid,
-      matchedByName,
-      newWithName,
-      newWithoutName,
-      toCreate: toCreate.length,
-    });
-    setImportProgress('match', 82, nextCursor, totalCandidates, 'Сопоставление завершено');
-
-    let createdEntities = [];
-    let importedWithImage = 0;
-    if (toCreate.length) {
-      const contactsWithImages = await mapWithConcurrency(
-        toCreate,
-        WHATSAPP_IMAGE_IMPORT_CONCURRENCY,
-        async (item, index) => {
-          let image = '';
-          if (includeImages && WHATSAPP_IMAGE_FETCH_ENABLED && index < WHATSAPP_IMAGE_IMPORT_MAX_COUNT) {
-            image = await fetchWhatsappContactImage(session, item);
-          }
-
-          return {
-            importKey: item.importKey,
-            jid: resolveWhatsappContactJid(item),
-            name: item.name,
-            phone: item.phone,
-            description: item.description,
-            tags: item.tags,
-            markers: item.markers,
-            roles: item.roles,
-            links: item.links,
-            status: item.status,
-            image,
-          };
-        },
-        (completed, total) => {
-          setImportProgress(
-            'enrich',
-            82 + Math.round((Math.max(0, Math.min(1, total ? completed / total : 1))) * 10),
-            cursor + completed,
-            totalCandidates,
-            'Подготовка к записи',
-          );
-        },
-      );
-      importedWithImage = contactsWithImages.reduce((total, row) => total + (row.image ? 1 : 0), 0);
-
-      setImportProgress('save', 95, nextCursor, totalCandidates, 'Сохранение в базу');
-      createdEntities = await Entity.insertMany(
-        contactsWithImages.map((item) => ({
-          owner_id: ownerId,
-          type: 'connection',
-          name: item.name,
-          profile: {
-            color: '#1058ff',
-            source: 'whatsapp',
-            import_key: item.importKey,
-            import_jid: item.jid || '',
-            phone: item.phone,
-            phones: item.phone ? [item.phone] : [],
-            image: item.image || '',
-            categoryLocked: false,
-            imported_at: new Date().toISOString(),
-          },
-          ai_metadata: {
-            description: item.description,
-            tags: item.tags,
-            markers: item.markers,
-            roles: item.roles,
-            links: item.links,
-            phones: item.phone ? [item.phone] : [],
-            status: item.status,
-          },
-        })),
-        { ordered: false },
-      );
-      appendWhatsappSessionLog(session, 'import.saved', {
-        created: createdEntities.length,
-      });
-    }
-
-    setImportProgress('done', 100, nextCursor, totalCandidates, 'Батч импортирован');
-    session.status = 'ready';
-    session.error = '';
-    session.lastImportedAt = new Date().toISOString();
-    session.importProgress = null;
-    appendWhatsappSessionLog(session, 'import.result', {
-      imported: createdEntities.length,
-      matched: matchedTotal,
-      total: totalCandidates,
-      matchedByPhone,
-      matchedByImportKey,
-      matchedByJid,
-      matchedByName,
-      newAvailable: toCreate.length,
-      newWithName,
-      newWithoutName,
-      importedWithImage,
-      cursor,
-      nextCursor,
-      hasMore,
+    const result = await performWhatsappImportBatch({
+      ownerId,
+      session,
+      includeImages,
+      overwriteNames,
+      requestedCursor,
       batchSize,
-      batchCount: batchCandidates.length,
+      setSessionImporting: true,
+      runSource: 'manual',
     });
-    touchWhatsappSession(session, ownerId);
-
-    return res.status(200).json({
-      source: 'whatsapp',
-      imported: createdEntities.length,
-      skipped: matchedTotal,
-      total: totalCandidates,
-      cursor,
-      nextCursor,
-      hasMore,
-      batchSize,
-      batchCount: batchCandidates.length,
-      matched: matchedTotal,
-      matchedByPhone,
-      matchedByImportKey,
-      matchedByJid,
-      matchedByName,
-      newAvailable: toCreate.length,
-      newWithName,
-      newWithoutName,
-      importedWithImage,
-      entities: createdEntities,
-      session: toWhatsappSessionStatus(session),
-    });
+    return res.status(200).json(result);
   } catch (error) {
     const ownerId = getOwnerIdFromRequest(req);
     const session = getOwnerWhatsappSession(ownerId);
@@ -3828,6 +4126,252 @@ app.post('/api/integrations/whatsapp/import', requireAuth, async (req, res, next
       });
       touchWhatsappSession(session, ownerId);
     }
+    return next(error);
+  }
+});
+
+async function runWhatsappBackgroundImport(ownerId, session) {
+  const state = ensureWhatsappBackgroundImportState(session);
+  if (!state) return;
+
+  while (true) {
+    if (state.stopRequested) {
+      state.state = 'stopped';
+      state.endedAt = new Date().toISOString();
+      touchWhatsappBackgroundImport(session);
+      appendWhatsappSessionLog(session, 'import.background.stopped', {
+        cursor: state.cursor,
+        imported: state.imported,
+      });
+      break;
+    }
+
+    if (state.pauseRequested) {
+      if (state.state !== 'paused') {
+        state.state = 'paused';
+        touchWhatsappBackgroundImport(session);
+        appendWhatsappSessionLog(session, 'import.background.paused', {
+          cursor: state.cursor,
+        });
+      }
+      await delay(WHATSAPP_BACKGROUND_IMPORT_POLL_MS);
+      continue;
+    }
+
+    state.state = 'running';
+    touchWhatsappBackgroundImport(session);
+
+    const result = await performWhatsappImportBatch({
+      ownerId,
+      session,
+      includeImages: state.includeImages !== false,
+      overwriteNames: state.overwriteNames === true,
+      requestedCursor: Math.max(0, Number(state.cursor) || 0),
+      batchSize: Math.max(1, Number(state.batchSize) || WHATSAPP_IMPORT_BATCH_SIZE),
+      setSessionImporting: false,
+      runSource: 'background',
+    });
+
+    state.total = Math.max(state.total, Number(result.total) || 0);
+    state.cursor = Math.max(0, Number(result.nextCursor) || 0);
+    state.imported += Math.max(0, Number(result.imported) || 0);
+    state.matched += Math.max(0, Number(result.matched ?? result.skipped) || 0);
+    state.newWithName += Math.max(0, Number(result.newWithName) || 0);
+    state.newWithoutName += Math.max(0, Number(result.newWithoutName) || 0);
+    state.importedWithImage += Math.max(0, Number(result.importedWithImage) || 0);
+    state.updatedNames += Math.max(0, Number(result.updatedNames) || 0);
+    state.updatedImages += Math.max(0, Number(result.updatedImages) || 0);
+    touchWhatsappBackgroundImport(session);
+
+    if (!result.hasMore || (state.total > 0 && state.cursor >= state.total)) {
+      state.state = 'completed';
+      state.endedAt = new Date().toISOString();
+      touchWhatsappBackgroundImport(session);
+      appendWhatsappSessionLog(session, 'import.background.completed', {
+        total: state.total,
+        imported: state.imported,
+        matched: state.matched,
+        updatedNames: state.updatedNames,
+        updatedImages: state.updatedImages,
+      });
+      break;
+    }
+  }
+}
+
+app.post('/api/integrations/whatsapp/import/background/start', requireAuth, async (req, res, next) => {
+  try {
+    const ownerId = requireOwnerId(req);
+    const sessionId = toTrimmedString(req.body?.sessionId, 120);
+    const includeImages = req.body?.includeImages !== false;
+    const overwriteNames = req.body?.overwriteNames === true;
+    const requestedCursor = Math.max(0, Number(req.body?.cursor) || 0);
+    const requestedBatchSize = Math.max(1, Number(req.body?.batchSize) || WHATSAPP_IMPORT_BATCH_SIZE);
+    const batchSize = Math.min(requestedBatchSize, WHATSAPP_CONTACT_IMPORT_LIMIT);
+    const session = getOwnerWhatsappSession(ownerId);
+
+    if (!session || (sessionId && session.id !== sessionId)) {
+      return res.status(404).json({ message: 'WhatsApp session not found. Start a session first.' });
+    }
+    if (!session.client) {
+      return res.status(500).json({ message: 'WhatsApp client is unavailable for this session.' });
+    }
+    if (!['ready', 'importing'].includes(session.status)) {
+      return res.status(409).json({
+        message: 'WhatsApp session is not ready. Scan QR and wait for connection.',
+        session: toWhatsappSessionStatus(session),
+      });
+    }
+
+    const state = ensureWhatsappBackgroundImportState(session);
+    if (!state) {
+      return res.status(500).json({ message: 'Background import state is unavailable.' });
+    }
+    if (state.workerPromise && ['running', 'paused'].includes(state.state)) {
+      return res.status(409).json({
+        message: 'Background import is already running.',
+        session: toWhatsappSessionStatus(session),
+      });
+    }
+
+    state.state = 'running';
+    state.includeImages = includeImages;
+    state.overwriteNames = overwriteNames;
+    state.cursor = requestedCursor;
+    state.total = 0;
+    state.imported = 0;
+    state.matched = 0;
+    state.newWithName = 0;
+    state.newWithoutName = 0;
+    state.importedWithImage = 0;
+    state.updatedNames = 0;
+    state.updatedImages = 0;
+    state.batchSize = batchSize;
+    state.startedAt = new Date().toISOString();
+    state.updatedAt = state.startedAt;
+    state.endedAt = '';
+    state.error = '';
+    state.stopRequested = false;
+    state.pauseRequested = false;
+    appendWhatsappSessionLog(session, 'import.background.start', {
+      includeImages,
+      overwriteNames,
+      cursor: requestedCursor,
+      batchSize,
+    });
+
+    state.workerPromise = (async () => {
+      try {
+        await runWhatsappBackgroundImport(ownerId, session);
+      } catch (error) {
+        state.state = 'error';
+        state.error = toTrimmedString(error?.message, 260) || 'Background import failed';
+        state.endedAt = new Date().toISOString();
+        touchWhatsappBackgroundImport(session);
+        appendWhatsappSessionLog(session, 'import.background.error', {
+          message: state.error,
+        });
+      } finally {
+        state.workerPromise = null;
+        session.importProgress = null;
+        if (session.status === 'importing') {
+          session.status = 'ready';
+        }
+        touchWhatsappSession(session, ownerId);
+      }
+    })();
+
+    touchWhatsappSession(session, ownerId);
+    return res.status(200).json({
+      started: true,
+      session: toWhatsappSessionStatus(session),
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post('/api/integrations/whatsapp/import/background/pause', requireAuth, async (req, res, next) => {
+  try {
+    const ownerId = requireOwnerId(req);
+    const sessionId = toTrimmedString(req.body?.sessionId, 120);
+    const session = getOwnerWhatsappSession(ownerId);
+    if (!session || (sessionId && session.id !== sessionId)) {
+      return res.status(404).json({ message: 'WhatsApp session not found. Start a session first.' });
+    }
+    const state = ensureWhatsappBackgroundImportState(session);
+    if (!state || state.state !== 'running') {
+      return res.status(409).json({
+        message: 'Background import is not running.',
+        session: toWhatsappSessionStatus(session),
+      });
+    }
+
+    state.pauseRequested = true;
+    touchWhatsappBackgroundImport(session);
+    touchWhatsappSession(session, ownerId);
+    appendWhatsappSessionLog(session, 'import.background.pause.request');
+    return res.status(200).json({ paused: true, session: toWhatsappSessionStatus(session) });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post('/api/integrations/whatsapp/import/background/resume', requireAuth, async (req, res, next) => {
+  try {
+    const ownerId = requireOwnerId(req);
+    const sessionId = toTrimmedString(req.body?.sessionId, 120);
+    const session = getOwnerWhatsappSession(ownerId);
+    if (!session || (sessionId && session.id !== sessionId)) {
+      return res.status(404).json({ message: 'WhatsApp session not found. Start a session first.' });
+    }
+    const state = ensureWhatsappBackgroundImportState(session);
+    if (!state || !['paused', 'running'].includes(state.state)) {
+      return res.status(409).json({
+        message: 'Background import is not paused.',
+        session: toWhatsappSessionStatus(session),
+      });
+    }
+
+    state.pauseRequested = false;
+    if (state.state === 'paused') {
+      state.state = 'running';
+    }
+    touchWhatsappBackgroundImport(session);
+    touchWhatsappSession(session, ownerId);
+    appendWhatsappSessionLog(session, 'import.background.resume.request');
+    return res.status(200).json({ resumed: true, session: toWhatsappSessionStatus(session) });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post('/api/integrations/whatsapp/import/background/stop', requireAuth, async (req, res, next) => {
+  try {
+    const ownerId = requireOwnerId(req);
+    const sessionId = toTrimmedString(req.body?.sessionId, 120);
+    const session = getOwnerWhatsappSession(ownerId);
+    if (!session || (sessionId && session.id !== sessionId)) {
+      return res.status(404).json({ message: 'WhatsApp session not found. Start a session first.' });
+    }
+    const state = ensureWhatsappBackgroundImportState(session);
+    if (!state || !['running', 'paused'].includes(state.state)) {
+      return res.status(409).json({
+        message: 'Background import is not active.',
+        session: toWhatsappSessionStatus(session),
+      });
+    }
+
+    state.stopRequested = true;
+    state.pauseRequested = false;
+    if (state.state === 'paused') {
+      state.state = 'running';
+    }
+    touchWhatsappBackgroundImport(session);
+    touchWhatsappSession(session, ownerId);
+    appendWhatsappSessionLog(session, 'import.background.stop.request');
+    return res.status(200).json({ stopped: true, session: toWhatsappSessionStatus(session) });
+  } catch (error) {
     return next(error);
   }
 });

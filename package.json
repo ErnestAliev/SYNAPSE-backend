@@ -6,7 +6,8 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "postinstall": "node scripts/install-puppeteer-chrome.js"
+    "postinstall": "node scripts/install-puppeteer-chrome.js",
+    "cleanup:whatsapp-tags": "node scripts/cleanup-whatsapp-tags.js"
   },
   "keywords": [],
   "author": "",
