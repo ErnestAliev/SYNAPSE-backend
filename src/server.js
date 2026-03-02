@@ -4323,15 +4323,43 @@ app.get('/api/entities', async (req, res, next) => {
       }
     }
 
-    const projection = {};
     if (requestedType === 'connection') {
       // Connection lists can include thousands of contacts. Excluding heavy blobs keeps response under client timeout.
-      projection['profile.image'] = 0;
-      projection['ai_metadata.quiz_state.processedEvents.response.updatedEntity'] = 0;
+      // Preserve photo-filter behavior with a lightweight boolean marker.
+      const entities = await Entity.aggregate([
+        { $match: filter },
+        { $sort: { createdAt: -1, _id: -1 } },
+        {
+          $addFields: {
+            'profile.has_image': {
+              $gt: [
+                {
+                  $strLenCP: {
+                    $convert: {
+                      input: '$profile.image',
+                      to: 'string',
+                      onError: '',
+                      onNull: '',
+                    },
+                  },
+                },
+                0,
+              ],
+            },
+          },
+        },
+        {
+          $project: {
+            'profile.image': 0,
+            'ai_metadata.quiz_state.processedEvents.response.updatedEntity': 0,
+          },
+        },
+      ]);
+      return res.json(entities);
     }
 
     // Return plain JSON objects to avoid Mongoose document hydration cost on large collections.
-    const entities = await Entity.find(filter, projection).sort({ createdAt: -1, _id: -1 }).lean();
+    const entities = await Entity.find(filter).sort({ createdAt: -1, _id: -1 }).lean();
     res.json(entities);
   } catch (error) {
     next(error);
