@@ -4323,7 +4323,8 @@ app.get('/api/entities', async (req, res, next) => {
       }
     }
 
-    const entities = await Entity.find(filter).sort({ createdAt: -1, _id: -1 });
+    // Return plain JSON objects to avoid Mongoose document hydration cost on large collections.
+    const entities = await Entity.find(filter).sort({ createdAt: -1, _id: -1 }).lean();
     res.json(entities);
   } catch (error) {
     next(error);
