@@ -4367,37 +4367,13 @@ app.get('/api/entities', async (req, res, next) => {
     }
 
     if (requestedType === 'connection') {
-      // Connection lists can include thousands of contacts. Excluding heavy blobs keeps response under client timeout.
-      // Preserve photo-filter behavior with a lightweight boolean marker.
-      const entities = await Entity.aggregate([
-        { $match: filter },
-        { $sort: { createdAt: -1, _id: -1 } },
-        {
-          $addFields: {
-            'profile.has_image': {
-              $gt: [
-                {
-                  $strLenCP: {
-                    $convert: {
-                      input: '$profile.image',
-                      to: 'string',
-                      onError: '',
-                      onNull: '',
-                    },
-                  },
-                },
-                0,
-              ],
-            },
-          },
-        },
-        {
-          $project: {
-            'profile.image': 0,
-            'ai_metadata.quiz_state.processedEvents.response.updatedEntity': 0,
-          },
-        },
-      ]);
+      // Keep contact avatars in the list response so the Collection tab can render photos after a page reload.
+      // Strip only known heavy nested debug payloads.
+      const entities = await Entity.find(filter, {
+        'ai_metadata.quiz_state.processedEvents.response.updatedEntity': 0,
+      })
+        .sort({ createdAt: -1, _id: -1 })
+        .lean();
       return res.json(entities);
     }
 
