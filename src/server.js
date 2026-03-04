@@ -72,6 +72,7 @@ const AUTH_REQUIRED = String(process.env.AUTH_REQUIRED || 'true').toLowerCase() 
 const DEV_AUTH_ENABLED =
   !IS_PRODUCTION && String(process.env.DEV_AUTH_ENABLED || 'true').toLowerCase() !== 'false';
 const DEFAULT_ALLOWED_ORIGINS = ['http://localhost:5173', 'http://localhost:3000'];
+const DEFAULT_ALLOWED_ORIGIN_PATTERNS = [/^https:\/\/synapse-frontend[-\w]*\.vercel\.app$/];
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
 const OPENAI_MODEL = String(process.env.OPENAI_MODEL || 'gpt-5').trim();
 const OPENAI_PROJECT_MODEL = String(process.env.OPENAI_PROJECT_MODEL || 'gpt-5').trim();
@@ -355,7 +356,41 @@ function parseAllowedOrigins() {
   return new Set(DEFAULT_ALLOWED_ORIGINS);
 }
 
+function parseAllowedOriginPatterns() {
+  const raw = [
+    process.env.FRONTEND_ORIGIN_PATTERNS,
+    process.env.CORS_ORIGIN_PATTERNS,
+  ]
+    .filter((value) => typeof value === 'string' && value.trim().length > 0)
+    .join(',');
+
+  const normalized = raw
+    .split(',')
+    .map((pattern) => pattern.trim())
+    .filter(Boolean)
+    .map((pattern) => {
+      if (pattern.startsWith('/') && pattern.endsWith('/')) {
+        try {
+          return new RegExp(pattern.slice(1, -1));
+        } catch {
+          return null;
+        }
+      }
+
+      const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\\\*/g, '.*');
+      return new RegExp(`^${escaped}$`);
+    })
+    .filter((pattern): pattern is RegExp => Boolean(pattern));
+
+  if (normalized.length) {
+    return normalized;
+  }
+
+  return DEFAULT_ALLOWED_ORIGIN_PATTERNS;
+}
+
 const allowedOrigins = parseAllowedOrigins();
+const allowedOriginPatterns = parseAllowedOriginPatterns();
 const googleClient = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : null;
 
 app.use(
@@ -366,7 +401,11 @@ app.use(
         return;
       }
 
-      if (!allowedOrigins.size || allowedOrigins.has(origin)) {
+      if (
+        !allowedOrigins.size ||
+        allowedOrigins.has(origin) ||
+        allowedOriginPatterns.some((pattern) => pattern.test(origin))
+      ) {
         callback(null, true);
         return;
       }
