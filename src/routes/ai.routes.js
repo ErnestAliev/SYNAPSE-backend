@@ -64,6 +64,52 @@ function createAiRouter(deps) {
     ignoredNoise: { maxItems: 40, itemMaxLength: 120 },
   });
   const PROJECT_CHAT_FIELD_KEYS = Object.freeze(Object.keys(PROJECT_CHAT_FIELD_CONFIGS));
+  function buildAiTraceId(label) {
+    const safeLabel = toTrimmedString(label, 80) || 'ai-call';
+    return `${safeLabel}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function logAiCallStart(payload) {
+    console.log('[AI TRACE] start', payload);
+  }
+
+  function logAiCallEnd(payload) {
+    console.log('[AI TRACE] end', payload);
+  }
+
+  async function withAiTrace(meta, requestFn) {
+    const traceId = buildAiTraceId(meta.label);
+    const startedAt = Date.now();
+    logAiCallStart({
+      traceId,
+      at: new Date().toISOString(),
+      ...meta,
+    });
+    try {
+      const result = await requestFn();
+      const responseModel = toTrimmedString(result?.debug?.response?.model, 120) || meta.model;
+      logAiCallEnd({
+        traceId,
+        at: new Date().toISOString(),
+        label: meta.label,
+        model: responseModel,
+        durationMs: Date.now() - startedAt,
+        replyLength: String(result?.reply || '').length,
+        usage: result?.usage || null,
+      });
+      return result;
+    } catch (error) {
+      logAiCallEnd({
+        traceId,
+        at: new Date().toISOString(),
+        label: meta.label,
+        model: meta.model || null,
+        durationMs: Date.now() - startedAt,
+        error: toTrimmedString(error?.message, 300) || 'unknown',
+      });
+      throw error;
+    }
+  }
   function mapHistoryMessagesToResponse(messages) {
     return (Array.isArray(messages) ? messages : []).map((message) => ({
       id: toTrimmedString(message.id, 120),
@@ -252,7 +298,25 @@ function createAiRouter(deps) {
         'Ты Semantic Router Synapse12. Верни строго одно слово из списка: investor, hr, strategist, default.';
       const routerModel = toTrimmedString(OPENAI_ROUTER_MODEL, 120) || 'gpt-5';
 
-      const routerResponse = await aiProvider.requestOpenAiAgentReply({
+      const routerTraceMeta = {
+        label: 'agent-chat.router',
+        ownerId,
+        model: routerModel,
+        scope: {
+          type: scopeContext.scopeType,
+          entityType: scopeContext.entityType,
+          projectId: scopeContext.projectId,
+        },
+        promptLengths: {
+          system: routerSystemPrompt.length,
+          user: routerPrompt.length,
+        },
+        messageLength: message.length,
+        historyLength: history.length,
+        attachmentsCount: attachments.length,
+        includeDebug,
+      };
+      const routerResponse = await withAiTrace(routerTraceMeta, () => aiProvider.requestOpenAiAgentReply({
         systemPrompt: routerSystemPrompt,
         userPrompt: routerPrompt,
         includeRawPayload: includeDebug,
@@ -261,7 +325,7 @@ function createAiRouter(deps) {
         maxOutputTokens: 5,
         allowEmptyResponse: true,
         emptyResponseFallback: 'default',
-      });
+      }));
       const detectedRoleRaw = toTrimmedString(routerResponse.reply, 60);
       const detectedRole = aiPrompts.normalizeDetectedRole(detectedRoleRaw);
       const deepModel =
@@ -275,7 +339,26 @@ function createAiRouter(deps) {
         message,
       });
 
-      const aiResponse = await aiProvider.requestOpenAiAgentReply({
+      const chatTraceMeta = {
+        label: 'agent-chat.reply',
+        ownerId,
+        model: deepModel,
+        scope: {
+          type: scopeContext.scopeType,
+          entityType: scopeContext.entityType,
+          projectId: scopeContext.projectId,
+        },
+        promptLengths: {
+          system: systemPrompt.length,
+          user: userPrompt.length,
+        },
+        messageLength: message.length,
+        historyLength: history.length,
+        attachmentsCount: attachments.length,
+        includeDebug,
+        detectedRole,
+      };
+      const aiResponse = await withAiTrace(chatTraceMeta, () => aiProvider.requestOpenAiAgentReply({
         systemPrompt,
         userPrompt,
         includeRawPayload: includeDebug,
@@ -285,7 +368,7 @@ function createAiRouter(deps) {
         allowEmptyResponse: true,
         emptyResponseFallback: 'Пустой ответ от модели. Уточните запрос или повторите через несколько секунд.',
         timeoutMs: 130_000,
-      });
+      }));
       const usedModel = toTrimmedString(aiResponse?.debug?.response?.model, 120) || deepModel;
       const usedRouterModel = toTrimmedString(routerResponse?.debug?.response?.model, 120) || routerModel;
 
@@ -408,7 +491,24 @@ function createAiRouter(deps) {
       });
       const includeDebug = AI_DEBUG_ECHO || req.body?.debug === true;
 
-      const aiResponse = await aiProvider.requestOpenAiAgentReply({
+      const analyzeTraceMeta = {
+        label: 'entity-analyze.reply',
+        ownerId,
+        entityId: String(entity._id),
+        entityType: entity.type,
+        model: OPENAI_MODEL,
+        promptLengths: {
+          system: systemPrompt.length,
+          user: userPrompt.length,
+        },
+        messageLength: message.length,
+        voiceInputLength: voiceInput.length,
+        historyLength: history.length,
+        attachmentsCount: attachments.length,
+        documentsCount: documents.length,
+        includeDebug,
+      };
+      const aiResponse = await withAiTrace(analyzeTraceMeta, () => aiProvider.requestOpenAiAgentReply({
         systemPrompt,
         userPrompt,
         includeRawPayload: includeDebug,
@@ -416,7 +516,7 @@ function createAiRouter(deps) {
         temperature: 0.3,
         maxOutputTokens: 4000,
         timeoutMs: 130_000,
-      });
+      }));
       const usedModel = toTrimmedString(aiResponse?.debug?.response?.model, 120) || OPENAI_MODEL;
 
       const parsedResponse = extractJsonObjectFromText(aiResponse.reply);
