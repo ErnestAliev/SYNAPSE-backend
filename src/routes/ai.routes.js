@@ -141,6 +141,25 @@ function createAiRouter(deps) {
       },
     };
   }
+
+  async function setEntityAnalysisPending(entity, pending, errorMessage = '') {
+    if (!entity) return null;
+    const metadata = toProfile(entity.ai_metadata);
+    metadata.analysis_pending = Boolean(pending);
+    if (pending) {
+      metadata.analysis_started_at = new Date().toISOString();
+    } else {
+      metadata.analysis_completed_at = new Date().toISOString();
+      if (errorMessage) {
+        metadata.analysis_error = errorMessage;
+      } else {
+        delete metadata.analysis_error;
+      }
+    }
+    entity.ai_metadata = metadata;
+    await entity.save();
+    return entity;
+  }
   function buildAiTraceId(label) {
     const safeLabel = toTrimmedString(label, 80) || 'ai-call';
     return `${safeLabel}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -536,7 +555,7 @@ function createAiRouter(deps) {
       const entity = await Entity.findOne({
         _id: entityId,
         owner_id: ownerId,
-      }).lean();
+      });
 
       if (!entity) {
         return res.status(404).json({ message: 'Entity not found' });
@@ -554,111 +573,93 @@ function createAiRouter(deps) {
           .json({ message: 'message or at least one context item (history/attachments/documents) is required' });
       }
 
-      const aiMetadata = toProfile(entity.ai_metadata);
-      const currentFields = buildEntityAnalyzerCurrentFields(entity.type, aiMetadata);
-      const systemPrompt = aiPrompts.buildEntityAnalyzerSystemPrompt(entity.type);
-      const userPrompt = aiPrompts.buildEntityAnalyzerUserPrompt({
-        entity,
-        message,
-        history,
-        attachments,
-        currentFields,
-        voiceInput,
-        documents,
-      });
       const includeDebug = AI_DEBUG_ECHO || req.body?.debug === true;
+      await setEntityAnalysisPending(entity, true);
+      broadcastEntityEvent(ownerId, 'entity.updated', {
+        entity: entity.toObject(),
+      });
 
-      const analyzeTraceMeta = {
-        label: 'entity-analyze.reply',
-        ownerId,
-        entityId: String(entity._id),
-        entityType: entity.type,
-        model: OPENAI_MODEL,
-        promptLengths: {
-          system: systemPrompt.length,
-          user: userPrompt.length,
-        },
-        messageLength: message.length,
-        voiceInputLength: voiceInput.length,
-        historyLength: history.length,
-        attachmentsCount: attachments.length,
-        documentsCount: documents.length,
-        includeDebug,
-      };
-      const aiResponse = await withAiTrace(analyzeTraceMeta, () => aiProvider.requestOpenAiAgentReply({
-        systemPrompt,
-        userPrompt,
-        includeRawPayload: includeDebug,
-        model: OPENAI_MODEL,
-        temperature: 0.3,
-        maxOutputTokens: 4000,
-        timeoutMs: 130_000,
-      }));
-      const usedModel = toTrimmedString(aiResponse?.debug?.response?.model, 120) || OPENAI_MODEL;
-
-      const parsedResponse = extractJsonObjectFromText(aiResponse.reply);
-      const analysis = ensureAnalysisMarkers(normalizeEntityAnalysisOutput(entity.type, parsedResponse));
-      const reply = aiPrompts.buildEntityAnalysisReplyText(analysis);
-
-      let vector = null;
-      let vectorWarning = '';
-      if (analysis.status === 'ready') {
+      const entityIdValue = String(entity._id);
+      void (async () => {
         try {
-          const vectorDoc = await upsertEntityVector(ownerId, entity, analysis);
-          if (vectorDoc) {
-            vector = {
-              id: String(vectorDoc._id),
-              model: vectorDoc.model,
-              dimensions: Array.isArray(vectorDoc.vector) ? vectorDoc.vector.length : 0,
-              updatedAt: vectorDoc.updatedAt,
-            };
-          }
-        } catch (error) {
-          vectorWarning = toTrimmedString(error?.message, 220) || 'Vector build failed';
-        }
-      }
+          const freshEntity = await Entity.findOne({ _id: entityIdValue, owner_id: ownerId });
+          if (!freshEntity) return;
 
-      const debugPayload = includeDebug
-        ? {
-          entity: {
-            id: String(entity._id),
-            type: entity.type,
-            name: entity.name || '',
-          },
-          input: {
+          const aiMetadata = toProfile(freshEntity.ai_metadata);
+          const currentFields = buildEntityAnalyzerCurrentFields(freshEntity.type, aiMetadata);
+          const systemPrompt = aiPrompts.buildEntityAnalyzerSystemPrompt(freshEntity.type);
+          const userPrompt = aiPrompts.buildEntityAnalyzerUserPrompt({
+            entity: freshEntity,
             message,
-            voiceInput,
             history,
             attachments,
-            documents,
             currentFields,
-          },
-          prompts: {
+            voiceInput,
+            documents,
+          });
+
+          const analyzeTraceMeta = {
+            label: 'entity-analyze.reply',
+            ownerId,
+            entityId: String(freshEntity._id),
+            entityType: freshEntity.type,
+            model: OPENAI_MODEL,
+            promptLengths: {
+              system: systemPrompt.length,
+              user: userPrompt.length,
+            },
+            messageLength: message.length,
+            voiceInputLength: voiceInput.length,
+            historyLength: history.length,
+            attachmentsCount: attachments.length,
+            documentsCount: documents.length,
+            includeDebug,
+          };
+          const aiResponse = await withAiTrace(analyzeTraceMeta, () => aiProvider.requestOpenAiAgentReply({
             systemPrompt,
             userPrompt,
-          },
-          response: {
-            raw: aiResponse.reply,
-            parsed: parsedResponse,
-            normalized: analysis,
-            reply,
-            usage: aiResponse.usage,
-            model: usedModel,
-          },
-          provider: aiResponse.debug || {},
-          vector: vector || null,
-          vectorWarning: vectorWarning || '',
-        }
-        : undefined;
+            includeRawPayload: includeDebug,
+            model: OPENAI_MODEL,
+            temperature: 0.3,
+            maxOutputTokens: 4000,
+            timeoutMs: 130_000,
+          }));
 
-      return res.status(200).json({
-        reply,
-        suggestion: analysis,
-        usage: aiResponse.usage,
-        model: usedModel,
-        vector,
-        ...(vectorWarning ? { vectorWarning } : {}),
-        ...(debugPayload ? { debug: debugPayload } : {}),
+          const parsedResponse = extractJsonObjectFromText(aiResponse.reply);
+          const analysis = ensureAnalysisMarkers(normalizeEntityAnalysisOutput(freshEntity.type, parsedResponse));
+          const nextMetadata = buildEntityMetadataPatch(freshEntity.type, freshEntity.ai_metadata, analysis);
+          nextMetadata.analysis_pending = false;
+          nextMetadata.analysis_completed_at = new Date().toISOString();
+          delete nextMetadata.analysis_error;
+
+          freshEntity.ai_metadata = nextMetadata;
+          await freshEntity.save();
+          broadcastEntityEvent(ownerId, 'entity.updated', {
+            entity: freshEntity.toObject(),
+          });
+
+          if (analysis.status === 'ready') {
+            try {
+              await upsertEntityVector(ownerId, freshEntity, analysis);
+            } catch (error) {
+              console.error('Entity analyze vector error:', error);
+            }
+          }
+        } catch (error) {
+          const safeMessage = toTrimmedString(error?.message, 240) || 'Entity analyze failed';
+          console.error('Entity analyze background error:', error);
+          const fallbackEntity = await Entity.findOne({ _id: entityIdValue, owner_id: ownerId });
+          if (!fallbackEntity) return;
+          await setEntityAnalysisPending(fallbackEntity, false, safeMessage);
+          broadcastEntityEvent(ownerId, 'entity.updated', {
+            entity: fallbackEntity.toObject(),
+          });
+        }
+      })();
+
+      return res.status(202).json({
+        status: 'processing',
+        message: 'Анализ запущен в фоне',
       });
     } catch (error) {
       return next(error);
