@@ -140,12 +140,70 @@ function createAiAttachmentTools(deps) {
     return '';
   }
 
+  function detectContentCategory(name, mime, extractedText) {
+    const loweredMime = toTrimmedString(mime, 120).toLowerCase();
+    const loweredName = toTrimmedString(name, 160).toLowerCase();
+
+    // Structured data formats
+    if (
+      loweredMime === 'application/json' ||
+      loweredName.endsWith('.json')
+    ) return 'structured';
+
+    if (
+      loweredMime === 'application/xml' ||
+      loweredMime === 'text/xml' ||
+      loweredName.endsWith('.xml')
+    ) return 'structured';
+
+    if (
+      loweredMime === 'application/x-yaml' ||
+      loweredName.endsWith('.yaml') ||
+      loweredName.endsWith('.yml')
+    ) return 'structured';
+
+    // Explicit spreadsheet/table MIME types
+    if (
+      loweredMime === 'text/csv' ||
+      loweredMime === 'application/csv' ||
+      loweredMime === 'application/vnd.ms-excel' ||
+      loweredMime.includes('spreadsheet') ||
+      loweredMime.includes('opendocument.spreadsheet') ||
+      loweredName.endsWith('.csv') ||
+      loweredName.endsWith('.tsv') ||
+      loweredName.endsWith('.xls') ||
+      loweredName.endsWith('.xlsx') ||
+      loweredName.endsWith('.ods')
+    ) return 'table';
+
+    // Heuristic: detect CSV/TSV-like content in extracted text
+    if (extractedText) {
+      const lines = extractedText.split('\n').filter((l) => l.trim()).slice(0, 15);
+      if (lines.length >= 3) {
+        const commaRich = lines.filter((l) => (l.match(/,/g) || []).length >= 3).length;
+        const tabRich = lines.filter((l) => (l.match(/\t/g) || []).length >= 2).length;
+        const numberRich = lines.filter((l) => (l.match(/\b\d+(\.\d+)?\b/g) || []).length >= 3).length;
+        if ((commaRich >= 3 || tabRich >= 3) && numberRich >= 3) return 'table';
+      }
+    }
+
+    // Word documents
+    if (isDocxAttachment(name, mime)) return 'document';
+
+    // Log files and plain text
+    if (loweredName.endsWith('.log')) return 'text';
+
+    // Default: treat as text
+    return 'text';
+  }
+
   async function prepareAgentAttachments(rawAttachments) {
     const normalized = normalizeAgentAttachments(rawAttachments);
     const prepared = [];
 
     for (const attachment of normalized) {
       const text = await extractAttachmentText(attachment);
+      const contentCategory = detectContentCategory(attachment.name, attachment.mime, text);
       prepared.push(
         compactObject({
           name: attachment.name,
@@ -153,6 +211,7 @@ function createAiAttachmentTools(deps) {
           size: attachment.size,
           text,
           hasInlineData: Boolean(attachment.data),
+          contentCategory,
         }),
       );
     }
