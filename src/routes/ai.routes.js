@@ -468,7 +468,9 @@ function createAiRouter(deps) {
       const usedModel = toTrimmedString(aiResponse?.debug?.response?.model, 120) || deepModel;
       const usedRouterModel = toTrimmedString(routerResponse?.debug?.response?.model, 120) || routerModel;
 
-      if (scopeContext.scopeType === 'project') {
+      const canRunProjectAutoEnrichment = typeof runProjectChatAutoEnrichment === 'function';
+      const shouldQueueProjectAutoEnrichment = scopeContext.scopeType === 'project' && canRunProjectAutoEnrichment;
+      if (shouldQueueProjectAutoEnrichment) {
         void runProjectChatAutoEnrichment({
           ownerId,
           scopeContext,
@@ -480,6 +482,8 @@ function createAiRouter(deps) {
         }).catch(() => {
           // Background enrichment must never break the main reply.
         });
+      } else if (scopeContext.scopeType === 'project') {
+        console.warn('[agent-chat] project auto enrichment is unavailable');
       }
 
       const debugPayload = includeDebug
@@ -518,7 +522,7 @@ function createAiRouter(deps) {
           },
           projectAutoEnrichment: scopeContext.scopeType === 'project'
             ? {
-              queued: true,
+              queued: shouldQueueProjectAutoEnrichment,
               projectId: scopeContext.projectId,
             }
             : null,
