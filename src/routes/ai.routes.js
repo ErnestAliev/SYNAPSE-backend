@@ -325,6 +325,24 @@ function createAiRouter(deps) {
     return normalized.slice(-AGENT_CHAT_HISTORY_MESSAGE_LIMIT);
   }
 
+  function buildScopeKeyCandidates(scope) {
+    if (!scope || typeof scope !== 'object') return [];
+    if (scope.type === 'project') {
+      const projectId = toTrimmedString(scope.projectId, 80);
+      if (!projectId) return [];
+      return Array.from(new Set([
+        scope.scopeKey,
+        `project:${projectId}`,
+      ]));
+    }
+    return scope.scopeKey ? [scope.scopeKey] : [];
+  }
+
+  function mapHistoryDocMessages(doc) {
+    if (!doc || typeof doc !== 'object') return [];
+    return Array.isArray(doc.messages) ? doc.messages : [];
+  }
+
   router.get('/chat-history', requireAuth, async (req, res, next) => {
     try {
       const ownerId = requireOwnerId(req);
@@ -333,13 +351,61 @@ function createAiRouter(deps) {
         entityType: req.query.entityType,
         projectId: req.query.projectId,
       });
+      const scopeKeys = buildScopeKeyCandidates(scope);
 
-      const doc = await AgentChatHistory.findOne({
+      const docs = await AgentChatHistory.find({
         owner_id: ownerId,
-        scope_key: scope.scopeKey,
+        scope_key: { $in: scopeKeys },
       })
-        .select({ messages: 1, updatedAt: 1 })
+        .select({ messages: 1, updatedAt: 1, scope_key: 1 })
+        .sort({ updatedAt: -1, _id: -1 })
         .lean();
+
+      const mergedMessages = normalizeMessages(
+        docs.flatMap((doc) => mapHistoryDocMessages(doc)),
+      );
+      const newestUpdatedAt = docs[0]?.updatedAt || null;
+
+      // Best-effort migration: when legacy key exists, rewrite into canonical key.
+      if (scope.type === 'project' && docs.length) {
+        const hasLegacyKeys = docs.some((doc) => toTrimmedString(doc.scope_key, 120) !== scope.scopeKey);
+        if (hasLegacyKeys) {
+          try {
+            await AgentChatHistory.findOneAndUpdate(
+              {
+                owner_id: ownerId,
+                scope_key: scope.scopeKey,
+              },
+              {
+                $set: {
+                  owner_id: ownerId,
+                  scope_key: scope.scopeKey,
+                  scope_type: scope.type,
+                  entity_type: scope.entityType,
+                  project_id: scope.projectId,
+                  messages: mergedMessages,
+                },
+              },
+              {
+                upsert: true,
+                returnDocument: 'after',
+                setDefaultsOnInsert: true,
+                runValidators: true,
+              },
+            );
+
+            const legacyKeys = scopeKeys.filter((key) => key !== scope.scopeKey);
+            if (legacyKeys.length) {
+              await AgentChatHistory.deleteMany({
+                owner_id: ownerId,
+                scope_key: { $in: legacyKeys },
+              });
+            }
+          } catch (migrationError) {
+            console.error('[agent-chat] failed to migrate legacy project history key', migrationError);
+          }
+        }
+      }
 
       return res.status(200).json({
         scopeKey: scope.scopeKey,
@@ -348,8 +414,8 @@ function createAiRouter(deps) {
           entityType: scope.entityType,
           projectId: scope.projectId,
         },
-        updatedAt: doc?.updatedAt || null,
-        messages: mapHistoryMessagesToResponse(doc?.messages || []),
+        updatedAt: newestUpdatedAt,
+        messages: mapHistoryMessagesToResponse(mergedMessages),
       });
     } catch (error) {
       return next(error);
@@ -361,11 +427,12 @@ function createAiRouter(deps) {
       const ownerId = requireOwnerId(req);
       const scope = normalizeScope(req.body?.scope);
       const normalizedMessages = normalizeMessages(req.body?.messages);
+      const scopeKeys = buildScopeKeyCandidates(scope);
 
       if (!normalizedMessages.length) {
-        await AgentChatHistory.deleteOne({
+        await AgentChatHistory.deleteMany({
           owner_id: ownerId,
-          scope_key: scope.scopeKey,
+          scope_key: { $in: scopeKeys },
         });
 
         broadcastEntityEvent(ownerId, 'agent-chat.history.deleted', {
@@ -401,6 +468,16 @@ function createAiRouter(deps) {
           runValidators: true,
         },
       ).lean();
+
+      if (scope.type === 'project') {
+        const legacyKeys = scopeKeys.filter((key) => key !== scope.scopeKey);
+        if (legacyKeys.length) {
+          await AgentChatHistory.deleteMany({
+            owner_id: ownerId,
+            scope_key: { $in: legacyKeys },
+          });
+        }
+      }
 
       broadcastEntityEvent(ownerId, 'agent-chat.history.updated', {
         scopeKey: scope.scopeKey,
@@ -443,10 +520,11 @@ function createAiRouter(deps) {
         entityType: req.body?.scope?.entityType || req.query.entityType,
         projectId: req.body?.scope?.projectId || req.query.projectId,
       });
+      const scopeKeys = buildScopeKeyCandidates(scope);
 
-      const result = await AgentChatHistory.deleteOne({
+      const result = await AgentChatHistory.deleteMany({
         owner_id: ownerId,
-        scope_key: scope.scopeKey,
+        scope_key: { $in: scopeKeys },
       });
 
       broadcastEntityEvent(ownerId, 'agent-chat.history.deleted', {
