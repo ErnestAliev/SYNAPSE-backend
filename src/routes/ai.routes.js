@@ -232,6 +232,99 @@ function createAiRouter(deps) {
     }));
   }
 
+  function normalizeScope(rawScope) {
+    const scope = toProfile(rawScope);
+    const scopeType = toTrimmedString(scope.type, 24).toLowerCase();
+
+    if (!AGENT_CHAT_SCOPE_TYPES.has(scopeType)) {
+      throw Object.assign(new Error('Invalid scope type'), { status: 400 });
+    }
+
+    if (scopeType === 'collection') {
+      const entityType = toTrimmedString(scope.entityType, 24).toLowerCase();
+      if (!AGENT_CHAT_ENTITY_TYPES.has(entityType)) {
+        throw Object.assign(new Error('Invalid collection scope type'), { status: 400 });
+      }
+      return {
+        type: 'collection',
+        entityType,
+        projectId: '',
+        scopeKey: `collection:${entityType}`,
+      };
+    }
+
+    const projectId = toTrimmedString(scope.projectId, 80);
+    if (!projectId) {
+      throw Object.assign(new Error('projectId is required for project scope'), { status: 400 });
+    }
+
+    return {
+      type: 'project',
+      entityType: '',
+      projectId,
+      // Must match frontend scope key format in AgentChatDock.
+      scopeKey: `project-canvas:${projectId}`,
+    };
+  }
+
+  function normalizeHistoryAttachment(rawAttachment, index) {
+    const attachment = toProfile(rawAttachment);
+    const data = toTrimmedString(attachment.data, AGENT_CHAT_HISTORY_ATTACHMENT_DATA_MAX_LENGTH);
+    const name = toTrimmedString(attachment.name, 240) || 'Файл';
+    if (!data && !name) return null;
+
+    return {
+      id: toTrimmedString(attachment.id, 120) || `att_${Date.now()}_${index}`,
+      name,
+      mime: toTrimmedString(attachment.mime, 180),
+      size: Number.isFinite(Number(attachment.size)) ? Math.max(0, Math.floor(Number(attachment.size))) : 0,
+      data,
+    };
+  }
+
+  function normalizeHistoryMessage(rawMessage, index) {
+    const message = toProfile(rawMessage);
+    const id = toTrimmedString(message.id, 120) || `msg_${Date.now()}_${index}`;
+    const role = toTrimmedString(message.role, 24) === 'assistant' ? 'assistant' : 'user';
+    const text = toTrimmedString(message.text, AGENT_CHAT_HISTORY_TEXT_MAX_LENGTH);
+    const createdAtRaw = toTrimmedString(message.createdAt, 80);
+    const parsedCreatedAt = Date.parse(createdAtRaw);
+    const createdAt = Number.isFinite(parsedCreatedAt) ? new Date(parsedCreatedAt) : new Date();
+    const attachments = (Array.isArray(message.attachments) ? message.attachments : [])
+      .slice(0, AGENT_CHAT_HISTORY_ATTACHMENT_LIMIT)
+      .map((item, attachmentIndex) => normalizeHistoryAttachment(item, attachmentIndex))
+      .filter(Boolean);
+
+    if (!text && attachments.length === 0) {
+      return null;
+    }
+
+    return {
+      id,
+      role,
+      text,
+      createdAt,
+      attachments,
+    };
+  }
+
+  function normalizeMessages(rawMessages) {
+    if (!Array.isArray(rawMessages)) return [];
+
+    const dedup = new Set();
+    const normalized = rawMessages
+      .map((message, index) => normalizeHistoryMessage(message, index))
+      .filter(Boolean)
+      .filter((message) => {
+        if (dedup.has(message.id)) return false;
+        dedup.add(message.id);
+        return true;
+      })
+      .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime());
+
+    return normalized.slice(-AGENT_CHAT_HISTORY_MESSAGE_LIMIT);
+  }
+
   router.get('/chat-history', requireAuth, async (req, res, next) => {
     try {
       const ownerId = requireOwnerId(req);
