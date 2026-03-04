@@ -160,6 +160,8 @@ function createAiProvider(deps) {
 
     let response;
     let payload;
+    let extractedReply = '';
+    let emptyRetryCount = 0;
     try {
       const firstRequestBody = buildResponsesRequestBody({
         model: requestConfig.model,
@@ -200,6 +202,33 @@ function createAiProvider(deps) {
         payload = retryAttempt.payload;
       }
 
+      const maxEmptyResponseRetries = 1;
+      while (response && response.ok) {
+        extractedReply = extractOpenAiResponseText(payload);
+        const fallbackReply = toTrimmedString(emptyResponseFallback, 1200);
+        if (extractedReply || allowEmptyResponse || fallbackReply) {
+          break;
+        }
+        if (emptyRetryCount >= maxEmptyResponseRetries) {
+          break;
+        }
+
+        emptyRetryCount += 1;
+        const retryRequestBody = buildResponsesRequestBody({
+          model: requestConfig.model,
+          systemPrompt,
+          userPrompt,
+          temperature: requestConfig.temperature,
+          maxOutputTokens: requestConfig.max_output_tokens,
+        });
+        const retryAttempt = await callResponsesApi({
+          requestBody: retryRequestBody,
+          signal: controller.signal,
+        });
+        response = retryAttempt.response;
+        payload = retryAttempt.payload;
+      }
+
     } catch (error) {
       if (error && error.name === 'AbortError') {
         throw Object.assign(new Error('AI request timeout'), { status: 504 });
@@ -214,8 +243,11 @@ function createAiProvider(deps) {
       throw Object.assign(new Error(providerMessage), { status: 502 });
     }
 
-    const extractedReply = extractOpenAiResponseText(payload);
-    const reply = extractedReply || toTrimmedString(emptyResponseFallback, 1200);
+    if (!extractedReply) {
+      extractedReply = extractOpenAiResponseText(payload);
+    }
+    const fallbackReply = toTrimmedString(emptyResponseFallback, 1200);
+    const reply = extractedReply || fallbackReply;
 
     if (!reply && !allowEmptyResponse) {
       throw Object.assign(new Error('AI response is empty'), { status: 502 });
@@ -233,6 +265,7 @@ function createAiProvider(deps) {
           created: toTrimmedString(payload?.created, 120),
           model: toTrimmedString(payload?.model, 120) || requestConfig.model,
           output_text_length: extractedReply.length,
+          empty_retry_count: emptyRetryCount,
           used_empty_fallback: !extractedReply.length,
           completed_in_ms: Math.max(1, Date.now() - startedAt),
         },
