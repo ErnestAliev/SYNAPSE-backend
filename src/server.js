@@ -380,7 +380,7 @@ function parseAllowedOriginPatterns() {
       const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\\\*/g, '.*');
       return new RegExp(`^${escaped}$`);
     })
-    .filter((pattern): pattern is RegExp => Boolean(pattern));
+    .filter((pattern) => Boolean(pattern));
 
   if (normalized.length) {
     return normalized;
