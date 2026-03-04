@@ -902,6 +902,7 @@ function createAiRouter(deps) {
       });
 
       const entityIdValue = String(entity._id);
+      const requestedAt = new Date().toISOString();
       void (async () => {
         try {
           const freshEntity = await Entity.findOne({ _id: entityIdValue, owner_id: ownerId });
@@ -959,14 +960,29 @@ function createAiRouter(deps) {
           const analysisReplyText = aiPrompts.buildEntityAnalysisReplyText(analysis);
           if (analysisReplyText) {
             const existingChatHistory = Array.isArray(nextMetadata.chat_history) ? nextMetadata.chat_history : [];
+            // Build user entry: use message text, or fall back to attachment file names.
+            // This ensures remoteHistory.length > localHistory.length on the frontend
+            // so the watcher applies the update (local draft already has the user message).
+            const userMessageText = message
+              || attachments.map((a) => toTrimmedString(a.name, 120) || 'Файл').join(', ');
+            const userChatMessage = userMessageText
+              ? {
+                id: `msg_${Date.now()}_u_${Math.random().toString(36).slice(2, 6)}`,
+                role: 'user',
+                text: userMessageText,
+                createdAt: requestedAt,
+                attachments: [],
+              }
+              : null;
             const assistantChatMessage = {
-              id: `msg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+              id: `msg_${Date.now()}_a_${Math.random().toString(36).slice(2, 6)}`,
               role: 'assistant',
               text: analysisReplyText,
               createdAt: new Date().toISOString(),
               attachments: [],
             };
-            nextMetadata.chat_history = [...existingChatHistory, assistantChatMessage].slice(-40);
+            const newMessages = [userChatMessage, assistantChatMessage].filter(Boolean);
+            nextMetadata.chat_history = [...existingChatHistory, ...newMessages].slice(-40);
           }
 
           latestEntity.ai_metadata = nextMetadata;
