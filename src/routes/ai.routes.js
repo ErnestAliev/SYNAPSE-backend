@@ -627,20 +627,22 @@ function createAiRouter(deps) {
 
           const parsedResponse = extractJsonObjectFromText(aiResponse.reply);
           const analysis = ensureAnalysisMarkers(normalizeEntityAnalysisOutput(freshEntity.type, parsedResponse));
-          const nextMetadata = buildEntityMetadataPatch(freshEntity.type, freshEntity.ai_metadata, analysis);
+          const latestEntity = await Entity.findOne({ _id: entityIdValue, owner_id: ownerId });
+          if (!latestEntity) return;
+          const nextMetadata = buildEntityMetadataPatch(latestEntity.type, latestEntity.ai_metadata, analysis);
           nextMetadata.analysis_pending = false;
           nextMetadata.analysis_completed_at = new Date().toISOString();
           delete nextMetadata.analysis_error;
 
-          freshEntity.ai_metadata = nextMetadata;
-          await freshEntity.save();
+          latestEntity.ai_metadata = nextMetadata;
+          await latestEntity.save();
           broadcastEntityEvent(ownerId, 'entity.updated', {
-            entity: freshEntity.toObject(),
+            entity: latestEntity.toObject(),
           });
 
           if (analysis.status === 'ready') {
             try {
-              await upsertEntityVector(ownerId, freshEntity, analysis);
+              await upsertEntityVector(ownerId, latestEntity, analysis);
             } catch (error) {
               console.error('Entity analyze vector error:', error);
             }
