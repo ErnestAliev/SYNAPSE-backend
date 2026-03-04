@@ -1320,7 +1320,7 @@ async function upsertEntityVector(ownerId, entity, analysis) {
     },
     {
       upsert: true,
-      new: true,
+      returnDocument: 'after',
       setDefaultsOnInsert: true,
     },
   ).lean();
@@ -1733,7 +1733,7 @@ async function upsertUserFromIdentity(identity) {
     },
     {
       upsert: true,
-      new: true,
+      returnDocument: 'after',
       setDefaultsOnInsert: true,
     },
   );
@@ -4835,7 +4835,7 @@ app.put('/api/auth/settings', requireAuth, async (req, res, next) => {
         },
       },
       {
-        new: true,
+        returnDocument: 'after',
         runValidators: true,
       },
     ).lean();
@@ -5017,8 +5017,8 @@ app.put('/api/entities/:id', async (req, res, next) => {
       },
       payload,
       {
-      new: true,
-      runValidators: true,
+        returnDocument: 'after',
+        runValidators: true,
       },
     );
 
@@ -5089,7 +5089,7 @@ app.post('/api/entities/:id/set-me', async (req, res, next) => {
         },
       },
       {
-        new: true,
+        returnDocument: 'after',
         runValidators: true,
       },
     );

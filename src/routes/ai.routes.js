@@ -303,7 +303,7 @@ function createAiRouter(deps) {
         },
         {
           upsert: true,
-          new: true,
+          returnDocument: 'after',
           setDefaultsOnInsert: true,
           runValidators: true,
         },
