@@ -662,6 +662,7 @@ function createAiRouter(deps) {
       return res.status(202).json({
         status: 'processing',
         message: 'Анализ запущен в фоне',
+        reply: 'Анализ запущен. Результат придет автоматически.',
       });
     } catch (error) {
       return next(error);
