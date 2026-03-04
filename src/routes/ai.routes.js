@@ -64,6 +64,83 @@ function createAiRouter(deps) {
     ignoredNoise: { maxItems: 40, itemMaxLength: 120 },
   });
   const PROJECT_CHAT_FIELD_KEYS = Object.freeze(Object.keys(PROJECT_CHAT_FIELD_CONFIGS));
+  function normalizeMarkerList(rawValues, maxItems = 6) {
+    const source = Array.isArray(rawValues) ? rawValues : [];
+    const dedup = new Set();
+    const result = [];
+
+    for (const item of source) {
+      const value = toTrimmedString(item, 64);
+      if (!value) continue;
+      const key = value.toLowerCase();
+      if (dedup.has(key)) continue;
+      dedup.add(key);
+      result.push(value);
+      if (result.length >= maxItems) break;
+    }
+
+    return result;
+  }
+
+  function ensureAnalysisMarkers(analysis) {
+    if (!analysis || typeof analysis !== 'object') return analysis;
+    if (analysis.status !== 'ready') return analysis;
+
+    const fields = toProfile(analysis.fields);
+    const currentMarkers = normalizeMarkerList(fields.markers);
+    if (currentMarkers.length) {
+      return {
+        ...analysis,
+        fields: {
+          ...fields,
+          markers: currentMarkers,
+        },
+      };
+    }
+
+    const fallbackKeys = [
+      'risks',
+      'status',
+      'stage',
+      'priority',
+      'outcomes',
+      'owners',
+      'industry',
+      'departments',
+      'resources',
+      'metrics',
+      'participants',
+      'location',
+      'date',
+      'roles',
+      'skills',
+      'phones',
+      'tags',
+    ];
+
+    const fallback = [];
+    for (const key of fallbackKeys) {
+      const values = normalizeMarkerList(fields[key], 6);
+      for (const value of values) {
+        if (fallback.includes(value)) continue;
+        fallback.push(value);
+        if (fallback.length >= 6) break;
+      }
+      if (fallback.length >= 6) break;
+    }
+
+    if (!fallback.length) {
+      fallback.push('Контекст требует уточнения');
+    }
+
+    return {
+      ...analysis,
+      fields: {
+        ...fields,
+        markers: fallback,
+      },
+    };
+  }
   function buildAiTraceId(label) {
     const safeLabel = toTrimmedString(label, 80) || 'ai-call';
     return `${safeLabel}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
