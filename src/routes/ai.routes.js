@@ -206,6 +206,153 @@ function createAiRouter(deps) {
       throw error;
     }
   }
+  function normalizeProjectEnrichmentFieldValue(fieldKey, rawValue, itemMaxLength) {
+    const str = typeof rawValue === 'string' ? rawValue.trim() : '';
+    if (!str) return '';
+
+    if (fieldKey === 'importance') {
+      const lower = str.toLowerCase();
+      if (lower === 'низкая' || lower === 'low' || lower === 'l') return 'Низкая';
+      if (lower === 'средняя' || lower === 'medium' || lower === 'med' || lower === 'm') return 'Средняя';
+      if (lower === 'высокая' || lower === 'high' || lower === 'h' || lower === 'critical' || lower === 'критично') return 'Высокая';
+      return '';
+    }
+
+    if (fieldKey === 'links') {
+      const withProtocol = /^https?:\/\//i.test(str) ? str : `https://${str}`;
+      try {
+        const url = new URL(withProtocol);
+        if (!url.hostname || !url.protocol.startsWith('http')) return '';
+        return url.toString().slice(0, itemMaxLength);
+      } catch {
+        return '';
+      }
+    }
+
+    return str.slice(0, itemMaxLength);
+  }
+
+  async function runProjectChatAutoEnrichment({
+    ownerId,
+    scopeContext,
+    contextData,
+    message,
+    history,
+    assistantReply,
+    includeDebug,
+  }) {
+    const projectId = toTrimmedString(scopeContext?.projectId, 80);
+    if (!projectId) return;
+
+    const project = await Entity.findOne({ _id: projectId, owner_id: ownerId });
+    if (!project || project.type !== 'project') return;
+
+    const projectMeta = toProfile(project.ai_metadata);
+    const currentProjectFields = {};
+    for (const fieldKey of PROJECT_CHAT_FIELD_KEYS) {
+      currentProjectFields[fieldKey] = Array.isArray(projectMeta[fieldKey]) ? projectMeta[fieldKey] : [];
+    }
+
+    const aggregatedEntityFields = {};
+    const scopeEntities = Array.isArray(contextData?.entities) ? contextData.entities : [];
+    for (const fieldKey of PROJECT_CHAT_FIELD_KEYS) {
+      const config = PROJECT_CHAT_FIELD_CONFIGS[fieldKey];
+      const dedup = new Set();
+      const values = [];
+      for (const entity of scopeEntities) {
+        const meta = toProfile(entity.ai_metadata);
+        const fieldValues = Array.isArray(meta[fieldKey]) ? meta[fieldKey] : [];
+        for (const val of fieldValues) {
+          const normalized = normalizeProjectEnrichmentFieldValue(fieldKey, val, config.itemMaxLength);
+          if (!normalized) continue;
+          const key = normalized.toLowerCase();
+          if (dedup.has(key)) continue;
+          dedup.add(key);
+          values.push(normalized);
+        }
+      }
+      aggregatedEntityFields[fieldKey] = values;
+    }
+
+    const systemPrompt = aiPrompts.buildProjectEnrichmentSystemPrompt();
+    const userPrompt = aiPrompts.buildProjectEnrichmentUserPrompt({
+      contextData,
+      message,
+      assistantReply,
+      history,
+      currentProjectFields,
+      aggregatedEntityFields,
+    });
+
+    const enrichmentModel = toTrimmedString(OPENAI_PROJECT_MODEL, 120) || 'gpt-5';
+    const aiResponse = await withAiTrace({
+      label: 'project-chat.enrichment',
+      ownerId,
+      model: enrichmentModel,
+      projectId,
+      promptLengths: { system: systemPrompt.length, user: userPrompt.length },
+      includeDebug,
+    }, () => aiProvider.requestOpenAiAgentReply({
+      systemPrompt,
+      userPrompt,
+      includeRawPayload: includeDebug,
+      model: enrichmentModel,
+      temperature: 0.1,
+      maxOutputTokens: 2000,
+      allowEmptyResponse: true,
+      emptyResponseFallback: '',
+      timeoutMs: 60_000,
+    }));
+
+    if (!aiResponse.reply) return;
+
+    const parsed = extractJsonObjectFromText(aiResponse.reply);
+    if (!parsed || parsed.status !== 'ready') return;
+
+    const enrichedFields = toProfile(parsed.fields);
+    const freshProject = await Entity.findOne({ _id: projectId, owner_id: ownerId });
+    if (!freshProject) return;
+
+    const freshMeta = toProfile(freshProject.ai_metadata);
+    const patch = {};
+    let hasChanges = false;
+
+    for (const fieldKey of PROJECT_CHAT_FIELD_KEYS) {
+      const config = PROJECT_CHAT_FIELD_CONFIGS[fieldKey];
+      const newValues = Array.isArray(enrichedFields[fieldKey]) ? enrichedFields[fieldKey] : [];
+      if (!newValues.length) continue;
+
+      const existingValues = Array.isArray(freshMeta[fieldKey]) ? freshMeta[fieldKey] : [];
+      const existingDedup = new Set(
+        existingValues.map((v) => (typeof v === 'string' ? v.toLowerCase() : '')).filter(Boolean),
+      );
+      const merged = [...existingValues];
+
+      for (const rawVal of newValues) {
+        const normalized = normalizeProjectEnrichmentFieldValue(fieldKey, rawVal, config.itemMaxLength);
+        if (!normalized) continue;
+        const key = normalized.toLowerCase();
+        if (existingDedup.has(key)) continue;
+        existingDedup.add(key);
+        merged.push(normalized);
+        if (merged.length >= config.maxItems) break;
+      }
+
+      if (merged.length > existingValues.length) {
+        patch[fieldKey] = merged;
+        hasChanges = true;
+      }
+    }
+
+    if (!hasChanges) return;
+
+    freshProject.ai_metadata = { ...freshMeta, ...patch };
+    await freshProject.save();
+    broadcastEntityEvent(ownerId, 'entity.updated', {
+      entity: freshProject.toObject(),
+    });
+  }
+
   function mapHistoryMessagesToResponse(messages) {
     return (Array.isArray(messages) ? messages : []).map((message) => ({
       id: toTrimmedString(message.id, 120),
