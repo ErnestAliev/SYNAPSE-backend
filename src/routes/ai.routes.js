@@ -956,6 +956,19 @@ function createAiRouter(deps) {
           nextMetadata.analysis_completed_at = new Date().toISOString();
           delete nextMetadata.analysis_error;
 
+          const analysisReplyText = aiPrompts.buildEntityAnalysisReplyText(analysis);
+          if (analysisReplyText) {
+            const existingChatHistory = Array.isArray(nextMetadata.chat_history) ? nextMetadata.chat_history : [];
+            const assistantChatMessage = {
+              id: `msg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+              role: 'assistant',
+              text: analysisReplyText,
+              createdAt: new Date().toISOString(),
+              attachments: [],
+            };
+            nextMetadata.chat_history = [...existingChatHistory, assistantChatMessage].slice(-40);
+          }
+
           latestEntity.ai_metadata = nextMetadata;
           await latestEntity.save();
           broadcastEntityEvent(ownerId, 'entity.updated', {
