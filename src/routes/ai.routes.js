@@ -14,6 +14,7 @@ function createAiRouter(deps) {
     Entity,
     resolveAgentScopeContext,
     buildEntityAnalyzerCurrentFields,
+    getEntityAnalyzerFields,
     extractJsonObjectFromText,
     normalizeEntityAnalysisOutput,
     buildEntityMetadataPatch,
@@ -64,13 +65,61 @@ function createAiRouter(deps) {
     ignoredNoise: { maxItems: 40, itemMaxLength: 120 },
   });
   const PROJECT_CHAT_FIELD_KEYS = Object.freeze(Object.keys(PROJECT_CHAT_FIELD_CONFIGS));
-  function normalizeMarkerList(rawValues, maxItems = 6) {
-    const source = Array.isArray(rawValues) ? rawValues : [];
+  const ENTITY_ANALYSIS_FIELD_CONFIGS = Object.freeze({
+    tags: { maxItems: 12, itemMaxLength: 64 },
+    markers: { maxItems: 12, itemMaxLength: 64 },
+    roles: { maxItems: 12, itemMaxLength: 64 },
+    skills: { maxItems: 12, itemMaxLength: 64 },
+    links: { maxItems: 12, itemMaxLength: 240 },
+    phones: { maxItems: 12, itemMaxLength: 40 },
+    status: { maxItems: 12, itemMaxLength: 64 },
+    priority: { maxItems: 12, itemMaxLength: 64 },
+    metrics: { maxItems: 12, itemMaxLength: 120 },
+    owners: { maxItems: 12, itemMaxLength: 64 },
+    participants: { maxItems: 12, itemMaxLength: 64 },
+    outcomes: { maxItems: 12, itemMaxLength: 96 },
+    resources: { maxItems: 12, itemMaxLength: 96 },
+    industry: { maxItems: 12, itemMaxLength: 64 },
+    departments: { maxItems: 12, itemMaxLength: 64 },
+    stage: { maxItems: 12, itemMaxLength: 64 },
+    date: { maxItems: 12, itemMaxLength: 64 },
+    location: { maxItems: 12, itemMaxLength: 64 },
+    risks: { maxItems: 12, itemMaxLength: 96 },
+    importance: { maxItems: 1, itemMaxLength: 24 },
+    ignoredNoise: { maxItems: 20, itemMaxLength: 120 },
+  });
+  const IMPORTANCE_VALUE_MAP = Object.freeze({
+    низкая: 'Низкая',
+    low: 'Низкая',
+    l: 'Низкая',
+    низкий: 'Низкая',
+    средняя: 'Средняя',
+    medium: 'Средняя',
+    med: 'Средняя',
+    m: 'Средняя',
+    средний: 'Средняя',
+    высокая: 'Высокая',
+    high: 'Высокая',
+    h: 'Высокая',
+    высокий: 'Высокая',
+    критично: 'Высокая',
+    critical: 'Высокая',
+  });
+  function normalizeEntityFieldList(rawValues, config = {}) {
+    const {
+      maxItems = 12,
+      itemMaxLength = 64,
+    } = config;
+    const source = Array.isArray(rawValues)
+      ? rawValues
+      : typeof rawValues === 'string'
+        ? [rawValues]
+        : [];
     const dedup = new Set();
     const result = [];
 
     for (const item of source) {
-      const value = toTrimmedString(item, 64);
+      const value = toTrimmedString(item, itemMaxLength);
       if (!value) continue;
       const key = value.toLowerCase();
       if (dedup.has(key)) continue;
@@ -82,63 +131,159 @@ function createAiRouter(deps) {
     return result;
   }
 
-  function ensureAnalysisMarkers(analysis) {
-    if (!analysis || typeof analysis !== 'object') return analysis;
-    if (analysis.status !== 'ready') return analysis;
+  function normalizeImportanceValue(value) {
+    const normalized = toTrimmedString(value, 24).toLowerCase();
+    if (!normalized) return '';
+    return IMPORTANCE_VALUE_MAP[normalized] || '';
+  }
 
-    const fields = toProfile(analysis.fields);
-    const currentMarkers = normalizeMarkerList(fields.markers);
-    if (currentMarkers.length) {
+  function normalizeImportanceList(rawValues) {
+    const list = normalizeEntityFieldList(rawValues, ENTITY_ANALYSIS_FIELD_CONFIGS.importance);
+    const normalized = list
+      .map((item) => normalizeImportanceValue(item))
+      .find(Boolean);
+    return normalized ? [normalized] : [];
+  }
+
+  function mergeFieldValues(existingValues, incomingValues, config) {
+    return normalizeEntityFieldList(
+      [
+        ...(Array.isArray(existingValues) ? existingValues : []),
+        ...(Array.isArray(incomingValues) ? incomingValues : []),
+      ],
+      config,
+    );
+  }
+
+  function isMetricLikeMarker(value) {
+    if (!value || !/\d/.test(value)) return false;
+    const lower = value.toLowerCase();
+    if (/[₸$€£¥%]/.test(value)) return true;
+    if (/[=:]\s*\d/.test(value)) return true;
+    return /(kpi|roi|ltv|cac|mrr|arr|выручк|доход|прибыл|профит|итого|сценар|млн|тыс|млрд|тенге|kzt|usd|руб|\/мес|в месяц|мес|год|q[1-4]|квартал)/i.test(lower);
+  }
+
+  function isStatusLikeMarker(value) {
+    const lower = value.toLowerCase();
+    return /(в процессе|на согласовани|согласован|в работе|выполнен|завершен|отложен|отменен|ожидает|требует|запланирован)/i.test(lower);
+  }
+
+  function isPriorityLikeMarker(value) {
+    const lower = value.toLowerCase();
+    if (/^p[0-3]$/i.test(lower)) return true;
+    return /(приоритет|срочно|urgent|asap|немедленно)/i.test(lower);
+  }
+
+  function postValidateEntityAnalysis(entityType, analysis) {
+    if (!analysis || typeof analysis !== 'object') return analysis;
+    const allowedFieldsSource =
+      typeof getEntityAnalyzerFields === 'function' ? getEntityAnalyzerFields(entityType) : [];
+    const allowedFields = new Set(Array.isArray(allowedFieldsSource) ? allowedFieldsSource : []);
+    const sourceFields = toProfile(analysis.fields);
+    const fields = {};
+
+    for (const field of allowedFields) {
+      if (field === 'importance') {
+        fields.importance = normalizeImportanceList(sourceFields.importance);
+        continue;
+      }
+      const config = ENTITY_ANALYSIS_FIELD_CONFIGS[field] || ENTITY_ANALYSIS_FIELD_CONFIGS.tags;
+      fields[field] = normalizeEntityFieldList(sourceFields[field], config);
+    }
+
+    if (analysis.status !== 'ready') {
       return {
         ...analysis,
-        fields: {
-          ...fields,
-          markers: currentMarkers,
-        },
+        fields,
       };
     }
 
-    const fallbackKeys = [
-      'risks',
-      'status',
-      'stage',
-      'priority',
-      'outcomes',
-      'owners',
-      'industry',
-      'departments',
-      'resources',
-      'metrics',
-      'participants',
-      'location',
-      'date',
-      'roles',
-      'skills',
-      'phones',
-      'tags',
-    ];
-
-    const fallback = [];
-    for (const key of fallbackKeys) {
-      const values = normalizeMarkerList(fields[key], 6);
-      for (const value of values) {
-        if (fallback.includes(value)) continue;
-        fallback.push(value);
-        if (fallback.length >= 6) break;
-      }
-      if (fallback.length >= 6) break;
+    if (allowedFields.has('priority')) {
+      fields.priority = (Array.isArray(fields.priority) ? fields.priority : []).filter(
+        (item) => !normalizeImportanceValue(item),
+      );
     }
 
-    if (!fallback.length) {
-      fallback.push('Контекст требует уточнения');
+    if (allowedFields.has('markers')) {
+      const markers = normalizeEntityFieldList(
+        fields.markers,
+        ENTITY_ANALYSIS_FIELD_CONFIGS.markers,
+      );
+      const keptMarkers = [];
+      const movedMetrics = [];
+      const movedStatus = [];
+      const movedPriority = [];
+      const movedImportance = [];
+
+      for (const marker of markers) {
+        const importanceValue = normalizeImportanceValue(marker);
+        if (importanceValue && allowedFields.has('importance')) {
+          movedImportance.push(importanceValue);
+          continue;
+        }
+        if (isMetricLikeMarker(marker) && allowedFields.has('metrics')) {
+          movedMetrics.push(marker);
+          continue;
+        }
+        if (isStatusLikeMarker(marker) && allowedFields.has('status')) {
+          movedStatus.push(marker);
+          continue;
+        }
+        if (isPriorityLikeMarker(marker) && allowedFields.has('priority')) {
+          movedPriority.push(marker);
+          continue;
+        }
+        keptMarkers.push(marker);
+      }
+
+      fields.markers = keptMarkers;
+      if (allowedFields.has('metrics') && movedMetrics.length) {
+        fields.metrics = mergeFieldValues(
+          fields.metrics,
+          movedMetrics,
+          ENTITY_ANALYSIS_FIELD_CONFIGS.metrics,
+        );
+      }
+      if (allowedFields.has('status') && movedStatus.length) {
+        fields.status = mergeFieldValues(
+          fields.status,
+          movedStatus,
+          ENTITY_ANALYSIS_FIELD_CONFIGS.status,
+        );
+      }
+      if (allowedFields.has('priority') && movedPriority.length) {
+        fields.priority = mergeFieldValues(
+          fields.priority,
+          movedPriority,
+          ENTITY_ANALYSIS_FIELD_CONFIGS.priority,
+        );
+      }
+      if (allowedFields.has('importance') && movedImportance.length) {
+        fields.importance = mergeFieldValues(
+          fields.importance,
+          movedImportance,
+          ENTITY_ANALYSIS_FIELD_CONFIGS.importance,
+        );
+      }
+
+      const nonMarkerValues = new Set(
+        [
+          ...(Array.isArray(fields.metrics) ? fields.metrics : []),
+          ...(Array.isArray(fields.status) ? fields.status : []),
+          ...(Array.isArray(fields.priority) ? fields.priority : []),
+          ...(Array.isArray(fields.importance) ? fields.importance : []),
+        ]
+          .map((item) => (typeof item === 'string' ? item.toLowerCase() : ''))
+          .filter(Boolean),
+      );
+      fields.markers = (Array.isArray(fields.markers) ? fields.markers : []).filter(
+        (item) => !nonMarkerValues.has(item.toLowerCase()),
+      );
     }
 
     return {
       ...analysis,
-      fields: {
-        ...fields,
-        markers: fallback,
-      },
+      fields,
     };
   }
 
@@ -949,7 +1094,10 @@ function createAiRouter(deps) {
           }));
 
           const parsedResponse = extractJsonObjectFromText(aiResponse.reply);
-          const analysis = ensureAnalysisMarkers(normalizeEntityAnalysisOutput(freshEntity.type, parsedResponse));
+          const analysis = postValidateEntityAnalysis(
+            freshEntity.type,
+            normalizeEntityAnalysisOutput(freshEntity.type, parsedResponse),
+          );
           const latestEntity = await Entity.findOne({ _id: entityIdValue, owner_id: ownerId });
           if (!latestEntity) return;
           const nextMetadata = buildEntityMetadataPatch(latestEntity.type, latestEntity.ai_metadata, analysis);
@@ -1051,7 +1199,10 @@ function createAiRouter(deps) {
         return res.status(404).json({ message: 'Entity not found' });
       }
 
-      const analysis = ensureAnalysisMarkers(normalizeEntityAnalysisOutput(entity.type, req.body?.suggestion));
+      const analysis = postValidateEntityAnalysis(
+        entity.type,
+        normalizeEntityAnalysisOutput(entity.type, req.body?.suggestion),
+      );
       const nextMetadata = buildEntityMetadataPatch(entity.type, entity.ai_metadata, analysis);
       entity.ai_metadata = nextMetadata;
       await entity.save();

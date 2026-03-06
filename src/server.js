@@ -4901,6 +4901,7 @@ const aiRouter = createAiRouter({
   Entity,
   resolveAgentScopeContext,
   buildEntityAnalyzerCurrentFields,
+  getEntityAnalyzerFields,
   extractJsonObjectFromText,
   normalizeEntityAnalysisOutput,
   buildEntityMetadataPatch,
