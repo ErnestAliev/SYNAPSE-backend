@@ -89,93 +89,96 @@ function createAiRouter(deps) {
     ignoredNoise: { maxItems: 20, itemMaxLength: 120 },
   });
   // JSON Schema for OpenAI Structured Outputs (Responses API text.format).
-  // Using a single universal schema across all entity types:
-  //   - fields contains ALL possible field keys (the prompt instructs LLM to fill
-  //     only the allowed ones and return [] for the rest).
-  //   - The server then filters to the entity-type-specific allowed set.
-  //   - confidence is omitted from structured output (dynamic keys incompatible
-  //     with strict mode); the server sets it to {} after normalization.
+  //
+  // IMPORTANT — Responses API uses a FLAT format, NOT the nested Chat-Completions
+  // format ({ json_schema: { name, strict, schema } }). Here name/strict/schema
+  // live directly inside the format object alongside `type`.
+  //
+  // Universal schema (all entity types share it):
+  //   - fields contains ALL possible field keys; the prompt instructs the LLM to
+  //     fill only the allowed ones and return [] for everything else.
+  //   - The server then filters to the entity-type-specific allow-list.
+  //   - confidence is omitted (dynamic keys are incompatible with strict mode);
+  //     the server always sets it to {} after normalization.
   const ENTITY_ANALYSIS_OUTPUT_SCHEMA = Object.freeze({
     type: 'json_schema',
-    json_schema: {
-      name: 'EntityAnalysis',
-      strict: true,
-      schema: {
-        type: 'object',
-        required: [
-          'status',
-          'description',
-          'changeType',
-          'changeReason',
-          'suggestedName',
-          'importanceSignal',
-          'importanceReason',
-          'clarifyingQuestions',
-          'ignoredNoise',
-          'fields',
-        ],
-        additionalProperties: false,
-        properties: {
-          status: { type: 'string', enum: ['ready', 'need_clarification'] },
-          description: { type: 'string' },
-          changeType: { type: 'string', enum: ['initial', 'addition', 'update'] },
-          changeReason: { type: 'string' },
-          suggestedName: { anyOf: [{ type: 'string' }, { type: 'null' }] },
-          importanceSignal: { type: 'string', enum: ['increase', 'decrease', 'neutral'] },
-          importanceReason: { type: 'string' },
-          clarifyingQuestions: { type: 'array', items: { type: 'string' } },
-          ignoredNoise: { type: 'array', items: { type: 'string' } },
-          fields: {
-            type: 'object',
-            required: [
-              'tags',
-              'markers',
-              'roles',
-              'skills',
-              'links',
-              'phones',
-              'status',
-              'priority',
-              'metrics',
-              'owners',
-              'participants',
-              'outcomes',
-              'resources',
-              'industry',
-              'departments',
-              'stage',
-              'date',
-              'location',
-              'risks',
-              'importance',
-              'tasks',
-              'ignoredNoise',
-            ],
-            additionalProperties: false,
-            properties: {
-              tags: { type: 'array', items: { type: 'string' } },
-              markers: { type: 'array', items: { type: 'string' } },
-              roles: { type: 'array', items: { type: 'string' } },
-              skills: { type: 'array', items: { type: 'string' } },
-              links: { type: 'array', items: { type: 'string' } },
-              phones: { type: 'array', items: { type: 'string' } },
-              status: { type: 'array', items: { type: 'string' } },
-              priority: { type: 'array', items: { type: 'string' } },
-              metrics: { type: 'array', items: { type: 'string' } },
-              owners: { type: 'array', items: { type: 'string' } },
-              participants: { type: 'array', items: { type: 'string' } },
-              outcomes: { type: 'array', items: { type: 'string' } },
-              resources: { type: 'array', items: { type: 'string' } },
-              industry: { type: 'array', items: { type: 'string' } },
-              departments: { type: 'array', items: { type: 'string' } },
-              stage: { type: 'array', items: { type: 'string' } },
-              date: { type: 'array', items: { type: 'string' } },
-              location: { type: 'array', items: { type: 'string' } },
-              risks: { type: 'array', items: { type: 'string' } },
-              importance: { type: 'array', items: { type: 'string' } },
-              tasks: { type: 'array', items: { type: 'string' } },
-              ignoredNoise: { type: 'array', items: { type: 'string' } },
-            },
+    name: 'EntityAnalysis',
+    strict: true,
+    schema: {
+      type: 'object',
+      required: [
+        'status',
+        'description',
+        'changeType',
+        'changeReason',
+        'suggestedName',
+        'importanceSignal',
+        'importanceReason',
+        'clarifyingQuestions',
+        'ignoredNoise',
+        'fields',
+      ],
+      additionalProperties: false,
+      properties: {
+        status: { type: 'string', enum: ['ready', 'need_clarification'] },
+        description: { type: 'string' },
+        changeType: { type: 'string', enum: ['initial', 'addition', 'update'] },
+        changeReason: { type: 'string' },
+        suggestedName: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+        importanceSignal: { type: 'string', enum: ['increase', 'decrease', 'neutral'] },
+        importanceReason: { type: 'string' },
+        clarifyingQuestions: { type: 'array', items: { type: 'string' } },
+        ignoredNoise: { type: 'array', items: { type: 'string' } },
+        fields: {
+          type: 'object',
+          required: [
+            'tags',
+            'markers',
+            'roles',
+            'skills',
+            'links',
+            'phones',
+            'status',
+            'priority',
+            'metrics',
+            'owners',
+            'participants',
+            'outcomes',
+            'resources',
+            'industry',
+            'departments',
+            'stage',
+            'date',
+            'location',
+            'risks',
+            'importance',
+            'tasks',
+            'ignoredNoise',
+          ],
+          additionalProperties: false,
+          properties: {
+            tags: { type: 'array', items: { type: 'string' } },
+            markers: { type: 'array', items: { type: 'string' } },
+            roles: { type: 'array', items: { type: 'string' } },
+            skills: { type: 'array', items: { type: 'string' } },
+            links: { type: 'array', items: { type: 'string' } },
+            phones: { type: 'array', items: { type: 'string' } },
+            status: { type: 'array', items: { type: 'string' } },
+            priority: { type: 'array', items: { type: 'string' } },
+            metrics: { type: 'array', items: { type: 'string' } },
+            owners: { type: 'array', items: { type: 'string' } },
+            participants: { type: 'array', items: { type: 'string' } },
+            outcomes: { type: 'array', items: { type: 'string' } },
+            resources: { type: 'array', items: { type: 'string' } },
+            industry: { type: 'array', items: { type: 'string' } },
+            departments: { type: 'array', items: { type: 'string' } },
+            stage: { type: 'array', items: { type: 'string' } },
+            date: { type: 'array', items: { type: 'string' } },
+            location: { type: 'array', items: { type: 'string' } },
+            risks: { type: 'array', items: { type: 'string' } },
+            importance: { type: 'array', items: { type: 'string' } },
+            tasks: { type: 'array', items: { type: 'string' } },
+            ignoredNoise: { type: 'array', items: { type: 'string' } },
           },
         },
       },
@@ -1069,18 +1072,14 @@ function createAiRouter(deps) {
             jsonSchema: ENTITY_ANALYSIS_OUTPUT_SCHEMA,
           }));
 
-          // Structured Outputs guarantees valid JSON — parse directly.
-          // If the model refuses (safety/policy), reply contains the refusal text
-          // which will throw here; the error is caught by the outer try-catch.
-          let parsedResponse;
-          try {
-            parsedResponse = JSON.parse(aiResponse.reply);
-          } catch {
-            throw Object.assign(
-              new Error(`AI structured output parse failed: ${String(aiResponse.reply).slice(0, 200)}`),
-              { status: 502 },
-            );
-          }
+          // Parse the response.
+          // extractJsonObjectFromText is used as the primary parser — it handles:
+          //   • Strict JSON (what Structured Outputs guarantees when schema is accepted)
+          //   • Markdown-fenced JSON (model fallback when schema format is not honored)
+          //   • Raw JSON substring (defensive extraction)
+          // If the model returned a refusal or free-form non-JSON text this will
+          // throw, which is caught by the background job's outer try-catch.
+          const parsedResponse = extractJsonObjectFromText(aiResponse.reply);
 
           // normalizeEntityAnalysisOutput handles length limits and type coercion.
           // filterToAllowedFields enforces the entity-type field whitelist.
