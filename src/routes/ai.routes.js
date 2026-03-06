@@ -88,6 +88,100 @@ function createAiRouter(deps) {
     importance: { maxItems: 1, itemMaxLength: 24 },
     ignoredNoise: { maxItems: 20, itemMaxLength: 120 },
   });
+  // JSON Schema for OpenAI Structured Outputs (Responses API text.format).
+  // Using a single universal schema across all entity types:
+  //   - fields contains ALL possible field keys (the prompt instructs LLM to fill
+  //     only the allowed ones and return [] for the rest).
+  //   - The server then filters to the entity-type-specific allowed set.
+  //   - confidence is omitted from structured output (dynamic keys incompatible
+  //     with strict mode); the server sets it to {} after normalization.
+  const ENTITY_ANALYSIS_OUTPUT_SCHEMA = Object.freeze({
+    type: 'json_schema',
+    json_schema: {
+      name: 'EntityAnalysis',
+      strict: true,
+      schema: {
+        type: 'object',
+        required: [
+          'status',
+          'description',
+          'changeType',
+          'changeReason',
+          'suggestedName',
+          'importanceSignal',
+          'importanceReason',
+          'clarifyingQuestions',
+          'ignoredNoise',
+          'fields',
+        ],
+        additionalProperties: false,
+        properties: {
+          status: { type: 'string', enum: ['ready', 'need_clarification'] },
+          description: { type: 'string' },
+          changeType: { type: 'string', enum: ['initial', 'addition', 'update'] },
+          changeReason: { type: 'string' },
+          suggestedName: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+          importanceSignal: { type: 'string', enum: ['increase', 'decrease', 'neutral'] },
+          importanceReason: { type: 'string' },
+          clarifyingQuestions: { type: 'array', items: { type: 'string' } },
+          ignoredNoise: { type: 'array', items: { type: 'string' } },
+          fields: {
+            type: 'object',
+            required: [
+              'tags',
+              'markers',
+              'roles',
+              'skills',
+              'links',
+              'phones',
+              'status',
+              'priority',
+              'metrics',
+              'owners',
+              'participants',
+              'outcomes',
+              'resources',
+              'industry',
+              'departments',
+              'stage',
+              'date',
+              'location',
+              'risks',
+              'importance',
+              'tasks',
+              'ignoredNoise',
+            ],
+            additionalProperties: false,
+            properties: {
+              tags: { type: 'array', items: { type: 'string' } },
+              markers: { type: 'array', items: { type: 'string' } },
+              roles: { type: 'array', items: { type: 'string' } },
+              skills: { type: 'array', items: { type: 'string' } },
+              links: { type: 'array', items: { type: 'string' } },
+              phones: { type: 'array', items: { type: 'string' } },
+              status: { type: 'array', items: { type: 'string' } },
+              priority: { type: 'array', items: { type: 'string' } },
+              metrics: { type: 'array', items: { type: 'string' } },
+              owners: { type: 'array', items: { type: 'string' } },
+              participants: { type: 'array', items: { type: 'string' } },
+              outcomes: { type: 'array', items: { type: 'string' } },
+              resources: { type: 'array', items: { type: 'string' } },
+              industry: { type: 'array', items: { type: 'string' } },
+              departments: { type: 'array', items: { type: 'string' } },
+              stage: { type: 'array', items: { type: 'string' } },
+              date: { type: 'array', items: { type: 'string' } },
+              location: { type: 'array', items: { type: 'string' } },
+              risks: { type: 'array', items: { type: 'string' } },
+              importance: { type: 'array', items: { type: 'string' } },
+              tasks: { type: 'array', items: { type: 'string' } },
+              ignoredNoise: { type: 'array', items: { type: 'string' } },
+            },
+          },
+        },
+      },
+    },
+  });
+
   const IMPORTANCE_VALUE_MAP = Object.freeze({
     низкая: 'Низкая',
     low: 'Низкая',
@@ -145,41 +239,15 @@ function createAiRouter(deps) {
     return normalized ? [normalized] : [];
   }
 
-  function mergeFieldValues(existingValues, incomingValues, config) {
-    return normalizeEntityFieldList(
-      [
-        ...(Array.isArray(existingValues) ? existingValues : []),
-        ...(Array.isArray(incomingValues) ? incomingValues : []),
-      ],
-      config,
-    );
-  }
-
-  function isMetricLikeMarker(value) {
-    if (!value || !/\d/.test(value)) return false;
-    const lower = value.toLowerCase();
-    if (/[₸$€£¥%]/.test(value)) return true;
-    if (/[=:]\s*\d/.test(value)) return true;
-    return /(kpi|roi|ltv|cac|mrr|arr|выручк|доход|прибыл|профит|итого|сценар|млн|тыс|млрд|тенге|kzt|usd|руб|\/мес|в месяц|мес|год|q[1-4]|квартал)/i.test(lower);
-  }
-
-  function isStatusLikeMarker(value) {
-    const lower = value.toLowerCase();
-    return /(в процессе|на согласовани|согласован|в работе|выполнен|завершен|отложен|отменен|ожидает|требует|запланирован)/i.test(lower);
-  }
-
-  function isPriorityLikeMarker(value) {
-    const lower = value.toLowerCase();
-    if (/^p[0-3]$/i.test(lower)) return true;
-    return /(приоритет|срочно|urgent|asap|немедленно)/i.test(lower);
-  }
-
-  function postValidateEntityAnalysis(entityType, analysis) {
-    if (!analysis || typeof analysis !== 'object') return analysis;
+  // filterToAllowedFields — keeps only entity-type-allowed fields from the LLM output.
+  // The LLM (via Structured Outputs) decides which field each value belongs to;
+  // the server only enforces the per-type field permission whitelist and
+  // applies length/count limits. No semantic remapping between fields.
+  function filterToAllowedFields(entityType, rawFields) {
     const allowedFieldsSource =
       typeof getEntityAnalyzerFields === 'function' ? getEntityAnalyzerFields(entityType) : [];
     const allowedFields = new Set(Array.isArray(allowedFieldsSource) ? allowedFieldsSource : []);
-    const sourceFields = toProfile(analysis.fields);
+    const sourceFields = toProfile(rawFields);
     const fields = {};
 
     for (const field of allowedFields) {
@@ -191,100 +259,7 @@ function createAiRouter(deps) {
       fields[field] = normalizeEntityFieldList(sourceFields[field], config);
     }
 
-    if (analysis.status !== 'ready') {
-      return {
-        ...analysis,
-        fields,
-      };
-    }
-
-    if (allowedFields.has('priority')) {
-      fields.priority = (Array.isArray(fields.priority) ? fields.priority : []).filter(
-        (item) => !normalizeImportanceValue(item),
-      );
-    }
-
-    if (allowedFields.has('markers')) {
-      const markers = normalizeEntityFieldList(
-        fields.markers,
-        ENTITY_ANALYSIS_FIELD_CONFIGS.markers,
-      );
-      const keptMarkers = [];
-      const movedMetrics = [];
-      const movedStatus = [];
-      const movedPriority = [];
-      const movedImportance = [];
-
-      for (const marker of markers) {
-        const importanceValue = normalizeImportanceValue(marker);
-        if (importanceValue && allowedFields.has('importance')) {
-          movedImportance.push(importanceValue);
-          continue;
-        }
-        if (isMetricLikeMarker(marker) && allowedFields.has('metrics')) {
-          movedMetrics.push(marker);
-          continue;
-        }
-        if (isStatusLikeMarker(marker) && allowedFields.has('status')) {
-          movedStatus.push(marker);
-          continue;
-        }
-        if (isPriorityLikeMarker(marker) && allowedFields.has('priority')) {
-          movedPriority.push(marker);
-          continue;
-        }
-        keptMarkers.push(marker);
-      }
-
-      fields.markers = keptMarkers;
-      if (allowedFields.has('metrics') && movedMetrics.length) {
-        fields.metrics = mergeFieldValues(
-          fields.metrics,
-          movedMetrics,
-          ENTITY_ANALYSIS_FIELD_CONFIGS.metrics,
-        );
-      }
-      if (allowedFields.has('status') && movedStatus.length) {
-        fields.status = mergeFieldValues(
-          fields.status,
-          movedStatus,
-          ENTITY_ANALYSIS_FIELD_CONFIGS.status,
-        );
-      }
-      if (allowedFields.has('priority') && movedPriority.length) {
-        fields.priority = mergeFieldValues(
-          fields.priority,
-          movedPriority,
-          ENTITY_ANALYSIS_FIELD_CONFIGS.priority,
-        );
-      }
-      if (allowedFields.has('importance') && movedImportance.length) {
-        fields.importance = mergeFieldValues(
-          fields.importance,
-          movedImportance,
-          ENTITY_ANALYSIS_FIELD_CONFIGS.importance,
-        );
-      }
-
-      const nonMarkerValues = new Set(
-        [
-          ...(Array.isArray(fields.metrics) ? fields.metrics : []),
-          ...(Array.isArray(fields.status) ? fields.status : []),
-          ...(Array.isArray(fields.priority) ? fields.priority : []),
-          ...(Array.isArray(fields.importance) ? fields.importance : []),
-        ]
-          .map((item) => (typeof item === 'string' ? item.toLowerCase() : ''))
-          .filter(Boolean),
-      );
-      fields.markers = (Array.isArray(fields.markers) ? fields.markers : []).filter(
-        (item) => !nonMarkerValues.has(item.toLowerCase()),
-      );
-    }
-
-    return {
-      ...analysis,
-      fields,
-    };
+    return fields;
   }
 
   async function setEntityAnalysisPending(entity, pending, errorMessage = '') {
@@ -1091,13 +1066,31 @@ function createAiRouter(deps) {
             temperature: 0.3,
             maxOutputTokens: 4000,
             timeoutMs: 130_000,
+            jsonSchema: ENTITY_ANALYSIS_OUTPUT_SCHEMA,
           }));
 
-          const parsedResponse = extractJsonObjectFromText(aiResponse.reply);
-          const analysis = postValidateEntityAnalysis(
-            freshEntity.type,
-            normalizeEntityAnalysisOutput(freshEntity.type, parsedResponse),
-          );
+          // Structured Outputs guarantees valid JSON — parse directly.
+          // If the model refuses (safety/policy), reply contains the refusal text
+          // which will throw here; the error is caught by the outer try-catch.
+          let parsedResponse;
+          try {
+            parsedResponse = JSON.parse(aiResponse.reply);
+          } catch {
+            throw Object.assign(
+              new Error(`AI structured output parse failed: ${String(aiResponse.reply).slice(0, 200)}`),
+              { status: 502 },
+            );
+          }
+
+          // normalizeEntityAnalysisOutput handles length limits and type coercion.
+          // filterToAllowedFields enforces the entity-type field whitelist.
+          // No semantic remapping — the LLM owns field placement.
+          const normalized = normalizeEntityAnalysisOutput(freshEntity.type, parsedResponse);
+          const analysis = {
+            ...normalized,
+            fields: filterToAllowedFields(freshEntity.type, parsedResponse.fields),
+            confidence: {},
+          };
           const latestEntity = await Entity.findOne({ _id: entityIdValue, owner_id: ownerId });
           if (!latestEntity) return;
           const nextMetadata = buildEntityMetadataPatch(latestEntity.type, latestEntity.ai_metadata, analysis);
@@ -1105,17 +1098,27 @@ function createAiRouter(deps) {
           nextMetadata.analysis_completed_at = new Date().toISOString();
           delete nextMetadata.analysis_error;
 
-          // Auto-assign a short AI-generated name for structured entity types.
-          // Only applied when: (1) entity has no name yet, or (2) its current name
-          // was previously auto-generated (starts with the type prefix).
-          const AUTO_NAME_LABELS = { goal: 'Цель', event: 'Событие', result: 'Результат', task: 'Задача' };
-          const autoTypeLabel = AUTO_NAME_LABELS[latestEntity.type];
-          const autoSuggestedName = toTrimmedString(analysis.suggestedName, 40);
-          if (autoTypeLabel && analysis.status === 'ready' && autoSuggestedName) {
-            const autoPrefix = `${autoTypeLabel} - `;
-            const currentName = toTrimmedString(latestEntity.name, 64);
-            if (!currentName || currentName.startsWith(autoPrefix)) {
-              latestEntity.name = `${autoPrefix}${autoSuggestedName}`.slice(0, 64);
+          // Auto-assign the LLM-generated name for goal / event / result / task types.
+          // LLM returns the complete ready-to-use name via suggestedName (no server prefix).
+          // Applied when:
+          //   (1) entity has no name yet, OR
+          //   (2) current name was previously set by LLM analysis (name_auto === true in ai_metadata).
+          // After assignment, name_auto is stored in metadata so the next analysis can
+          // recognise and safely overwrite an auto-generated name.
+          const AUTO_NAME_TYPES = new Set(['goal', 'event', 'result', 'task']);
+          const autoSuggestedName = toTrimmedString(analysis.suggestedName, 64);
+          if (AUTO_NAME_TYPES.has(latestEntity.type) && analysis.status === 'ready' && autoSuggestedName) {
+            const currentName = toTrimmedString(latestEntity.name, 120);
+            const wasAutoNamed = toProfile(latestEntity.ai_metadata).name_auto === true;
+            if (!currentName || wasAutoNamed) {
+              latestEntity.name = autoSuggestedName.slice(0, 64);
+              nextMetadata.name_auto = true;
+            }
+          } else {
+            // Clear the auto-name flag if this analysis didn't produce a name
+            // (e.g. need_clarification or type doesn't support suggestedName).
+            if (toProfile(latestEntity.ai_metadata).name_auto) {
+              nextMetadata.name_auto = false;
             }
           }
 

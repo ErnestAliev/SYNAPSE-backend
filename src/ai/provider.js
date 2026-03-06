@@ -54,6 +54,7 @@ function createAiProvider(deps) {
     userPrompt,
     temperature,
     maxOutputTokens,
+    jsonSchema,
   }) {
     const body = {
       model,
@@ -72,6 +73,10 @@ function createAiProvider(deps) {
 
     if (typeof temperature === 'number' && Number.isFinite(temperature)) {
       body.temperature = temperature;
+    }
+
+    if (jsonSchema && typeof jsonSchema === 'object') {
+      body.text = { format: jsonSchema };
     }
 
     return body;
@@ -136,6 +141,7 @@ function createAiProvider(deps) {
     allowEmptyResponse = false,
     emptyResponseFallback = '',
     timeoutMs,
+    jsonSchema,
   }) {
     if (!OPENAI_API_KEY) {
       throw Object.assign(new Error('OPENAI_API_KEY is not configured'), { status: 503 });
@@ -169,6 +175,7 @@ function createAiProvider(deps) {
         userPrompt,
         temperature: requestConfig.temperature,
         maxOutputTokens: requestConfig.max_output_tokens,
+        jsonSchema,
       });
       const firstAttempt = await callResponsesApi({
         requestBody: firstRequestBody,
@@ -193,6 +200,7 @@ function createAiProvider(deps) {
           userPrompt,
           temperature: null,
           maxOutputTokens: requestConfig.max_output_tokens,
+          jsonSchema,
         });
         const retryAttempt = await callResponsesApi({
           requestBody: retryRequestBody,
@@ -220,6 +228,7 @@ function createAiProvider(deps) {
           userPrompt,
           temperature: requestConfig.temperature,
           maxOutputTokens: requestConfig.max_output_tokens,
+          jsonSchema,
         });
         const retryAttempt = await callResponsesApi({
           requestBody: retryRequestBody,

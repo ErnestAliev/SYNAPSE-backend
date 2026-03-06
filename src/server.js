@@ -644,7 +644,12 @@ function normalizeImportanceArray(value) {
 }
 
 function normalizeImportanceSource(value) {
-  return toTrimmedString(value, 16).toLowerCase() === 'manual' ? 'manual' : 'auto';
+  const source = toTrimmedString(value, 16).toLowerCase();
+  // 'manual' = user explicitly set it; 'llm' = AI analysis explicitly set it.
+  // Both are treated as authoritative and bypass computeAutomaticImportance.
+  if (source === 'manual') return 'manual';
+  if (source === 'llm') return 'llm';
+  return 'auto';
 }
 
 function normalizeHistorySource(value) {
@@ -885,10 +890,12 @@ function applyImportancePolicy(rawMetadata, options = {}) {
     metadata.importance_source = 'auto';
   } else {
     const sourceMode = normalizeImportanceSource(metadata.importance_source);
-    const manualImportance = normalizeImportanceArray(metadata.importance);
-    if (sourceMode === 'manual' && manualImportance.length) {
-      metadata.importance = manualImportance;
-      metadata.importance_source = 'manual';
+    const explicitImportance = normalizeImportanceArray(metadata.importance);
+    // 'manual' and 'llm' are both authoritative explicit values — do not override
+    // with computeAutomaticImportance. Only 'auto' (no explicit source) is computed.
+    if ((sourceMode === 'manual' || sourceMode === 'llm') && explicitImportance.length) {
+      metadata.importance = explicitImportance;
+      metadata.importance_source = sourceMode;
     } else {
       metadata.importance = computeAutomaticImportance(
         {
@@ -1344,9 +1351,20 @@ function buildEntityMetadataPatch(entityType, existingMetadata, analysis) {
   const normalizedFields = normalizeEntityAnalysisFields(entityType, analysis.fields);
   for (const field of allowedFields) {
     if (field === 'importance' && manualImportanceWasSet) {
+      // Preserve the user's explicit manual importance — do not overwrite with LLM value.
       continue;
     }
     nextMetadata[field] = normalizedFields[field] || [];
+  }
+
+  // When LLM explicitly returned a non-empty importance value, mark it as 'llm' source
+  // so applyImportancePolicy treats it as authoritative and does NOT override it with
+  // computeAutomaticImportance. Only empty-importance responses fall through to auto-compute.
+  if (allowedFields.includes('importance') && !manualImportanceWasSet) {
+    const llmImportance = normalizedFields.importance;
+    if (Array.isArray(llmImportance) && llmImportance.length) {
+      nextMetadata.importance_source = 'llm';
+    }
   }
 
   nextMetadata.ai_last_analysis = {
