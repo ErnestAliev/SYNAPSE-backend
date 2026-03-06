@@ -1167,6 +1167,19 @@ function createAiRouter(deps) {
           console.error('Entity analyze background error:', error);
           const fallbackEntity = await Entity.findOne({ _id: entityIdValue, owner_id: ownerId });
           if (!fallbackEntity) return;
+          const fallbackMeta = toProfile(fallbackEntity.ai_metadata);
+          const existingChatHistory = Array.isArray(fallbackMeta.chat_history) ? fallbackMeta.chat_history : [];
+          const assistantErrorMessage = {
+            id: `msg_${Date.now()}_a_${Math.random().toString(36).slice(2, 6)}`,
+            role: 'assistant',
+            text: `Не удалось завершить анализ. ${safeMessage}`,
+            createdAt: new Date().toISOString(),
+            attachments: [],
+          };
+          fallbackEntity.ai_metadata = {
+            ...fallbackMeta,
+            chat_history: [...existingChatHistory, assistantErrorMessage].slice(-40),
+          };
           await setEntityAnalysisPending(fallbackEntity, false, safeMessage);
           broadcastEntityEvent(ownerId, 'entity.updated', {
             entity: fallbackEntity.toObject(),
