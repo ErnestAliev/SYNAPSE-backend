@@ -1190,6 +1190,7 @@ function normalizeEntityAnalysisOutput(entityType, rawResponse) {
     itemMaxLength: 120,
   });
   const confidence = normalizeConfidence(parsed.confidence);
+  const suggestedName = toTrimmedString(parsed.suggestedName, 40);
 
   return {
     status,
@@ -1202,6 +1203,7 @@ function normalizeEntityAnalysisOutput(entityType, rawResponse) {
     clarifyingQuestions,
     ignoredNoise,
     confidence,
+    suggestedName,
   };
 }
 

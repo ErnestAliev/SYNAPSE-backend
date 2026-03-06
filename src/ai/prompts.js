@@ -399,6 +399,9 @@ function createAiPrompts(deps) {
       'importanceReason: кратко, почему важность нужно повысить/понизить/оставить.',
       'Если данных мало, status=need_clarification и до 3 уточняющих вопросов.',
       'Если данных хватает, status=ready.',
+      ...(['goal', 'event', 'result', 'task'].includes(entityType) ? [
+        'suggestedName: краткое название 2-4 слова, отражающее суть. Только описательная часть — без названия типа сущности. Пример: "Письмо о снижении аренды".',
+      ] : []),
       'Верни СТРОГО JSON без markdown.',
       'Формат:',
       '{',
@@ -406,6 +409,9 @@ function createAiPrompts(deps) {
       '  "description": "string",',
       '  "changeType": "initial | addition | update",',
       '  "changeReason": "string",',
+      ...(['goal', 'event', 'result', 'task'].includes(entityType) ? [
+        '  "suggestedName": "2-4 слова, суть без типа",',
+      ] : []),
       '  "fields": { "tags": [], "roles": [], "markers": [], "...": [] },',
       '  "importanceSignal": "increase | decrease | neutral",',
       '  "importanceReason": "string",',

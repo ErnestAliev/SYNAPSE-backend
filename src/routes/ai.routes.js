@@ -957,6 +957,20 @@ function createAiRouter(deps) {
           nextMetadata.analysis_completed_at = new Date().toISOString();
           delete nextMetadata.analysis_error;
 
+          // Auto-assign a short AI-generated name for structured entity types.
+          // Only applied when: (1) entity has no name yet, or (2) its current name
+          // was previously auto-generated (starts with the type prefix).
+          const AUTO_NAME_LABELS = { goal: 'Цель', event: 'Событие', result: 'Результат', task: 'Задача' };
+          const autoTypeLabel = AUTO_NAME_LABELS[latestEntity.type];
+          const autoSuggestedName = toTrimmedString(analysis.suggestedName, 40);
+          if (autoTypeLabel && analysis.status === 'ready' && autoSuggestedName) {
+            const autoPrefix = `${autoTypeLabel} - `;
+            const currentName = toTrimmedString(latestEntity.name, 64);
+            if (!currentName || currentName.startsWith(autoPrefix)) {
+              latestEntity.name = `${autoPrefix}${autoSuggestedName}`.slice(0, 64);
+            }
+          }
+
           const analysisReplyText = aiPrompts.buildEntityAnalysisReplyText(analysis);
           if (analysisReplyText) {
             const existingChatHistory = Array.isArray(nextMetadata.chat_history) ? nextMetadata.chat_history : [];
