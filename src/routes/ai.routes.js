@@ -1125,11 +1125,19 @@ function createAiRouter(deps) {
           if (analysisReplyText) {
             const existingChatHistory = Array.isArray(nextMetadata.chat_history) ? nextMetadata.chat_history : [];
             // Build user entry: use message text, or fall back to attachment file names.
-            // This ensures remoteHistory.length > localHistory.length on the frontend
-            // so the watcher applies the update (local draft already has the user message).
+            // If the same user message is already the latest chat_history item
+            // (saved by frontend autosave before background job completion), skip
+            // appending it again to avoid user-message duplication in modal chat.
             const userMessageText = message
               || attachments.map((a) => toTrimmedString(a.name, 120) || 'Файл').join(', ');
-            const userChatMessage = userMessageText
+            const lastHistoryItem =
+              existingChatHistory.length > 0 ? toProfile(existingChatHistory[existingChatHistory.length - 1]) : null;
+            const lastHistoryRole = lastHistoryItem?.role === 'assistant' ? 'assistant' : 'user';
+            const lastHistoryText = toTrimmedString(lastHistoryItem?.text, 4000);
+            const shouldAppendUserMessage =
+              Boolean(userMessageText)
+              && !(lastHistoryRole === 'user' && lastHistoryText && lastHistoryText === userMessageText);
+            const userChatMessage = shouldAppendUserMessage
               ? {
                 id: `msg_${Date.now()}_u_${Math.random().toString(36).slice(2, 6)}`,
                 role: 'user',
