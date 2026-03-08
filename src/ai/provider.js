@@ -11,6 +11,8 @@ function createAiProvider(deps) {
   const DEFAULT_TEMPERATURE = 0.25;
   const DEFAULT_MAX_OUTPUT_TOKENS = 900;
   const MIN_MAX_OUTPUT_TOKENS = 16;
+  const ALLOWED_REASONING_EFFORT = new Set(['low', 'medium', 'high']);
+  const ALLOWED_TEXT_VERBOSITY = new Set(['low', 'medium', 'high']);
 
   function resolveTimeoutMs(modelName, timeoutMsOverride) {
     const override = Number(timeoutMsOverride);
@@ -55,6 +57,8 @@ function createAiProvider(deps) {
     temperature,
     maxOutputTokens,
     jsonSchema,
+    reasoningEffort,
+    verbosity,
   }) {
     const body = {
       model,
@@ -75,8 +79,22 @@ function createAiProvider(deps) {
       body.temperature = temperature;
     }
 
-    if (jsonSchema && typeof jsonSchema === 'object') {
-      body.text = { format: jsonSchema };
+    const normalizedVerbosity = toTrimmedString(verbosity, 12).toLowerCase();
+    const useVerbosity = ALLOWED_TEXT_VERBOSITY.has(normalizedVerbosity);
+    const useJsonSchema = jsonSchema && typeof jsonSchema === 'object';
+    if (useVerbosity || useJsonSchema) {
+      body.text = {};
+      if (useVerbosity) {
+        body.text.verbosity = normalizedVerbosity;
+      }
+      if (useJsonSchema) {
+        body.text.format = jsonSchema;
+      }
+    }
+
+    const normalizedReasoningEffort = toTrimmedString(reasoningEffort, 12).toLowerCase();
+    if (ALLOWED_REASONING_EFFORT.has(normalizedReasoningEffort)) {
+      body.reasoning = { effort: normalizedReasoningEffort };
     }
 
     return body;
@@ -112,6 +130,8 @@ function createAiProvider(deps) {
     maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
     timeoutMs,
     jsonSchema,
+    reasoningEffort,
+    verbosity,
   }) {
     const requestConfig = buildAgentRequestConfig({
       model,
@@ -126,6 +146,8 @@ function createAiProvider(deps) {
       temperature: requestConfig.temperature,
       maxOutputTokens: requestConfig.max_output_tokens,
       jsonSchema,
+      reasoningEffort,
+      verbosity,
     });
 
     return {
@@ -197,6 +219,8 @@ function createAiProvider(deps) {
     timeoutMs,
     jsonSchema,
     singleRequest = false,
+    reasoningEffort,
+    verbosity,
   }) {
     if (!OPENAI_API_KEY) {
       throw Object.assign(new Error('OPENAI_API_KEY is not configured'), { status: 503 });
@@ -210,6 +234,8 @@ function createAiProvider(deps) {
       maxOutputTokens,
       timeoutMs,
       jsonSchema,
+      reasoningEffort,
+      verbosity,
     });
     const requestConfig = requestPreview.requestConfig;
     const resolvedTimeoutMs = requestConfig.timeout_ms;
@@ -249,6 +275,8 @@ function createAiProvider(deps) {
           temperature: null,
           maxOutputTokens: requestConfig.max_output_tokens,
           jsonSchema,
+          reasoningEffort,
+          verbosity,
         });
         const retryAttempt = await callResponsesApi({
           requestBody: retryRequestBody,
@@ -281,6 +309,8 @@ function createAiProvider(deps) {
             temperature: requestConfig.temperature,
             maxOutputTokens: requestConfig.max_output_tokens,
             jsonSchema,
+            reasoningEffort,
+            verbosity,
           });
           const retryAttempt = await callResponsesApi({
             requestBody: retryRequestBody,
@@ -308,6 +338,8 @@ function createAiProvider(deps) {
           temperature: requestConfig.temperature,
           maxOutputTokens: requestConfig.max_output_tokens,
           jsonSchema,
+          reasoningEffort,
+          verbosity,
         });
         const retryAttempt = await callResponsesApi({
           requestBody: retryRequestBody,

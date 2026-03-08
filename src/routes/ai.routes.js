@@ -40,6 +40,13 @@ function createAiRouter(deps) {
   );
   const AGENT_CHAT_SCOPE_TYPES = new Set(['collection', 'project']);
   const AGENT_CHAT_ENTITY_TYPES = new Set(Array.isArray(entityTypes) ? entityTypes : []);
+  const AGENT_CHAT_MAIN_REQUEST_CONFIG = Object.freeze({
+    temperature: 0.25,
+    maxOutputTokens: 2200,
+    timeoutMs: 95_000,
+    reasoningEffort: 'low',
+    verbosity: 'low',
+  });
   const PROJECT_CHAT_FIELD_CONFIGS = Object.freeze({
     tags: { maxItems: 40, itemMaxLength: 64 },
     markers: { maxItems: 40, itemMaxLength: 64 },
@@ -760,17 +767,16 @@ function createAiRouter(deps) {
         toTrimmedString(OPENAI_DEEP_MODEL, 120) ||
         toTrimmedString(OPENAI_PROJECT_MODEL, 120) ||
         'gpt-5';
-      const mainReplyTemperature = 0.25;
-      const mainReplyMaxOutputTokens = 1200;
-      const mainReplyTimeoutMs = 95_000;
       const mainReplyRequestPreview = hasQuestion && typeof aiProvider.previewOpenAiAgentRequest === 'function'
         ? aiProvider.previewOpenAiAgentRequest({
           model: deepModel,
           systemPrompt,
           userPrompt,
-          temperature: mainReplyTemperature,
-          maxOutputTokens: mainReplyMaxOutputTokens,
-          timeoutMs: mainReplyTimeoutMs,
+          temperature: AGENT_CHAT_MAIN_REQUEST_CONFIG.temperature,
+          maxOutputTokens: AGENT_CHAT_MAIN_REQUEST_CONFIG.maxOutputTokens,
+          timeoutMs: AGENT_CHAT_MAIN_REQUEST_CONFIG.timeoutMs,
+          reasoningEffort: AGENT_CHAT_MAIN_REQUEST_CONFIG.reasoningEffort,
+          verbosity: AGENT_CHAT_MAIN_REQUEST_CONFIG.verbosity,
         })
         : null;
 
@@ -1069,9 +1075,6 @@ function createAiRouter(deps) {
         toTrimmedString(OPENAI_DEEP_MODEL, 120) ||
         toTrimmedString(OPENAI_PROJECT_MODEL, 120) ||
         'gpt-5';
-      const mainReplyTemperature = 0.25;
-      const mainReplyMaxOutputTokens = 1200;
-      const mainReplyTimeoutMs = 95_000;
 
       const systemPrompt = aiPrompts.buildAgentSystemPrompt(contextData, detectedRole);
       const userPrompt = aiPrompts.buildAgentUserPrompt({
@@ -1083,9 +1086,11 @@ function createAiRouter(deps) {
           model: deepModel,
           systemPrompt,
           userPrompt,
-          temperature: mainReplyTemperature,
-          maxOutputTokens: mainReplyMaxOutputTokens,
-          timeoutMs: mainReplyTimeoutMs,
+          temperature: AGENT_CHAT_MAIN_REQUEST_CONFIG.temperature,
+          maxOutputTokens: AGENT_CHAT_MAIN_REQUEST_CONFIG.maxOutputTokens,
+          timeoutMs: AGENT_CHAT_MAIN_REQUEST_CONFIG.timeoutMs,
+          reasoningEffort: AGENT_CHAT_MAIN_REQUEST_CONFIG.reasoningEffort,
+          verbosity: AGENT_CHAT_MAIN_REQUEST_CONFIG.verbosity,
         })
         : null;
 
@@ -1114,11 +1119,13 @@ function createAiRouter(deps) {
         userPrompt,
         includeRawPayload: includeDebug,
         model: deepModel,
-        temperature: mainReplyTemperature,
-        maxOutputTokens: mainReplyMaxOutputTokens,
+        temperature: AGENT_CHAT_MAIN_REQUEST_CONFIG.temperature,
+        maxOutputTokens: AGENT_CHAT_MAIN_REQUEST_CONFIG.maxOutputTokens,
         allowEmptyResponse: true,
         emptyResponseFallback: 'Пустой ответ от модели. Уточните запрос или повторите через несколько секунд.',
-        timeoutMs: mainReplyTimeoutMs,
+        timeoutMs: AGENT_CHAT_MAIN_REQUEST_CONFIG.timeoutMs,
+        reasoningEffort: AGENT_CHAT_MAIN_REQUEST_CONFIG.reasoningEffort,
+        verbosity: AGENT_CHAT_MAIN_REQUEST_CONFIG.verbosity,
         singleRequest: true,
       }));
       const usedModel = toTrimmedString(aiResponse?.debug?.response?.model, 120) || deepModel;
