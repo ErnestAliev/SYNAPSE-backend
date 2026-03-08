@@ -112,7 +112,10 @@ function createAiProvider(deps) {
 
     const chunks = [];
     const outputs = Array.isArray(payload?.output) ? payload.output : [];
-    for (const item of outputs) {
+    const messageOutputs = outputs.filter((item) => item?.type === 'message');
+    const sourceOutputs = messageOutputs.length ? messageOutputs : outputs;
+
+    for (const item of sourceOutputs) {
       const contentItems = Array.isArray(item?.content) ? item.content : [];
       for (const content of contentItems) {
         if (typeof content?.text === 'string' && content.text.trim()) {
@@ -122,15 +125,6 @@ function createAiProvider(deps) {
 
         if (typeof content?.refusal === 'string' && content.refusal.trim()) {
           chunks.push(content.refusal.trim());
-          continue;
-        }
-
-        if (Array.isArray(content?.summary)) {
-          for (const summaryItem of content.summary) {
-            if (typeof summaryItem?.text === 'string' && summaryItem.text.trim()) {
-              chunks.push(summaryItem.text.trim());
-            }
-          }
         }
       }
     }
@@ -176,6 +170,7 @@ function createAiProvider(deps) {
     let payload;
     let extractedReply = '';
     let emptyRetryCount = 0;
+    let truncatedRetryCount = 0;
     try {
       const firstRequestBody = buildResponsesRequestBody({
         model: requestConfig.model,
@@ -219,7 +214,38 @@ function createAiProvider(deps) {
       }
 
       const maxEmptyResponseRetries = 1;
+      const maxTruncatedResponseRetries = 1;
       while (response && response.ok) {
+        const responseStatus = toTrimmedString(payload?.status, 40).toLowerCase();
+        const incompleteReason = toTrimmedString(payload?.incomplete_details?.reason, 120).toLowerCase();
+        const wasTruncatedByMaxTokens =
+          responseStatus === 'incomplete' && incompleteReason === 'max_output_tokens';
+        if (wasTruncatedByMaxTokens && truncatedRetryCount < maxTruncatedResponseRetries) {
+          truncatedRetryCount += 1;
+          requestConfig.max_output_tokens = Math.min(
+            12_000,
+            Math.max(
+              requestConfig.max_output_tokens + 512,
+              Math.floor(requestConfig.max_output_tokens * 1.6),
+            ),
+          );
+          const retryRequestBody = buildResponsesRequestBody({
+            model: requestConfig.model,
+            systemPrompt,
+            userPrompt,
+            temperature: requestConfig.temperature,
+            maxOutputTokens: requestConfig.max_output_tokens,
+            jsonSchema,
+          });
+          const retryAttempt = await callResponsesApi({
+            requestBody: retryRequestBody,
+            signal: controller.signal,
+          });
+          response = retryAttempt.response;
+          payload = retryAttempt.payload;
+          continue;
+        }
+
         extractedReply = extractOpenAiResponseText(payload);
         const fallbackReply = toTrimmedString(emptyResponseFallback, 1200);
         if (extractedReply || allowEmptyResponse || fallbackReply) {
@@ -283,6 +309,7 @@ function createAiProvider(deps) {
           model: toTrimmedString(payload?.model, 120) || requestConfig.model,
           output_text_length: extractedReply.length,
           empty_retry_count: emptyRetryCount,
+          truncated_retry_count: truncatedRetryCount,
           used_empty_fallback: !extractedReply.length,
           completed_in_ms: Math.max(1, Date.now() - startedAt),
         },

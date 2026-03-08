@@ -1196,6 +1196,65 @@ function extractJsonObjectFromText(text) {
     }
   }
 
+  // Fallback: scan balanced JSON objects and return the first parsable one.
+  const candidates = [];
+  for (let start = 0; start < trimmed.length; start += 1) {
+    if (trimmed[start] !== '{') continue;
+
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+
+    for (let index = start; index < trimmed.length; index += 1) {
+      const ch = trimmed[index];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (ch === '\\') {
+          escaped = true;
+        } else if (ch === '"') {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+
+      if (ch === '{') {
+        depth += 1;
+        continue;
+      }
+
+      if (ch === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          const candidate = trimmed.slice(start, index + 1).trim();
+          if (candidate) candidates.push(candidate);
+          break;
+        }
+      }
+    }
+
+    if (candidates.length >= 24) break;
+  }
+
+  if (candidates.length) {
+    const byLengthDesc = candidates.sort((a, b) => b.length - a.length);
+    for (const candidate of byLengthDesc) {
+      try {
+        const parsed = JSON.parse(candidate);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return parsed;
+        }
+      } catch {
+        // continue
+      }
+    }
+  }
+
   throw Object.assign(new Error('AI response is not valid JSON'), { status: 502 });
 }
 
