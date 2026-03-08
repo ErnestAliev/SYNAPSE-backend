@@ -731,7 +731,8 @@ function createAiRouter(deps) {
       const latestUserMessage = [...history]
         .reverse()
         .find((message) => message.role === 'user' && message.text)?.text || '';
-      const message = requestedMessage || latestUserMessage || 'Контекстный запрос мониторинга.';
+      const message = requestedMessage || latestUserMessage || '';
+      const hasQuestion = Boolean(message);
 
       const scopeContext = await resolveAgentScopeContext(ownerId, {
         type: scope.type,
@@ -746,15 +747,17 @@ function createAiRouter(deps) {
       });
       const contextData = llmContextResult.contextData;
       const llmSerializationTrace = llmContextResult.trace;
-      const routerPrompt = aiPrompts.buildRouterPrompt(contextData, message);
       const routerSystemPrompt =
         'Ты Semantic Router Synapse12. Верни строго одно слово из списка: investor, hr, strategist, default.';
       const selectedRole = aiPrompts.normalizeDetectedRole(toTrimmedString(req.body?.detectedRole, 24) || 'default');
-      const systemPrompt = aiPrompts.buildAgentSystemPrompt(contextData, selectedRole);
-      const userPrompt = aiPrompts.buildAgentUserPrompt({
-        contextData,
-        message,
-      });
+      const routerPrompt = hasQuestion ? aiPrompts.buildRouterPrompt(contextData, message) : '';
+      const systemPrompt = hasQuestion ? aiPrompts.buildAgentSystemPrompt(contextData, selectedRole) : '';
+      const userPrompt = hasQuestion
+        ? aiPrompts.buildAgentUserPrompt({
+          contextData,
+          message,
+        })
+        : '';
 
       const routerModel = toTrimmedString(OPENAI_ROUTER_MODEL, 120) || 'gpt-5';
       const deepModel =
@@ -763,8 +766,8 @@ function createAiRouter(deps) {
         'gpt-5';
 
       const contextJson = JSON.stringify(contextData, null, 2);
-      const routerPromptText = `${routerSystemPrompt}\n${routerPrompt}`;
-      const llmPromptText = `${systemPrompt}\n${userPrompt}`;
+      const routerPromptText = hasQuestion ? `${routerSystemPrompt}\n${routerPrompt}` : '';
+      const llmPromptText = hasQuestion ? `${systemPrompt}\n${userPrompt}` : '';
       const entities = Array.isArray(contextData?.entities) ? contextData.entities : [];
       const connections = Array.isArray(contextData?.connections) ? contextData.connections : [];
       const sourceNodes = Array.isArray(llmSerializationTrace?.sourceNodes) ? llmSerializationTrace.sourceNodes : [];
@@ -783,6 +786,7 @@ function createAiRouter(deps) {
         },
         input: {
           message,
+          hasQuestion,
           history,
           attachments,
         },
@@ -792,40 +796,44 @@ function createAiRouter(deps) {
             system: routerSystemPrompt,
             user: routerPrompt,
           },
-          requestBody: {
-            model: routerModel,
-            input: [
-              {
-                role: 'system',
-                content: [{ type: 'input_text', text: routerSystemPrompt }],
-              },
-              {
-                role: 'user',
-                content: [{ type: 'input_text', text: routerPrompt }],
-              },
-            ],
-            max_output_tokens: 5,
-          },
+          requestBody: hasQuestion
+            ? {
+              model: routerModel,
+              input: [
+                {
+                  role: 'system',
+                  content: [{ type: 'input_text', text: routerSystemPrompt }],
+                },
+                {
+                  role: 'user',
+                  content: [{ type: 'input_text', text: routerPrompt }],
+                },
+              ],
+              max_output_tokens: 5,
+            }
+            : null,
         },
         prompts: {
           detectedRole: selectedRole,
           model: deepModel,
           systemPrompt,
           userPrompt,
-          requestBody: {
-            model: deepModel,
-            input: [
-              {
-                role: 'system',
-                content: [{ type: 'input_text', text: systemPrompt }],
-              },
-              {
-                role: 'user',
-                content: [{ type: 'input_text', text: userPrompt }],
-              },
-            ],
-            max_output_tokens: 4000,
-          },
+          requestBody: hasQuestion
+            ? {
+              model: deepModel,
+              input: [
+                {
+                  role: 'system',
+                  content: [{ type: 'input_text', text: systemPrompt }],
+                },
+                {
+                  role: 'user',
+                  content: [{ type: 'input_text', text: userPrompt }],
+                },
+              ],
+              max_output_tokens: 4000,
+            }
+            : null,
         },
         contextData,
         llmSerialization: llmSerializationTrace,
@@ -848,10 +856,10 @@ function createAiRouter(deps) {
           contextBytes: Buffer.byteLength(contextJson, 'utf8'),
           llmPayloadChars: Number(llmSerializationTrace?.payloadSize?.chars) || 0,
           llmPayloadBytes: Number(llmSerializationTrace?.payloadSize?.bytes) || 0,
-          routerPromptChars: routerPromptText.length,
-          routerPromptBytes: Buffer.byteLength(routerPromptText, 'utf8'),
-          llmPromptChars: llmPromptText.length,
-          llmPromptBytes: Buffer.byteLength(llmPromptText, 'utf8'),
+          routerPromptChars: hasQuestion ? routerPromptText.length : 0,
+          routerPromptBytes: hasQuestion ? Buffer.byteLength(routerPromptText, 'utf8') : 0,
+          llmPromptChars: hasQuestion ? llmPromptText.length : 0,
+          llmPromptBytes: hasQuestion ? Buffer.byteLength(llmPromptText, 'utf8') : 0,
           previewJsonBytes: Buffer.byteLength(previewJson, 'utf8'),
         },
         preview,
