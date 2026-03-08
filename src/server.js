@@ -302,7 +302,7 @@ function isSystemDefaultEntityName(entityType, rawName) {
   return labels.some((label) => {
     const prefix = escapeRegExp(toTrimmedString(label, 80));
     if (!prefix) return false;
-    const pattern = new RegExp(`^${prefix}\\s*(?:-\\s*)?\\d+$`, 'i');
+    const pattern = new RegExp(`^${prefix}(?:\\s*(?:-\\s*)?\\d+)?$`, 'i');
     return pattern.test(name);
   });
 }

@@ -210,7 +210,10 @@ function createAiRouter(deps) {
     critical: 'Высокая',
   });
   const ENTITY_NAME_MODE_VALUES = new Set(['system', 'manual', 'llm']);
-  const AUTO_NAME_TYPES = new Set(['goal', 'event', 'result', 'task']);
+  const AUTO_NAME_TYPES = new Set(
+    (Array.isArray(entityTypes) ? entityTypes : [])
+      .filter((type) => !['person', 'company'].includes(type)),
+  );
   const AUTO_NAME_MAX_LENGTH = 64;
   const SYSTEM_DEFAULT_NAME_LABELS = Object.freeze({
     project: ['Проект', 'Новый проект'],
@@ -244,9 +247,9 @@ function createAiRouter(deps) {
     return labels.some((label) => {
       const prefix = escapeRegExp(toTrimmedString(label, 80));
       if (!prefix) return false;
-      // Accept both canvas and list defaults:
-      // "Результат - 2" and "Новый результат 2".
-      const pattern = new RegExp(`^${prefix}\\s*(?:-\\s*)?\\d+$`, 'i');
+      // Accept both exact defaults and indexed defaults:
+      // "Результат", "Результат - 2", "Новый результат 2".
+      const pattern = new RegExp(`^${prefix}(?:\\s*(?:-\\s*)?\\d+)?$`, 'i');
       return pattern.test(name);
     });
   }
@@ -1358,8 +1361,10 @@ function createAiRouter(deps) {
           nextMetadata.analysis_completed_at = new Date().toISOString();
           delete nextMetadata.analysis_error;
 
-          // Auto-assign the LLM-generated name only when name_mode is "system".
-          // If name_mode is "manual" or "llm", never overwrite.
+          // Auto-assign the LLM-generated name when the current name is still a
+          // system/default template (even if legacy metadata has manual mode).
+          // Never overwrite names that were already assigned by LLM.
+          let renameStatusNote = '';
           const autoSuggestedName = toTrimmedString(analysis.suggestedName, AUTO_NAME_MAX_LENGTH);
           if (AUTO_NAME_TYPES.has(latestEntity.type) && analysis.status === 'ready' && autoSuggestedName) {
             const currentName = toTrimmedString(latestEntity.name, 120);
@@ -1369,13 +1374,20 @@ function createAiRouter(deps) {
               latestEntity.ai_metadata,
             );
             nextMetadata.name_mode = currentNameMode;
-            const canAutoRename = currentNameMode === 'system';
+            const hasDefaultSystemName = isSystemDefaultEntityName(latestEntity.type, currentName);
+            const canAutoRename =
+              currentNameMode === 'system' ||
+              (currentNameMode === 'manual' && hasDefaultSystemName);
             if (canAutoRename) {
               latestEntity.name = autoSuggestedName.slice(0, AUTO_NAME_MAX_LENGTH);
               nextMetadata.name_mode = 'llm';
               nextMetadata.name_auto = true;
+              renameStatusNote = `Название обновлено: ${latestEntity.name}.`;
             } else if (toProfile(latestEntity.ai_metadata).name_auto) {
               nextMetadata.name_auto = false;
+              renameStatusNote = `Предложенное название: ${autoSuggestedName}. Не применено: имя уже зафиксировано пользователем или LLM.`;
+            } else {
+              renameStatusNote = `Предложенное название: ${autoSuggestedName}. Не применено: имя уже зафиксировано пользователем или LLM.`;
             }
           } else {
             // Clear the auto-name flag if this analysis didn't produce a name
@@ -1385,7 +1397,10 @@ function createAiRouter(deps) {
             }
           }
 
-          const analysisReplyText = aiPrompts.buildEntityAnalysisReplyText(analysis);
+          const analysisReplyTextBase = aiPrompts.buildEntityAnalysisReplyText(analysis);
+          const analysisReplyText = renameStatusNote
+            ? `${analysisReplyTextBase}\n\n${renameStatusNote}`
+            : analysisReplyTextBase;
           if (analysisReplyText) {
             const existingChatHistory = Array.isArray(nextMetadata.chat_history) ? nextMetadata.chat_history : [];
             // Build user entry: use message text, or fall back to attachment file names.
