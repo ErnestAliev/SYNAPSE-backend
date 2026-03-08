@@ -663,6 +663,194 @@ function createAiRouter(deps) {
     return Array.isArray(doc.messages) ? doc.messages : [];
   }
 
+  function mapNormalizedMessagesToAgentHistory(messages) {
+    return (Array.isArray(messages) ? messages : [])
+      .map((message) => ({
+        role: message?.role === 'assistant' ? 'assistant' : 'user',
+        text: toTrimmedString(message?.text, 1800),
+      }))
+      .filter((message) => message.text);
+  }
+
+  function summarizePreviewEntities(entities) {
+    return (Array.isArray(entities) ? entities : []).map((item) => {
+      const entity = toProfile(item);
+      const metadata = toProfile(entity.ai_metadata);
+      const description = toTrimmedString(metadata.description, 2400);
+      const fieldCounts = {};
+      let fieldsItemsTotal = 0;
+
+      for (const [key, rawValue] of Object.entries(metadata)) {
+        if (!Array.isArray(rawValue)) continue;
+        const count = rawValue
+          .map((value) => toTrimmedString(value, 240))
+          .filter(Boolean)
+          .length;
+        if (!count) continue;
+        fieldCounts[key] = count;
+        fieldsItemsTotal += count;
+      }
+
+      return {
+        id: toTrimmedString(entity.id || entity._id, 120),
+        type: toTrimmedString(entity.type, 40),
+        name: toTrimmedString(entity.name, 160) || '(без названия)',
+        description,
+        descriptionLength: description.length,
+        fieldsItemsTotal,
+        fieldCounts,
+        updatedAt: toTrimmedString(entity.updatedAt, 80),
+      };
+    });
+  }
+
+  router.post('/agent-chat-preview', requireAuth, async (req, res, next) => {
+    try {
+      const ownerId = requireOwnerId(req);
+      const scope = normalizeScope(req.body?.scope);
+      const includeStoredHistory = req.body?.includeStoredHistory !== false;
+      const requestedHistory = aiAttachments.normalizeAgentHistory(req.body?.history);
+      const attachments = await aiAttachments.prepareAgentAttachments(req.body?.attachments);
+
+      let history = requestedHistory;
+      if (!history.length && includeStoredHistory) {
+        const scopeKeys = buildScopeKeyCandidates(scope);
+        const docs = await AgentChatHistory.find({
+          owner_id: ownerId,
+          scope_key: { $in: scopeKeys },
+        })
+          .select({ messages: 1, updatedAt: 1 })
+          .sort({ updatedAt: -1, _id: -1 })
+          .lean();
+        const mergedMessages = normalizeMessages(docs.flatMap((doc) => mapHistoryDocMessages(doc)));
+        history = mapNormalizedMessagesToAgentHistory(mergedMessages);
+      }
+
+      const requestedMessage = toTrimmedString(req.body?.message, 2400);
+      const latestUserMessage = [...history]
+        .reverse()
+        .find((message) => message.role === 'user' && message.text)?.text || '';
+      const message = requestedMessage || latestUserMessage || 'Контекстный запрос мониторинга.';
+
+      const scopeContext = await resolveAgentScopeContext(ownerId, {
+        type: scope.type,
+        entityType: scope.entityType,
+        projectId: scope.projectId,
+      });
+
+      const contextData = aiPrompts.buildAgentContextData({
+        scopeContext,
+        history,
+        attachments,
+      });
+      const routerPrompt = aiPrompts.buildRouterPrompt(contextData, message);
+      const routerSystemPrompt =
+        'Ты Semantic Router Synapse12. Верни строго одно слово из списка: investor, hr, strategist, default.';
+      const selectedRole = aiPrompts.normalizeDetectedRole(toTrimmedString(req.body?.detectedRole, 24) || 'default');
+      const systemPrompt = aiPrompts.buildAgentSystemPrompt(contextData, selectedRole);
+      const userPrompt = aiPrompts.buildAgentUserPrompt({
+        contextData,
+        message,
+      });
+
+      const routerModel = toTrimmedString(OPENAI_ROUTER_MODEL, 120) || 'gpt-5';
+      const deepModel =
+        toTrimmedString(OPENAI_DEEP_MODEL, 120) ||
+        toTrimmedString(OPENAI_PROJECT_MODEL, 120) ||
+        'gpt-5';
+
+      const contextJson = JSON.stringify(contextData, null, 2);
+      const routerPromptText = `${routerSystemPrompt}\n${routerPrompt}`;
+      const llmPromptText = `${systemPrompt}\n${userPrompt}`;
+      const entities = Array.isArray(contextData?.entities) ? contextData.entities : [];
+      const connections = Array.isArray(contextData?.connections) ? contextData.connections : [];
+
+      const preview = {
+        timestamp: new Date().toISOString(),
+        scope: {
+          type: scope.type,
+          entityType: scope.entityType,
+          projectId: scope.projectId,
+          scopeKey: scope.scopeKey,
+          totalEntities: scopeContext.totalEntities,
+          entitiesInContext: entities.length,
+          connectionsInContext: connections.length,
+        },
+        input: {
+          message,
+          history,
+          attachments,
+        },
+        semanticRouter: {
+          model: routerModel,
+          prompt: {
+            system: routerSystemPrompt,
+            user: routerPrompt,
+          },
+          requestBody: {
+            model: routerModel,
+            input: [
+              {
+                role: 'system',
+                content: [{ type: 'input_text', text: routerSystemPrompt }],
+              },
+              {
+                role: 'user',
+                content: [{ type: 'input_text', text: routerPrompt }],
+              },
+            ],
+            max_output_tokens: 5,
+          },
+        },
+        prompts: {
+          detectedRole: selectedRole,
+          model: deepModel,
+          systemPrompt,
+          userPrompt,
+          requestBody: {
+            model: deepModel,
+            input: [
+              {
+                role: 'system',
+                content: [{ type: 'input_text', text: systemPrompt }],
+              },
+              {
+                role: 'user',
+                content: [{ type: 'input_text', text: userPrompt }],
+              },
+            ],
+            max_output_tokens: 4000,
+          },
+        },
+        contextData,
+        entitiesSummary: summarizePreviewEntities(entities),
+      };
+
+      const previewJson = JSON.stringify(preview);
+
+      return res.status(200).json({
+        stats: {
+          totalEntitiesInProject: scopeContext.totalEntities,
+          entitiesInContext: entities.length,
+          connectionsInContext: connections.length,
+          historyMessages: history.length,
+          historyTextChars: history.reduce((sum, item) => sum + String(item.text || '').length, 0),
+          attachmentsCount: attachments.length,
+          contextChars: contextJson.length,
+          contextBytes: Buffer.byteLength(contextJson, 'utf8'),
+          routerPromptChars: routerPromptText.length,
+          routerPromptBytes: Buffer.byteLength(routerPromptText, 'utf8'),
+          llmPromptChars: llmPromptText.length,
+          llmPromptBytes: Buffer.byteLength(llmPromptText, 'utf8'),
+          previewJsonBytes: Buffer.byteLength(previewJson, 'utf8'),
+        },
+        preview,
+      });
+    } catch (error) {
+      return next(error);
+    }
+  });
+
   router.get('/chat-history', requireAuth, async (req, res, next) => {
     try {
       const ownerId = requireOwnerId(req);
