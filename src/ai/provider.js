@@ -97,6 +97,14 @@ function createAiProvider(deps) {
     return { response, payload };
   }
 
+  function toProviderStatus(status) {
+    const numeric = Number(status);
+    if (Number.isFinite(numeric) && numeric >= 400 && numeric < 600) {
+      return Math.floor(numeric);
+    }
+    return 502;
+  }
+
   function extractOpenAiResponseText(payload) {
     if (payload && typeof payload.output_text === 'string' && payload.output_text.trim()) {
       return payload.output_text.trim();
@@ -249,7 +257,7 @@ function createAiProvider(deps) {
 
     if (!response.ok) {
       const providerMessage = toTrimmedString(payload?.error?.message, 300) || 'AI provider error';
-      throw Object.assign(new Error(providerMessage), { status: 502 });
+      throw Object.assign(new Error(providerMessage), { status: toProviderStatus(response.status) });
     }
 
     if (!extractedReply) {
@@ -374,7 +382,7 @@ function createAiProvider(deps) {
 
       if (!response.ok) {
         const nextProviderMessage = toTrimmedString(body?.error?.message, 300) || 'AI provider error';
-        throw Object.assign(new Error(nextProviderMessage), { status: 502 });
+        throw Object.assign(new Error(nextProviderMessage), { status: toProviderStatus(response.status) });
       }
 
       const text = toTrimmedString(body?.text, 20_000);
