@@ -408,6 +408,7 @@ function createAiRouter(deps) {
   async function runProjectChatAutoEnrichment({
     ownerId,
     scopeContext,
+    sourceEntities,
     contextData,
     message,
     history,
@@ -427,7 +428,7 @@ function createAiRouter(deps) {
     }
 
     const aggregatedEntityFields = {};
-    const scopeEntities = Array.isArray(contextData?.entities) ? contextData.entities : [];
+    const scopeEntities = Array.isArray(sourceEntities) ? sourceEntities : [];
     for (const fieldKey of PROJECT_CHAT_FIELD_KEYS) {
       const config = PROJECT_CHAT_FIELD_CONFIGS[fieldKey];
       const dedup = new Set();
@@ -676,7 +677,7 @@ function createAiRouter(deps) {
     return (Array.isArray(entities) ? entities : []).map((item) => {
       const entity = toProfile(item);
       const metadata = toProfile(entity.ai_metadata);
-      const description = toTrimmedString(metadata.description, 2400);
+      const description = toTrimmedString(metadata.description || entity.description, 2400);
       const fieldCounts = {};
       let fieldsItemsTotal = 0;
 
@@ -738,11 +739,13 @@ function createAiRouter(deps) {
         projectId: scope.projectId,
       });
 
-      const contextData = aiPrompts.buildAgentContextData({
+      const llmContextResult = aiPrompts.buildAgentLlmContextData({
         scopeContext,
         history,
         attachments,
       });
+      const contextData = llmContextResult.contextData;
+      const llmSerializationTrace = llmContextResult.trace;
       const routerPrompt = aiPrompts.buildRouterPrompt(contextData, message);
       const routerSystemPrompt =
         'Ты Semantic Router Synapse12. Верни строго одно слово из списка: investor, hr, strategist, default.';
@@ -764,6 +767,8 @@ function createAiRouter(deps) {
       const llmPromptText = `${systemPrompt}\n${userPrompt}`;
       const entities = Array.isArray(contextData?.entities) ? contextData.entities : [];
       const connections = Array.isArray(contextData?.connections) ? contextData.connections : [];
+      const sourceNodes = Array.isArray(llmSerializationTrace?.sourceNodes) ? llmSerializationTrace.sourceNodes : [];
+      const sourceEdges = Array.isArray(llmSerializationTrace?.sourceEdges) ? llmSerializationTrace.sourceEdges : [];
 
       const preview = {
         timestamp: new Date().toISOString(),
@@ -823,6 +828,7 @@ function createAiRouter(deps) {
           },
         },
         contextData,
+        llmSerialization: llmSerializationTrace,
         entitiesSummary: summarizePreviewEntities(entities),
       };
 
@@ -833,11 +839,15 @@ function createAiRouter(deps) {
           totalEntitiesInProject: scopeContext.totalEntities,
           entitiesInContext: entities.length,
           connectionsInContext: connections.length,
+          sourceNodesInScope: sourceNodes.length,
+          sourceEdgesInScope: sourceEdges.length,
           historyMessages: history.length,
           historyTextChars: history.reduce((sum, item) => sum + String(item.text || '').length, 0),
           attachmentsCount: attachments.length,
           contextChars: contextJson.length,
           contextBytes: Buffer.byteLength(contextJson, 'utf8'),
+          llmPayloadChars: Number(llmSerializationTrace?.payloadSize?.chars) || 0,
+          llmPayloadBytes: Number(llmSerializationTrace?.payloadSize?.bytes) || 0,
           routerPromptChars: routerPromptText.length,
           routerPromptBytes: Buffer.byteLength(routerPromptText, 'utf8'),
           llmPromptChars: llmPromptText.length,
@@ -1062,11 +1072,13 @@ function createAiRouter(deps) {
       const history = aiAttachments.normalizeAgentHistory(req.body?.history);
       const attachments = await aiAttachments.prepareAgentAttachments(req.body?.attachments);
       const scopeContext = await resolveAgentScopeContext(ownerId, req.body?.scope);
-      const contextData = aiPrompts.buildAgentContextData({
+      const llmContextResult = aiPrompts.buildAgentLlmContextData({
         scopeContext,
         history,
         attachments,
       });
+      const contextData = llmContextResult.contextData;
+      const llmSerializationTrace = llmContextResult.trace;
 
       const routerPrompt = aiPrompts.buildRouterPrompt(contextData, message);
       const routerSystemPrompt =
@@ -1089,6 +1101,7 @@ function createAiRouter(deps) {
         messageLength: message.length,
         historyLength: history.length,
         attachmentsCount: attachments.length,
+        llmPayload: llmSerializationTrace?.payloadSize || { chars: 0, bytes: 0 },
         includeDebug,
       };
       const routerResponse = await withAiTrace(routerTraceMeta, () => aiProvider.requestOpenAiAgentReply({
@@ -1130,6 +1143,7 @@ function createAiRouter(deps) {
         messageLength: message.length,
         historyLength: history.length,
         attachmentsCount: attachments.length,
+        llmPayload: llmSerializationTrace?.payloadSize || { chars: 0, bytes: 0 },
         includeDebug,
         detectedRole,
       };
@@ -1153,6 +1167,7 @@ function createAiRouter(deps) {
         void runProjectChatAutoEnrichment({
           ownerId,
           scopeContext,
+          sourceEntities: Array.isArray(scopeContext.sourceEntities) ? scopeContext.sourceEntities : scopeContext.entities,
           contextData,
           message,
           history,
@@ -1179,6 +1194,7 @@ function createAiRouter(deps) {
             history,
             attachments,
           },
+          llmSerialization: llmSerializationTrace,
           semanticRouter: {
             model: usedRouterModel,
             prompt: {

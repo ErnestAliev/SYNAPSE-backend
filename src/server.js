@@ -1614,6 +1614,9 @@ async function resolveAgentScopeContext(ownerId, rawScope) {
       projectName: '',
       totalEntities,
       entities,
+      sourceEntities: entities,
+      sourceNodes: [],
+      sourceEdges: [],
       connections: [],
     };
   }
@@ -1680,6 +1683,9 @@ async function resolveAgentScopeContext(ownerId, rawScope) {
     }
 
     const currentProjectId = String(project._id);
+    const sourceEntities = limitedEntityIds
+      .map((id) => entityById.get(id))
+      .filter(Boolean);
     const orderedEntities = limitedEntityIds
       .map((id) => entityById.get(id))
       .filter(Boolean)
@@ -1702,8 +1708,11 @@ async function resolveAgentScopeContext(ownerId, rawScope) {
       scopeName: toTrimmedString(project.name, 140) || 'Без названия',
       projectId: String(project._id),
       projectName: toTrimmedString(project.name, 140) || 'Без названия',
-      totalEntities: orderedEntities.length,
+      totalEntities: sourceEntities.length,
       entities: orderedEntities,
+      sourceEntities,
+      sourceNodes: canvasData.nodes,
+      sourceEdges: canvasData.edges,
       connections,
     };
   }

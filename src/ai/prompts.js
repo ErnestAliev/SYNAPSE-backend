@@ -129,8 +129,16 @@ function collectEntitySemanticSignals(entity) {
   const directRoles = Array.isArray(entity.roles) ? entity.roles : [];
   const metaTags = Array.isArray(metadata.tags) ? metadata.tags : [];
   const metaRoles = Array.isArray(metadata.roles) ? metadata.roles : [];
+  const directName = typeof entity.name === 'string' ? entity.name : '';
+  const directType = typeof entity.type === 'string' ? entity.type : '';
+  const directDescription =
+    typeof entity.description === 'string'
+      ? entity.description
+      : typeof metadata.description === 'string'
+        ? metadata.description
+        : '';
 
-  return [...directTags, ...directRoles, ...metaTags, ...metaRoles]
+  return [...directTags, ...directRoles, ...metaTags, ...metaRoles, directName, directType, directDescription]
     .map((item) => (typeof item === 'string' ? item.trim() : ''))
     .filter(Boolean);
 }
@@ -185,9 +193,188 @@ function createAiPrompts(deps) {
     };
   }
 
+  function serializeEntityForLlm(entity) {
+    const row = toProfile(entity);
+    const metadata = toProfile(row.ai_metadata);
+    const id = toTrimmedString(row.id || row._id, 120);
+    if (!id) return null;
+
+    return {
+      id,
+      type: toTrimmedString(row.type, 24) || 'shape',
+      name: toTrimmedString(row.name, 160) || '(без названия)',
+      description: toTrimmedString(metadata.description || row.description, 2400),
+    };
+  }
+
+  function serializeSourceNode(node) {
+    const row = toProfile(node);
+    const id = toTrimmedString(row.id, 120);
+    const entityId = toTrimmedString(row.entityId, 120);
+    if (!id || !entityId) return null;
+    return {
+      id,
+      entityId,
+    };
+  }
+
+  function serializeSourceEdge(edge) {
+    const row = toProfile(edge);
+    const id = toTrimmedString(row.id, 120);
+    const source = toTrimmedString(row.source, 120);
+    const target = toTrimmedString(row.target, 120);
+    if (!source || !target) return null;
+    return {
+      ...(id ? { id } : {}),
+      source,
+      target,
+      type: toTrimmedString(row.type, 40),
+      label: toTrimmedString(row.label, 120),
+      arrowLeft: row.arrowLeft === true,
+      arrowRight: row.arrowRight === true,
+    };
+  }
+
+  function resolveEdgeTypeForLlm(edge) {
+    const directType = toTrimmedString(edge.type, 40).toLowerCase();
+    if (directType) return directType;
+    if (edge.arrowLeft && edge.arrowRight) return 'bidirectional';
+    if (edge.arrowRight) return 'directed';
+    if (edge.arrowLeft) return 'directed_reverse';
+    return 'undirected';
+  }
+
+  function buildAgentLlmContextData({ scopeContext, history, attachments }) {
+    const scope = toProfile(scopeContext);
+    const rawEntities = Array.isArray(scope.sourceEntities)
+      ? scope.sourceEntities
+      : Array.isArray(scope.entities)
+        ? scope.entities
+        : [];
+    const sourceNodes = (Array.isArray(scope.sourceNodes) ? scope.sourceNodes : [])
+      .map((node) => serializeSourceNode(node))
+      .filter(Boolean);
+    const sourceEdges = (Array.isArray(scope.sourceEdges) ? scope.sourceEdges : [])
+      .map((edge) => serializeSourceEdge(edge))
+      .filter(Boolean);
+
+    const llmNodes = [];
+    const llmNodeIdSet = new Set();
+    for (const rawEntity of rawEntities) {
+      const serialized = serializeEntityForLlm(rawEntity);
+      if (!serialized) continue;
+      if (llmNodeIdSet.has(serialized.id)) continue;
+      llmNodeIdSet.add(serialized.id);
+      llmNodes.push(serialized);
+    }
+
+    const nodeEntityByNodeId = new Map();
+    for (const node of sourceNodes) {
+      nodeEntityByNodeId.set(node.id, node.entityId);
+    }
+
+    const droppedEdges = [];
+    const llmEdges = [];
+    const llmEdgeDedup = new Set();
+    for (const edge of sourceEdges) {
+      const sourceNodeId = toTrimmedString(edge.source, 120);
+      const targetNodeId = toTrimmedString(edge.target, 120);
+      if (!sourceNodeId || !targetNodeId) {
+        droppedEdges.push({
+          edge,
+          reason: 'invalid_edge_endpoint',
+        });
+        continue;
+      }
+
+      const from =
+        nodeEntityByNodeId.get(sourceNodeId) || (llmNodeIdSet.has(sourceNodeId) ? sourceNodeId : '');
+      const to = nodeEntityByNodeId.get(targetNodeId) || (llmNodeIdSet.has(targetNodeId) ? targetNodeId : '');
+
+      if (!from || !to) {
+        droppedEdges.push({
+          edge,
+          reason: !from && !to ? 'missing_source_and_target_node_mapping' : !from ? 'missing_source_node_mapping' : 'missing_target_node_mapping',
+        });
+        continue;
+      }
+
+      if (!llmNodeIdSet.has(from) || !llmNodeIdSet.has(to)) {
+        droppedEdges.push({
+          edge,
+          reason: !llmNodeIdSet.has(from) && !llmNodeIdSet.has(to)
+            ? 'source_and_target_entity_filtered_out'
+            : !llmNodeIdSet.has(from)
+              ? 'source_entity_filtered_out'
+              : 'target_entity_filtered_out',
+          from,
+          to,
+        });
+        continue;
+      }
+
+      const relation = {
+        from,
+        to,
+        type: resolveEdgeTypeForLlm(edge),
+        label: toTrimmedString(edge.label, 120),
+      };
+      const dedupKey = `${relation.from}|${relation.to}|${relation.type}|${relation.label}`;
+      if (llmEdgeDedup.has(dedupKey)) {
+        droppedEdges.push({
+          edge,
+          reason: 'duplicate_relation',
+          from,
+          to,
+        });
+        continue;
+      }
+      llmEdgeDedup.add(dedupKey);
+      llmEdges.push(relation);
+    }
+
+    const contextData = {
+      scope: {
+        type: scope.scopeType,
+        name: scope.scopeName,
+        entityType: scope.entityType,
+        projectId: scope.projectId,
+        projectName: scope.projectName,
+        totalEntities: llmNodes.length,
+        contextLimit: AI_CONTEXT_ENTITY_LIMIT,
+      },
+      entities: llmNodes,
+      connections: llmEdges,
+      attachments,
+      history,
+    };
+
+    const contextJson = JSON.stringify(contextData);
+    const trace = {
+      sourceNodes,
+      sourceEdges,
+      llmNodes,
+      llmEdges,
+      droppedEdges,
+      payloadSize: {
+        chars: contextJson.length,
+        bytes: Buffer.byteLength(contextJson, 'utf8'),
+      },
+      preview: {
+        entities: llmNodes.slice(0, 8),
+        relations: llmEdges.slice(0, 12),
+      },
+    };
+
+    return {
+      contextData,
+      trace,
+    };
+  }
+
   function buildRouterPrompt(contextData, userMessage) {
     const entities = Array.isArray(contextData?.entities) ? contextData.entities : [];
-    const tagsAndRoles = entities
+    const semanticSignals = entities
       .map((entity) => collectEntitySemanticSignals(entity).join(' '))
       .filter(Boolean)
       .join(' ')
@@ -196,7 +383,7 @@ function createAiPrompts(deps) {
     const query = toTrimmedString(userMessage, 2400);
 
     return [
-      `Проанализируй запрос "${query}" и теги: "${tagsAndRoles}".`,
+      `Проанализируй запрос "${query}" и сигналы контекста: "${semanticSignals}".`,
       'Определи, какой эксперт нужен. Верни СТРОГО ОДНО СЛОВО из списка: investor, hr, strategist, default.',
       'Не пиши больше ничего.',
     ].join('\n');
@@ -237,11 +424,11 @@ function createAiPrompts(deps) {
     const payloadContext =
       contextData && typeof contextData === 'object'
         ? contextData
-        : buildAgentContextData({
+        : buildAgentLlmContextData({
             scopeContext,
             history,
             attachments,
-          });
+          }).contextData;
 
     return [
       'Контекст Synapse12 (JSON):',
@@ -312,16 +499,11 @@ function createAiPrompts(deps) {
       .slice(0, 140)
       .map((entity) => {
         const row = toProfile(entity);
-        const metadata = toProfile(row.ai_metadata);
         return {
           id: toTrimmedString(row.id || row._id, 80),
           type: toTrimmedString(row.type, 24),
           name: toTrimmedString(row.name, 120),
-          tags: Array.isArray(metadata.tags) ? metadata.tags.slice(0, 8) : [],
-          markers: Array.isArray(metadata.markers) ? metadata.markers.slice(0, 6) : [],
-          roles: Array.isArray(metadata.roles) ? metadata.roles.slice(0, 6) : [],
-          risks: Array.isArray(metadata.risks) ? metadata.risks.slice(0, 6) : [],
-          tasks: Array.isArray(metadata.tasks) ? metadata.tasks.slice(0, 8) : [],
+          description: toTrimmedString(row.description || toProfile(row.ai_metadata).description, 2400),
         };
       });
 
@@ -594,6 +776,7 @@ function createAiPrompts(deps) {
 
   return {
     buildAgentContextData,
+    buildAgentLlmContextData,
     buildRouterPrompt,
     normalizeDetectedRole,
     buildAgentSystemPrompt,
