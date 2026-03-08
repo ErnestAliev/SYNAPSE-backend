@@ -121,6 +121,22 @@ function cleanContextData(entities) {
   return cleanContextValue(entities, []);
 }
 
+function normalizeEntityId(value, maxLength = 120) {
+  if (typeof value === 'string') {
+    return value.trim().slice(0, maxLength);
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(value).slice(0, maxLength);
+  }
+  if (value && typeof value === 'object' && typeof value.toString === 'function') {
+    const asString = value.toString();
+    if (typeof asString === 'string' && asString !== '[object Object]') {
+      return asString.trim().slice(0, maxLength);
+    }
+  }
+  return '';
+}
+
 function collectEntitySemanticSignals(entity) {
   if (!entity || typeof entity !== 'object') return [];
 
@@ -196,7 +212,7 @@ function createAiPrompts(deps) {
   function serializeEntityForLlm(entity) {
     const row = toProfile(entity);
     const metadata = toProfile(row.ai_metadata);
-    const id = toTrimmedString(row.id || row._id, 120);
+    const id = normalizeEntityId(row.id || row._id, 120);
     if (!id) return null;
 
     return {
