@@ -11,6 +11,7 @@ function createTranscribeRouter(deps) {
 
   const router = express.Router();
   const maxAudioBytes = Math.max(512_000, Number(OPENAI_TRANSCRIBE_MAX_AUDIO_BYTES) || 25 * 1024 * 1024);
+  const minAudioBytes = 1400;
   const parserLimitMb = Math.max(1, Math.ceil(maxAudioBytes / (1024 * 1024)));
 
   function sanitizeFileName(inputFileName, mimeType) {
@@ -45,6 +46,9 @@ function createTranscribeRouter(deps) {
         const audioBuffer = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
         if (!audioBuffer.length) {
           return res.status(400).json({ message: 'Audio payload is required' });
+        }
+        if (audioBuffer.length < minAudioBytes) {
+          return res.status(400).json({ message: 'Audio is too short. Please record a bit longer.' });
         }
         if (audioBuffer.length > maxAudioBytes) {
           return res.status(413).json({ message: `Audio file is too large. Max ${maxAudioBytes} bytes.` });
