@@ -232,6 +232,19 @@ const IMPORTANCE_SCORE_BY_LABEL = Object.freeze({
   Высокая: 2,
 });
 const IMPORTANCE_LABEL_BY_SCORE = ['Низкая', 'Средняя', 'Высокая'];
+const ENTITY_NAME_MODE_VALUES = new Set(['system', 'manual', 'llm']);
+const ENTITY_SYSTEM_NAME_LABELS = Object.freeze({
+  project: ['Проект', 'Новый проект'],
+  connection: ['Подключение', 'Новое подключение'],
+  person: ['Персона', 'Новая персона'],
+  company: ['Компания', 'Новая компания'],
+  event: ['Событие', 'Новое событие'],
+  resource: ['Ресурс', 'Новый ресурс'],
+  goal: ['Цель', 'Новая цель'],
+  result: ['Результат', 'Новый результат'],
+  task: ['Задача', 'Новая задача'],
+  shape: ['Элемент', 'Новый элемент'],
+});
 const IMPORTANCE_AUTO_WEIGHTS = Object.freeze({
   resources: 2.4,
   skills: 2.2,
@@ -269,6 +282,30 @@ const ENTITY_VECTOR_WEIGHTS = Object.freeze({
 const whatsappSessionsByOwner = new Map();
 const entityEventStreamsByOwner = new Map();
 let entityEventStreamSeq = 0;
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalizeEntityNameMode(value) {
+  const mode = toTrimmedString(value, 16).toLowerCase();
+  return ENTITY_NAME_MODE_VALUES.has(mode) ? mode : '';
+}
+
+function isSystemDefaultEntityName(entityType, rawName) {
+  const name = toTrimmedString(rawName, 120);
+  if (!name) return false;
+
+  const labels = ENTITY_SYSTEM_NAME_LABELS[entityType];
+  if (!Array.isArray(labels) || !labels.length) return false;
+
+  return labels.some((label) => {
+    const prefix = escapeRegExp(toTrimmedString(label, 80));
+    if (!prefix) return false;
+    const pattern = new RegExp(`^${prefix}\\s*(?:-\\s*)?\\d+$`, 'i');
+    return pattern.test(name);
+  });
+}
 
 function sanitizeSsePayload(payload) {
   try {
@@ -1051,13 +1088,19 @@ function normalizeIncomingEntityPayload(rawPayload, options = {}) {
     }
     : {};
 
+  if (Object.prototype.hasOwnProperty.call(metadata, 'name_mode')) {
+    const normalizedNameMode = normalizeEntityNameMode(metadata.name_mode);
+    if (normalizedNameMode) metadata.name_mode = normalizedNameMode;
+    else delete metadata.name_mode;
+  }
+
   if (normalizeHistorySource(options.source) === 'manual' && Object.prototype.hasOwnProperty.call(payload, 'name')) {
     const previousName = toTrimmedString(options.existingName, 120);
     const nextName = toTrimmedString(payload.name, 120);
-    const wasAutoNamed = toProfile(options.existingMetadata).name_auto === true;
-    if (wasAutoNamed && previousName && nextName && previousName !== nextName) {
-      // User changed the name manually: disable future auto-overwrites by LLM.
+    if (nextName && previousName !== nextName) {
+      // User changed the name manually: lock this custom name.
       metadata.name_auto = false;
+      metadata.name_mode = 'manual';
     }
   }
 
@@ -5085,6 +5128,14 @@ app.post('/api/entities', async (req, res, next) => {
     const payloadEntityType =
       typeof payload.type === 'string' && ENTITY_TYPES.has(payload.type) ? payload.type : 'shape';
     payload = normalizeMineFlagsInPayload(payload, payloadEntityType, { mode: 'create' });
+    const nextMetadata = toProfile(payload.ai_metadata);
+    const explicitNameMode = normalizeEntityNameMode(nextMetadata.name_mode);
+    const inferredNameMode = isSystemDefaultEntityName(payloadEntityType, payload.name) ? 'system' : 'manual';
+    nextMetadata.name_mode = explicitNameMode || inferredNameMode;
+    if (nextMetadata.name_mode !== 'llm') {
+      nextMetadata.name_auto = false;
+    }
+    payload.ai_metadata = nextMetadata;
     payload.owner_id = ownerId;
 
     const entity = await Entity.create(payload);

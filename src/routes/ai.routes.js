@@ -202,6 +202,7 @@ function createAiRouter(deps) {
     критично: 'Высокая',
     critical: 'Высокая',
   });
+  const ENTITY_NAME_MODE_VALUES = new Set(['system', 'manual', 'llm']);
   const AUTO_NAME_TYPES = new Set(['goal', 'event', 'result', 'task']);
   const AUTO_NAME_MAX_LENGTH = 64;
   const SYSTEM_DEFAULT_NAME_LABELS = Object.freeze({
@@ -221,6 +222,11 @@ function createAiRouter(deps) {
     return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
+  function normalizeEntityNameMode(value) {
+    const mode = toTrimmedString(value, 16).toLowerCase();
+    return ENTITY_NAME_MODE_VALUES.has(mode) ? mode : '';
+  }
+
   function isSystemDefaultEntityName(entityType, rawName) {
     const name = toTrimmedString(rawName, 120);
     if (!name) return false;
@@ -236,6 +242,14 @@ function createAiRouter(deps) {
       const pattern = new RegExp(`^${prefix}\\s*(?:-\\s*)?\\d+$`, 'i');
       return pattern.test(name);
     });
+  }
+
+  function resolveCurrentEntityNameMode(entityType, entityName, aiMetadata) {
+    const metadata = toProfile(aiMetadata);
+    const explicitMode = normalizeEntityNameMode(metadata.name_mode || metadata.nameMode);
+    if (explicitMode) return explicitMode;
+    if (metadata.name_auto === true) return 'llm';
+    return isSystemDefaultEntityName(entityType, entityName) ? 'system' : 'manual';
   }
 
   function normalizeEntityFieldList(rawValues, config = {}) {
@@ -1133,15 +1147,21 @@ function createAiRouter(deps) {
           nextMetadata.analysis_completed_at = new Date().toISOString();
           delete nextMetadata.analysis_error;
 
-          // Auto-assign the LLM-generated name only when the current entity name is still
-          // a system default with serial number (e.g. "Результат - 2").
-          // If user has already set a custom name, never overwrite it.
+          // Auto-assign the LLM-generated name only when name_mode is "system".
+          // If name_mode is "manual" or "llm", never overwrite.
           const autoSuggestedName = toTrimmedString(analysis.suggestedName, AUTO_NAME_MAX_LENGTH);
           if (AUTO_NAME_TYPES.has(latestEntity.type) && analysis.status === 'ready' && autoSuggestedName) {
             const currentName = toTrimmedString(latestEntity.name, 120);
-            const canAutoRename = isSystemDefaultEntityName(latestEntity.type, currentName);
+            const currentNameMode = resolveCurrentEntityNameMode(
+              latestEntity.type,
+              currentName,
+              latestEntity.ai_metadata,
+            );
+            nextMetadata.name_mode = currentNameMode;
+            const canAutoRename = currentNameMode === 'system';
             if (canAutoRename) {
               latestEntity.name = autoSuggestedName.slice(0, AUTO_NAME_MAX_LENGTH);
+              nextMetadata.name_mode = 'llm';
               nextMetadata.name_auto = true;
             } else if (toProfile(latestEntity.ai_metadata).name_auto) {
               nextMetadata.name_auto = false;
