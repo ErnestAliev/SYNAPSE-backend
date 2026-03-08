@@ -680,6 +680,32 @@ function createAiRouter(deps) {
       .filter((message) => message.text);
   }
 
+  function dedupeHistoryTailByCurrentMessage(history, currentMessage) {
+    const normalizedMessage = toTrimmedString(currentMessage, 1800);
+    const safeHistory = Array.isArray(history) ? history : [];
+    if (!normalizedMessage || !safeHistory.length) {
+      return {
+        history: safeHistory,
+        droppedCount: 0,
+      };
+    }
+
+    const nextHistory = safeHistory.slice();
+    let droppedCount = 0;
+    while (nextHistory.length > 0) {
+      const last = nextHistory[nextHistory.length - 1];
+      if (last?.role !== 'user') break;
+      if (toTrimmedString(last?.text, 1800) !== normalizedMessage) break;
+      nextHistory.pop();
+      droppedCount += 1;
+    }
+
+    return {
+      history: nextHistory,
+      droppedCount,
+    };
+  }
+
   function summarizePreviewEntities(entities) {
     return (Array.isArray(entities) ? entities : []).map((item) => {
       const entity = toProfile(item);
@@ -740,6 +766,9 @@ function createAiRouter(deps) {
         .find((message) => message.role === 'user' && message.text)?.text || '';
       const message = requestedMessage || latestUserMessage || '';
       const hasQuestion = Boolean(message);
+      const historyBeforeDedup = history.length;
+      const historyDedup = dedupeHistoryTailByCurrentMessage(history, message);
+      history = historyDedup.history;
 
       const scopeContext = await resolveAgentScopeContext(ownerId, {
         type: scope.type,
@@ -803,6 +832,11 @@ function createAiRouter(deps) {
           hasQuestion,
           history,
           attachments,
+          historyDedup: {
+            before: historyBeforeDedup,
+            after: history.length,
+            droppedTailDuplicates: historyDedup.droppedCount,
+          },
         },
         semanticRouter: {
           mode: 'disabled',
@@ -1060,7 +1094,9 @@ function createAiRouter(deps) {
         return res.status(400).json({ message: 'message is required' });
       }
 
-      const history = aiAttachments.normalizeAgentHistory(req.body?.history);
+      const rawHistory = aiAttachments.normalizeAgentHistory(req.body?.history);
+      const historyDedup = dedupeHistoryTailByCurrentMessage(rawHistory, message);
+      const history = historyDedup.history;
       const attachments = await aiAttachments.prepareAgentAttachments(req.body?.attachments);
       const scopeContext = await resolveAgentScopeContext(ownerId, req.body?.scope);
       const llmContextResult = aiPrompts.buildAgentLlmContextData({
@@ -1158,11 +1194,16 @@ function createAiRouter(deps) {
             projectId: scopeContext.projectId,
             totalEntities: scopeContext.totalEntities,
           },
-          input: {
-            message,
-            history,
-            attachments,
+        input: {
+          message,
+          history,
+          attachments,
+          historyDedup: {
+            before: rawHistory.length,
+            after: history.length,
+            droppedTailDuplicates: historyDedup.droppedCount,
           },
+        },
           llmSerialization: llmSerializationTrace,
           semanticRouter: {
             mode: 'disabled',
