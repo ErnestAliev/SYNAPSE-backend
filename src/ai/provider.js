@@ -283,9 +283,79 @@ function createAiProvider(deps) {
     };
   }
 
+  async function requestOpenAiAudioTranscription({
+    audioBuffer,
+    mimeType = 'audio/webm',
+    fileName = 'recording.webm',
+    model = 'gpt-4o-transcribe',
+    language = 'ru',
+    timeoutMs,
+  }) {
+    if (!OPENAI_API_KEY) {
+      throw Object.assign(new Error('OPENAI_API_KEY is not configured'), { status: 503 });
+    }
+
+    const resolvedModel = toTrimmedString(model, 120) || 'gpt-4o-transcribe';
+    const resolvedLanguage = toTrimmedString(language, 16) || 'ru';
+    const resolvedMimeType = toTrimmedString(mimeType, 80) || 'audio/webm';
+    const resolvedFileName = toTrimmedString(fileName, 120) || 'recording.webm';
+    const resolvedTimeoutMs = resolveTimeoutMs(resolvedModel, timeoutMs);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), resolvedTimeoutMs);
+
+    try {
+      const payload = Buffer.isBuffer(audioBuffer)
+        ? audioBuffer
+        : audioBuffer instanceof Uint8Array
+          ? Buffer.from(audioBuffer)
+          : null;
+      if (!payload || payload.length === 0) {
+        throw Object.assign(new Error('Audio file is empty'), { status: 400 });
+      }
+
+      const form = new FormData();
+      form.append('model', resolvedModel);
+      form.append('language', resolvedLanguage);
+      form.append('file', new Blob([payload], { type: resolvedMimeType }), resolvedFileName);
+
+      const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+        },
+        body: form,
+        signal: controller.signal,
+      });
+
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const providerMessage = toTrimmedString(body?.error?.message, 300) || 'AI provider error';
+        throw Object.assign(new Error(providerMessage), { status: 502 });
+      }
+
+      const text = toTrimmedString(body?.text, 20_000);
+      if (!text) {
+        throw Object.assign(new Error('AI transcription is empty'), { status: 502 });
+      }
+
+      return {
+        text,
+        model: resolvedModel,
+      };
+    } catch (error) {
+      if (error && error.name === 'AbortError') {
+        throw Object.assign(new Error('AI transcription timeout'), { status: 504 });
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   return {
     extractOpenAiResponseText,
     requestOpenAiAgentReply,
+    requestOpenAiAudioTranscription,
   };
 }
 

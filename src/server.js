@@ -17,6 +17,7 @@ const { createAiPrompts } = require('./ai/prompts');
 const { createAiAttachmentTools } = require('./ai/attachments');
 const { createAiProvider } = require('./ai/provider');
 const { createAiRouter } = require('./routes/ai.routes');
+const { createTranscribeRouter } = require('./routes/transcribe.routes');
 
 let whatsappWeb = null;
 let whatsappBaileys = null;
@@ -78,6 +79,11 @@ const OPENAI_MODEL = String(process.env.OPENAI_MODEL || 'gpt-5').trim();
 const OPENAI_PROJECT_MODEL = String(process.env.OPENAI_PROJECT_MODEL || 'gpt-5').trim();
 const OPENAI_ROUTER_MODEL = String(process.env.OPENAI_ROUTER_MODEL || 'gpt-5').trim();
 const OPENAI_DEEP_MODEL = String(process.env.OPENAI_DEEP_MODEL || OPENAI_PROJECT_MODEL || 'gpt-5').trim();
+const OPENAI_TRANSCRIBE_MODEL = String(process.env.OPENAI_TRANSCRIBE_MODEL || 'gpt-4o-transcribe').trim();
+const OPENAI_TRANSCRIBE_MAX_AUDIO_BYTES = Math.max(
+  512_000,
+  Number(process.env.OPENAI_TRANSCRIBE_MAX_AUDIO_BYTES) || 25 * 1024 * 1024,
+);
 const OPENAI_REQUEST_TIMEOUT_MS = Number(process.env.OPENAI_REQUEST_TIMEOUT_MS) || 0;
 const OPENAI_EMBEDDING_MODEL = String(process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small').trim();
 const AI_CONTEXT_ENTITY_LIMIT = Math.max(1, Number(process.env.AI_CONTEXT_ENTITY_LIMIT) || 120);
@@ -4937,6 +4943,16 @@ const aiRouter = createAiRouter({
 });
 
 app.use('/api/ai', aiRouter);
+
+const transcribeRouter = createTranscribeRouter({
+  requireAuth,
+  toTrimmedString,
+  aiProvider,
+  OPENAI_TRANSCRIBE_MODEL,
+  OPENAI_TRANSCRIBE_MAX_AUDIO_BYTES,
+});
+
+app.use('/api/transcribe', transcribeRouter);
 
 app.use('/api/entities', requireAuth);
 
