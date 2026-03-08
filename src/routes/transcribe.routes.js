@@ -69,6 +69,12 @@ function createTranscribeRouter(deps) {
           model: transcription.model,
         });
       } catch (error) {
+        console.error('[transcribe:file] failed', {
+          message: error instanceof Error ? error.message : String(error),
+          status: typeof error?.status === 'number' ? error.status : null,
+          contentType: req.headers['content-type'] || '',
+          bytes: Buffer.isBuffer(req.body) ? req.body.length : 0,
+        });
         return next(error);
       }
     },

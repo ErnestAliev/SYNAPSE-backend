@@ -303,6 +303,41 @@ function createAiProvider(deps) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), resolvedTimeoutMs);
 
+    function shouldFallbackToWhisper(providerMessage, providerCode) {
+      const message = toTrimmedString(providerMessage, 400).toLowerCase();
+      const code = toTrimmedString(providerCode, 80).toLowerCase();
+      if (code === 'model_not_found' || code === 'invalid_model') return true;
+      if (!message) return false;
+      return (
+        message.includes('model') &&
+        (
+          message.includes('not found') ||
+          message.includes('does not exist') ||
+          message.includes('do not have access') ||
+          message.includes('does not have access') ||
+          message.includes('permission')
+        )
+      );
+    }
+
+    async function callTranscriptionApi(modelName, payload, mimeType, fileName, language) {
+      const form = new FormData();
+      form.append('model', modelName);
+      form.append('language', language);
+      form.append('file', new Blob([payload], { type: mimeType }), fileName);
+
+      const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+        },
+        body: form,
+        signal: controller.signal,
+      });
+      const body = await response.json().catch(() => ({}));
+      return { response, body };
+    }
+
     try {
       const payload = Buffer.isBuffer(audioBuffer)
         ? audioBuffer
@@ -313,24 +348,33 @@ function createAiProvider(deps) {
         throw Object.assign(new Error('Audio file is empty'), { status: 400 });
       }
 
-      const form = new FormData();
-      form.append('model', resolvedModel);
-      form.append('language', resolvedLanguage);
-      form.append('file', new Blob([payload], { type: resolvedMimeType }), resolvedFileName);
+      let usedModel = resolvedModel;
+      let { response, body } = await callTranscriptionApi(
+        usedModel,
+        payload,
+        resolvedMimeType,
+        resolvedFileName,
+        resolvedLanguage,
+      );
 
-      const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-        },
-        body: form,
-        signal: controller.signal,
-      });
+      const providerMessage = toTrimmedString(body?.error?.message, 300) || '';
+      const providerCode = toTrimmedString(body?.error?.code, 80) || '';
+      const canFallbackToWhisper =
+        usedModel !== 'whisper-1' && shouldFallbackToWhisper(providerMessage, providerCode);
+      if (!response.ok && canFallbackToWhisper) {
+        usedModel = 'whisper-1';
+        ({ response, body } = await callTranscriptionApi(
+          usedModel,
+          payload,
+          resolvedMimeType,
+          resolvedFileName,
+          resolvedLanguage,
+        ));
+      }
 
-      const body = await response.json().catch(() => ({}));
       if (!response.ok) {
-        const providerMessage = toTrimmedString(body?.error?.message, 300) || 'AI provider error';
-        throw Object.assign(new Error(providerMessage), { status: 502 });
+        const nextProviderMessage = toTrimmedString(body?.error?.message, 300) || 'AI provider error';
+        throw Object.assign(new Error(nextProviderMessage), { status: 502 });
       }
 
       const text = toTrimmedString(body?.text, 20_000);
@@ -340,7 +384,7 @@ function createAiProvider(deps) {
 
       return {
         text,
-        model: resolvedModel,
+        model: usedModel,
       };
     } catch (error) {
       if (error && error.name === 'AbortError') {
