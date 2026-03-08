@@ -1043,13 +1043,27 @@ function enrichEntityMetadata(existingMetadata, incomingMetadata, options = {}) 
 
 function normalizeIncomingEntityPayload(rawPayload, options = {}) {
   const payload = rawPayload && typeof rawPayload === 'object' ? { ...rawPayload } : {};
-  if (!payload.ai_metadata || typeof payload.ai_metadata !== 'object' || Array.isArray(payload.ai_metadata)) {
-    return payload;
+  const hasAiMetadataPayload =
+    payload.ai_metadata && typeof payload.ai_metadata === 'object' && !Array.isArray(payload.ai_metadata);
+  const metadata = hasAiMetadataPayload
+    ? {
+      ...toProfile(payload.ai_metadata),
+    }
+    : {};
+
+  if (normalizeHistorySource(options.source) === 'manual' && Object.prototype.hasOwnProperty.call(payload, 'name')) {
+    const previousName = toTrimmedString(options.existingName, 120);
+    const nextName = toTrimmedString(payload.name, 120);
+    const wasAutoNamed = toProfile(options.existingMetadata).name_auto === true;
+    if (wasAutoNamed && previousName && nextName && previousName !== nextName) {
+      // User changed the name manually: disable future auto-overwrites by LLM.
+      metadata.name_auto = false;
+    }
   }
 
-  const metadata = {
-    ...toProfile(payload.ai_metadata),
-  };
+  if (!Object.keys(metadata).length) {
+    return payload;
+  }
 
   if (Object.prototype.hasOwnProperty.call(metadata, 'importance') && !metadata.importance_source) {
     metadata.importance_source = 'manual';
@@ -1203,7 +1217,7 @@ function normalizeEntityAnalysisOutput(entityType, rawResponse) {
     itemMaxLength: 120,
   });
   const confidence = normalizeConfidence(parsed.confidence);
-  const suggestedName = toTrimmedString(parsed.suggestedName, 40);
+  const suggestedName = toTrimmedString(parsed.suggestedName, 64);
 
   return {
     status,
@@ -5032,7 +5046,7 @@ app.put('/api/entities/:id', async (req, res, next) => {
         _id: req.params.id,
         owner_id: ownerId,
       },
-      { ai_metadata: 1, type: 1 },
+      { ai_metadata: 1, type: 1, name: 1 },
     ).lean();
     if (!existingEntity) {
       return res.status(404).json({ message: 'Entity not found' });
@@ -5040,6 +5054,7 @@ app.put('/api/entities/:id', async (req, res, next) => {
 
     let payload = normalizeIncomingEntityPayload(req.body, {
       existingMetadata: existingEntity.ai_metadata,
+      existingName: existingEntity.name,
       source: 'manual',
     });
     const payloadEntityType =

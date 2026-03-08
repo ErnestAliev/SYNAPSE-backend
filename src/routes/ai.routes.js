@@ -202,6 +202,42 @@ function createAiRouter(deps) {
     критично: 'Высокая',
     critical: 'Высокая',
   });
+  const AUTO_NAME_TYPES = new Set(['goal', 'event', 'result', 'task']);
+  const AUTO_NAME_MAX_LENGTH = 64;
+  const SYSTEM_DEFAULT_NAME_LABELS = Object.freeze({
+    project: ['Проект', 'Новый проект'],
+    connection: ['Подключение', 'Новое подключение'],
+    person: ['Персона', 'Новая персона'],
+    company: ['Компания', 'Новая компания'],
+    event: ['Событие', 'Новое событие'],
+    resource: ['Ресурс', 'Новый ресурс'],
+    goal: ['Цель', 'Новая цель'],
+    result: ['Результат', 'Новый результат'],
+    task: ['Задача', 'Новая задача'],
+    shape: ['Элемент', 'Новый элемент'],
+  });
+
+  function escapeRegExp(value) {
+    return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  function isSystemDefaultEntityName(entityType, rawName) {
+    const name = toTrimmedString(rawName, 120);
+    if (!name) return false;
+
+    const labels = SYSTEM_DEFAULT_NAME_LABELS[entityType];
+    if (!Array.isArray(labels) || !labels.length) return false;
+
+    return labels.some((label) => {
+      const prefix = escapeRegExp(toTrimmedString(label, 80));
+      if (!prefix) return false;
+      // Accept both canvas and list defaults:
+      // "Результат - 2" and "Новый результат 2".
+      const pattern = new RegExp(`^${prefix}\\s*(?:-\\s*)?\\d+$`, 'i');
+      return pattern.test(name);
+    });
+  }
+
   function normalizeEntityFieldList(rawValues, config = {}) {
     const {
       maxItems = 12,
@@ -1097,21 +1133,18 @@ function createAiRouter(deps) {
           nextMetadata.analysis_completed_at = new Date().toISOString();
           delete nextMetadata.analysis_error;
 
-          // Auto-assign the LLM-generated name for goal / event / result / task types.
-          // LLM returns the complete ready-to-use name via suggestedName (no server prefix).
-          // Applied when:
-          //   (1) entity has no name yet, OR
-          //   (2) current name was previously set by LLM analysis (name_auto === true in ai_metadata).
-          // After assignment, name_auto is stored in metadata so the next analysis can
-          // recognise and safely overwrite an auto-generated name.
-          const AUTO_NAME_TYPES = new Set(['goal', 'event', 'result', 'task']);
-          const autoSuggestedName = toTrimmedString(analysis.suggestedName, 64);
+          // Auto-assign the LLM-generated name only when the current entity name is still
+          // a system default with serial number (e.g. "Результат - 2").
+          // If user has already set a custom name, never overwrite it.
+          const autoSuggestedName = toTrimmedString(analysis.suggestedName, AUTO_NAME_MAX_LENGTH);
           if (AUTO_NAME_TYPES.has(latestEntity.type) && analysis.status === 'ready' && autoSuggestedName) {
             const currentName = toTrimmedString(latestEntity.name, 120);
-            const wasAutoNamed = toProfile(latestEntity.ai_metadata).name_auto === true;
-            if (!currentName || wasAutoNamed) {
-              latestEntity.name = autoSuggestedName.slice(0, 64);
+            const canAutoRename = isSystemDefaultEntityName(latestEntity.type, currentName);
+            if (canAutoRename) {
+              latestEntity.name = autoSuggestedName.slice(0, AUTO_NAME_MAX_LENGTH);
               nextMetadata.name_auto = true;
+            } else if (toProfile(latestEntity.ai_metadata).name_auto) {
+              nextMetadata.name_auto = false;
             }
           } else {
             // Clear the auto-name flag if this analysis didn't produce a name
