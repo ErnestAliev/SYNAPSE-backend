@@ -747,10 +747,7 @@ function createAiRouter(deps) {
       });
       const contextData = llmContextResult.contextData;
       const llmSerializationTrace = llmContextResult.trace;
-      const routerSystemPrompt =
-        'Ты Semantic Router Synapse12. Верни строго одно слово из списка: investor, hr, strategist, default.';
       const selectedRole = aiPrompts.normalizeDetectedRole(toTrimmedString(req.body?.detectedRole, 24) || 'default');
-      const routerPrompt = hasQuestion ? aiPrompts.buildRouterPrompt(contextData, message) : '';
       const systemPrompt = hasQuestion ? aiPrompts.buildAgentSystemPrompt(contextData, selectedRole) : '';
       const userPrompt = hasQuestion
         ? aiPrompts.buildAgentUserPrompt({
@@ -759,14 +756,25 @@ function createAiRouter(deps) {
         })
         : '';
 
-      const routerModel = toTrimmedString(OPENAI_ROUTER_MODEL, 120) || 'gpt-5';
       const deepModel =
         toTrimmedString(OPENAI_DEEP_MODEL, 120) ||
         toTrimmedString(OPENAI_PROJECT_MODEL, 120) ||
         'gpt-5';
+      const mainReplyTemperature = 0.25;
+      const mainReplyMaxOutputTokens = 1200;
+      const mainReplyTimeoutMs = 95_000;
+      const mainReplyRequestPreview = hasQuestion && typeof aiProvider.previewOpenAiAgentRequest === 'function'
+        ? aiProvider.previewOpenAiAgentRequest({
+          model: deepModel,
+          systemPrompt,
+          userPrompt,
+          temperature: mainReplyTemperature,
+          maxOutputTokens: mainReplyMaxOutputTokens,
+          timeoutMs: mainReplyTimeoutMs,
+        })
+        : null;
 
       const contextJson = JSON.stringify(contextData, null, 2);
-      const routerPromptText = hasQuestion ? `${routerSystemPrompt}\n${routerPrompt}` : '';
       const llmPromptText = hasQuestion ? `${systemPrompt}\n${userPrompt}` : '';
       const entities = Array.isArray(contextData?.entities) ? contextData.entities : [];
       const connections = Array.isArray(contextData?.connections) ? contextData.connections : [];
@@ -791,27 +799,9 @@ function createAiRouter(deps) {
           attachments,
         },
         semanticRouter: {
-          model: routerModel,
-          prompt: {
-            system: routerSystemPrompt,
-            user: routerPrompt,
-          },
-          requestBody: hasQuestion
-            ? {
-              model: routerModel,
-              input: [
-                {
-                  role: 'system',
-                  content: [{ type: 'input_text', text: routerSystemPrompt }],
-                },
-                {
-                  role: 'user',
-                  content: [{ type: 'input_text', text: routerPrompt }],
-                },
-              ],
-              max_output_tokens: 5,
-            }
-            : null,
+          mode: 'disabled',
+          reason: 'single-request-mode',
+          requestBody: null,
         },
         prompts: {
           detectedRole: selectedRole,
@@ -819,20 +809,7 @@ function createAiRouter(deps) {
           systemPrompt,
           userPrompt,
           requestBody: hasQuestion
-            ? {
-              model: deepModel,
-              input: [
-                {
-                  role: 'system',
-                  content: [{ type: 'input_text', text: systemPrompt }],
-                },
-                {
-                  role: 'user',
-                  content: [{ type: 'input_text', text: userPrompt }],
-                },
-              ],
-              max_output_tokens: 4000,
-            }
+            ? toProfile(mainReplyRequestPreview?.requestBody)
             : null,
         },
         contextData,
@@ -856,8 +833,8 @@ function createAiRouter(deps) {
           contextBytes: Buffer.byteLength(contextJson, 'utf8'),
           llmPayloadChars: Number(llmSerializationTrace?.payloadSize?.chars) || 0,
           llmPayloadBytes: Number(llmSerializationTrace?.payloadSize?.bytes) || 0,
-          routerPromptChars: hasQuestion ? routerPromptText.length : 0,
-          routerPromptBytes: hasQuestion ? Buffer.byteLength(routerPromptText, 'utf8') : 0,
+          routerPromptChars: 0,
+          routerPromptBytes: 0,
           llmPromptChars: hasQuestion ? llmPromptText.length : 0,
           llmPromptBytes: hasQuestion ? Buffer.byteLength(llmPromptText, 'utf8') : 0,
           previewJsonBytes: Buffer.byteLength(previewJson, 'utf8'),
@@ -1087,53 +1064,30 @@ function createAiRouter(deps) {
       });
       const contextData = llmContextResult.contextData;
       const llmSerializationTrace = llmContextResult.trace;
-
-      const routerPrompt = aiPrompts.buildRouterPrompt(contextData, message);
-      const routerSystemPrompt =
-        'Ты Semantic Router Synapse12. Верни строго одно слово из списка: investor, hr, strategist, default.';
-      const routerModel = toTrimmedString(OPENAI_ROUTER_MODEL, 120) || 'gpt-5';
-
-      const routerTraceMeta = {
-        label: 'agent-chat.router',
-        ownerId,
-        model: routerModel,
-        scope: {
-          type: scopeContext.scopeType,
-          entityType: scopeContext.entityType,
-          projectId: scopeContext.projectId,
-        },
-        promptLengths: {
-          system: routerSystemPrompt.length,
-          user: routerPrompt.length,
-        },
-        messageLength: message.length,
-        historyLength: history.length,
-        attachmentsCount: attachments.length,
-        llmPayload: llmSerializationTrace?.payloadSize || { chars: 0, bytes: 0 },
-        includeDebug,
-      };
-      const routerResponse = await withAiTrace(routerTraceMeta, () => aiProvider.requestOpenAiAgentReply({
-        systemPrompt: routerSystemPrompt,
-        userPrompt: routerPrompt,
-        includeRawPayload: includeDebug,
-        model: routerModel,
-        temperature: 0,
-        maxOutputTokens: 5,
-        allowEmptyResponse: true,
-        emptyResponseFallback: 'default',
-      }));
-      const detectedRoleRaw = toTrimmedString(routerResponse.reply, 60);
-      const detectedRole = aiPrompts.normalizeDetectedRole(detectedRoleRaw);
+      const detectedRole = aiPrompts.normalizeDetectedRole(toTrimmedString(req.body?.detectedRole, 24) || 'default');
       const deepModel =
         toTrimmedString(OPENAI_DEEP_MODEL, 120) ||
         toTrimmedString(OPENAI_PROJECT_MODEL, 120) ||
         'gpt-5';
+      const mainReplyTemperature = 0.25;
+      const mainReplyMaxOutputTokens = 1200;
+      const mainReplyTimeoutMs = 95_000;
 
       const systemPrompt = aiPrompts.buildAgentSystemPrompt(contextData, detectedRole);
       const userPrompt = aiPrompts.buildAgentUserPrompt({
         contextData,
         message,
       });
+      const mainReplyRequestPreview = typeof aiProvider.previewOpenAiAgentRequest === 'function'
+        ? aiProvider.previewOpenAiAgentRequest({
+          model: deepModel,
+          systemPrompt,
+          userPrompt,
+          temperature: mainReplyTemperature,
+          maxOutputTokens: mainReplyMaxOutputTokens,
+          timeoutMs: mainReplyTimeoutMs,
+        })
+        : null;
 
       const chatTraceMeta = {
         label: 'agent-chat.reply',
@@ -1160,14 +1114,14 @@ function createAiRouter(deps) {
         userPrompt,
         includeRawPayload: includeDebug,
         model: deepModel,
-        temperature: 0.25,
-        maxOutputTokens: 4000,
+        temperature: mainReplyTemperature,
+        maxOutputTokens: mainReplyMaxOutputTokens,
         allowEmptyResponse: true,
         emptyResponseFallback: 'Пустой ответ от модели. Уточните запрос или повторите через несколько секунд.',
-        timeoutMs: 130_000,
+        timeoutMs: mainReplyTimeoutMs,
+        singleRequest: true,
       }));
       const usedModel = toTrimmedString(aiResponse?.debug?.response?.model, 120) || deepModel;
-      const usedRouterModel = toTrimmedString(routerResponse?.debug?.response?.model, 120) || routerModel;
 
       const canRunProjectAutoEnrichment = typeof runProjectChatAutoEnrichment === 'function';
       const shouldQueueProjectAutoEnrichment = scopeContext.scopeType === 'project' && canRunProjectAutoEnrichment;
@@ -1204,19 +1158,14 @@ function createAiRouter(deps) {
           },
           llmSerialization: llmSerializationTrace,
           semanticRouter: {
-            model: usedRouterModel,
-            prompt: {
-              system: routerSystemPrompt,
-              user: routerPrompt,
-            },
-            detectedRoleRaw,
+            mode: 'disabled',
+            reason: 'single-request-mode',
             detectedRole,
-            usage: routerResponse.usage,
-            provider: routerResponse.debug || {},
           },
           prompts: {
             systemPrompt,
             userPrompt,
+            requestBody: toProfile(mainReplyRequestPreview?.requestBody),
           },
           response: {
             reply: aiResponse.reply,

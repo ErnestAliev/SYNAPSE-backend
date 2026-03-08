@@ -82,6 +82,58 @@ function createAiProvider(deps) {
     return body;
   }
 
+  function buildAgentRequestConfig({
+    model = '',
+    temperature = DEFAULT_TEMPERATURE,
+    maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
+    timeoutMs,
+  }) {
+    const resolvedModel = toTrimmedString(model, 120) || OPENAI_MODEL;
+    const resolvedTimeoutMs = resolveTimeoutMs(resolvedModel, timeoutMs);
+    const numericTemperature = Number.isFinite(Number(temperature)) ? Number(temperature) : DEFAULT_TEMPERATURE;
+    const numericMaxOutputTokens = Number.isFinite(Number(maxOutputTokens))
+      ? Math.max(MIN_MAX_OUTPUT_TOKENS, Math.floor(Number(maxOutputTokens)))
+      : DEFAULT_MAX_OUTPUT_TOKENS;
+    const shouldUseTemperature = modelSupportsTemperature(resolvedModel);
+
+    return {
+      model: resolvedModel,
+      temperature: shouldUseTemperature ? numericTemperature : null,
+      max_output_tokens: numericMaxOutputTokens,
+      timeout_ms: resolvedTimeoutMs,
+    };
+  }
+
+  function previewOpenAiAgentRequest({
+    systemPrompt,
+    userPrompt,
+    model = '',
+    temperature = DEFAULT_TEMPERATURE,
+    maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
+    timeoutMs,
+    jsonSchema,
+  }) {
+    const requestConfig = buildAgentRequestConfig({
+      model,
+      temperature,
+      maxOutputTokens,
+      timeoutMs,
+    });
+    const requestBody = buildResponsesRequestBody({
+      model: requestConfig.model,
+      systemPrompt,
+      userPrompt,
+      temperature: requestConfig.temperature,
+      maxOutputTokens: requestConfig.max_output_tokens,
+      jsonSchema,
+    });
+
+    return {
+      requestConfig,
+      requestBody,
+    };
+  }
+
   async function callResponsesApi({ requestBody, signal }) {
     const response = await fetch('https://api.openai.com/v1/responses', {
       method: 'POST',
@@ -144,27 +196,26 @@ function createAiProvider(deps) {
     emptyResponseFallback = '',
     timeoutMs,
     jsonSchema,
+    singleRequest = false,
   }) {
     if (!OPENAI_API_KEY) {
       throw Object.assign(new Error('OPENAI_API_KEY is not configured'), { status: 503 });
     }
 
-    const resolvedModel = toTrimmedString(model, 120) || OPENAI_MODEL;
-    const resolvedTimeoutMs = resolveTimeoutMs(resolvedModel, timeoutMs);
+    const requestPreview = previewOpenAiAgentRequest({
+      systemPrompt,
+      userPrompt,
+      model,
+      temperature,
+      maxOutputTokens,
+      timeoutMs,
+      jsonSchema,
+    });
+    const requestConfig = requestPreview.requestConfig;
+    const resolvedTimeoutMs = requestConfig.timeout_ms;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), resolvedTimeoutMs);
     const startedAt = Date.now();
-    const numericTemperature = Number.isFinite(Number(temperature)) ? Number(temperature) : DEFAULT_TEMPERATURE;
-    const numericMaxOutputTokens = Number.isFinite(Number(maxOutputTokens))
-      ? Math.max(MIN_MAX_OUTPUT_TOKENS, Math.floor(Number(maxOutputTokens)))
-      : DEFAULT_MAX_OUTPUT_TOKENS;
-    const shouldUseTemperature = modelSupportsTemperature(resolvedModel);
-    const requestConfig = {
-      model: resolvedModel,
-      temperature: shouldUseTemperature ? numericTemperature : null,
-      max_output_tokens: numericMaxOutputTokens,
-      timeout_ms: resolvedTimeoutMs,
-    };
 
     let response;
     let payload;
@@ -172,14 +223,7 @@ function createAiProvider(deps) {
     let emptyRetryCount = 0;
     let truncatedRetryCount = 0;
     try {
-      const firstRequestBody = buildResponsesRequestBody({
-        model: requestConfig.model,
-        systemPrompt,
-        userPrompt,
-        temperature: requestConfig.temperature,
-        maxOutputTokens: requestConfig.max_output_tokens,
-        jsonSchema,
-      });
+      const firstRequestBody = requestPreview.requestBody;
       const firstAttempt = await callResponsesApi({
         requestBody: firstRequestBody,
         signal: controller.signal,
@@ -189,6 +233,7 @@ function createAiProvider(deps) {
 
       const providerMessage = toTrimmedString(payload?.error?.message, 300);
       const canRetryWithoutTemperature =
+        !singleRequest &&
         response &&
         !response.ok &&
         typeof requestConfig.temperature === 'number' &&
@@ -213,8 +258,8 @@ function createAiProvider(deps) {
         payload = retryAttempt.payload;
       }
 
-      const maxEmptyResponseRetries = 1;
-      const maxTruncatedResponseRetries = 1;
+      const maxEmptyResponseRetries = singleRequest ? 0 : 1;
+      const maxTruncatedResponseRetries = singleRequest ? 0 : 1;
       while (response && response.ok) {
         const responseStatus = toTrimmedString(payload?.status, 40).toLowerCase();
         const incompleteReason = toTrimmedString(payload?.incomplete_details?.reason, 120).toLowerCase();
@@ -433,6 +478,7 @@ function createAiProvider(deps) {
 
   return {
     extractOpenAiResponseText,
+    previewOpenAiAgentRequest,
     requestOpenAiAgentReply,
     requestOpenAiAudioTranscription,
   };
