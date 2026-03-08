@@ -1571,6 +1571,7 @@ function buildProjectConnections(canvasData, entitiesById) {
       const sourceEntityId = nodeEntityByNodeId.get(edge.source);
       const targetEntityId = nodeEntityByNodeId.get(edge.target);
       if (!sourceEntityId || !targetEntityId) return null;
+      if (!entityNameById.has(sourceEntityId) || !entityNameById.has(targetEntityId)) return null;
 
       return compactObject({
         from: entityNameById.get(sourceEntityId) || sourceEntityId,
@@ -1653,9 +1654,45 @@ async function resolveAgentScopeContext(ownerId, rawScope) {
       : [];
 
     const entityById = new Map(entities.map((entity) => [String(entity._id), entity]));
+    const limitedEntityIdSet = new Set(limitedEntityIds);
+    const sharedEntityIds = new Set();
+
+    if (limitedEntityIds.length) {
+      const siblingProjects = await Entity.find(
+        {
+          owner_id: ownerId,
+          type: 'project',
+          _id: { $ne: project._id },
+          'canvas_data.nodes.entityId': { $in: limitedEntityIds },
+        },
+        { _id: 1, canvas_data: 1 },
+      ).lean();
+
+      for (const siblingProject of siblingProjects) {
+        const siblingCanvas = normalizeProjectCanvasData(siblingProject.canvas_data);
+        for (const node of siblingCanvas.nodes) {
+          const entityId = toTrimmedString(node.entityId, 80);
+          if (!entityId) continue;
+          if (!limitedEntityIdSet.has(entityId)) continue;
+          sharedEntityIds.add(entityId);
+        }
+      }
+    }
+
+    const currentProjectId = String(project._id);
     const orderedEntities = limitedEntityIds
       .map((id) => entityById.get(id))
-      .filter(Boolean);
+      .filter(Boolean)
+      .filter((entity) => {
+        const entityId = String(entity._id);
+        if (entity.type === 'project' && entityId !== currentProjectId) {
+          return false;
+        }
+        if (sharedEntityIds.has(entityId) && entityId !== currentProjectId) {
+          return false;
+        }
+        return true;
+      });
 
     const connections = buildProjectConnections(canvasData, orderedEntities);
 
@@ -1665,7 +1702,7 @@ async function resolveAgentScopeContext(ownerId, rawScope) {
       scopeName: toTrimmedString(project.name, 140) || 'Без названия',
       projectId: String(project._id),
       projectName: toTrimmedString(project.name, 140) || 'Без названия',
-      totalEntities: uniqueEntityIds.length,
+      totalEntities: orderedEntities.length,
       entities: orderedEntities,
       connections,
     };
