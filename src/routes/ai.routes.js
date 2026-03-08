@@ -780,6 +780,7 @@ function createAiRouter(deps) {
         scopeContext,
         history,
         attachments,
+        message,
       });
       const contextData = llmContextResult.contextData;
       const llmSerializationTrace = llmContextResult.trace;
@@ -1103,6 +1104,7 @@ function createAiRouter(deps) {
         scopeContext,
         history,
         attachments,
+        message,
       });
       const contextData = llmContextResult.contextData;
       const llmSerializationTrace = llmContextResult.trace;

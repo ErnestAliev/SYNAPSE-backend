@@ -55,6 +55,12 @@ const ENTITY_ANALYZER_PROMPT_LIMITS = Object.freeze({
   documentsMaxItems: 4,
   documentTextMaxLength: 3200,
 });
+const AGENT_LLM_HISTORY_MAX_ITEMS = 6;
+const AGENT_LLM_HISTORY_ITEM_MAX_LENGTH = 1200;
+const AGENT_LLM_ATTACHMENT_MAX_ITEMS = 4;
+const AGENT_LLM_ATTACHMENT_TEXT_MAX_LENGTH = 1600;
+const AGENT_STATE_SIGNAL_MAX_ITEMS = 6;
+const AGENT_STATE_SIGNAL_MAX_LENGTH = 220;
 
 function isPathInsideDocuments(path) {
   return Array.isArray(path) && path.includes('documents');
@@ -254,7 +260,163 @@ function createAiPrompts(deps) {
     return 'undirected';
   }
 
-  function buildAgentLlmContextData({ scopeContext, history, attachments }) {
+  function normalizeAgentHistoryForLlm(history) {
+    const source = Array.isArray(history) ? history : [];
+    const normalized = source
+      .map((item) => {
+        const row = toProfile(item);
+        const role = row.role === 'assistant' ? 'assistant' : row.role === 'user' ? 'user' : '';
+        const text = toTrimmedString(row.text, AGENT_LLM_HISTORY_ITEM_MAX_LENGTH);
+        if (!role || !text) return null;
+        return { role, text };
+      })
+      .filter(Boolean);
+
+    const userOnly = normalized.filter((item) => item.role === 'user');
+    const llmHistory = userOnly.slice(-AGENT_LLM_HISTORY_MAX_ITEMS);
+
+    return {
+      sourceHistory: normalized,
+      llmHistory,
+      stats: {
+        sourceTotal: normalized.length,
+        sourceUserTotal: userOnly.length,
+        sourceAssistantTotal: Math.max(0, normalized.length - userOnly.length),
+        keptUserTotal: llmHistory.length,
+        droppedAssistantTotal: Math.max(0, normalized.length - userOnly.length),
+        droppedUserTailTotal: Math.max(0, userOnly.length - llmHistory.length),
+        mode: 'user_only_tail',
+        maxItems: AGENT_LLM_HISTORY_MAX_ITEMS,
+      },
+    };
+  }
+
+  function normalizeAgentAttachmentsForLlm(attachments) {
+    const source = Array.isArray(attachments) ? attachments : [];
+    const normalized = source
+      .map((item) => {
+        const row = toProfile(item);
+        const name = toTrimmedString(row.name, 120);
+        const mime = toTrimmedString(row.mime, 120);
+        const contentCategory = toTrimmedString(row.contentCategory, 40);
+        const size = Number.isFinite(Number(row.size)) ? Math.max(0, Math.floor(Number(row.size))) : 0;
+        const text = toTrimmedString(row.text, AGENT_LLM_ATTACHMENT_TEXT_MAX_LENGTH);
+        if (!name && !text) return null;
+        return {
+          name: name || 'Файл',
+          mime,
+          size,
+          contentCategory,
+          text,
+        };
+      })
+      .filter(Boolean);
+    const llmAttachments = normalized.slice(0, AGENT_LLM_ATTACHMENT_MAX_ITEMS);
+
+    return {
+      sourceAttachments: normalized,
+      llmAttachments,
+      stats: {
+        sourceTotal: normalized.length,
+        keptTotal: llmAttachments.length,
+        droppedTailTotal: Math.max(0, normalized.length - llmAttachments.length),
+        maxItems: AGENT_LLM_ATTACHMENT_MAX_ITEMS,
+      },
+    };
+  }
+
+  function extractLatestAssistantQuestion(sourceHistory) {
+    const history = Array.isArray(sourceHistory) ? sourceHistory : [];
+    for (let index = history.length - 1; index >= 0; index -= 1) {
+      const item = history[index];
+      if (item?.role !== 'assistant') continue;
+      const text = toTrimmedString(item?.text, AGENT_LLM_HISTORY_ITEM_MAX_LENGTH);
+      if (!text) continue;
+
+      const labeledMatch = text.match(/(?:^|\n)\s*Вопрос:\s*(.+)$/im);
+      if (labeledMatch && labeledMatch[1]) {
+        return toTrimmedString(labeledMatch[1], 360);
+      }
+
+      const chunks = text
+        .split(/(?<=[?!])\s+/g)
+        .map((chunk) => toTrimmedString(chunk, 360))
+        .filter(Boolean);
+      for (let chunkIndex = chunks.length - 1; chunkIndex >= 0; chunkIndex -= 1) {
+        if (chunks[chunkIndex].includes('?')) {
+          return chunks[chunkIndex];
+        }
+      }
+    }
+    return '';
+  }
+
+  function extractUserSignals(message) {
+    const normalized = toTrimmedString(message, 2400);
+    if (!normalized) return [];
+
+    const directChunks = normalized
+      .split(/\n+/g)
+      .map((chunk) => toTrimmedString(chunk, AGENT_STATE_SIGNAL_MAX_LENGTH))
+      .filter(Boolean);
+    const source = directChunks.length > 1
+      ? directChunks
+      : normalized
+        .split(/(?<=[.!?])\s+/g)
+        .map((chunk) => toTrimmedString(chunk, AGENT_STATE_SIGNAL_MAX_LENGTH))
+        .filter(Boolean);
+
+    const dedup = new Set();
+    const signals = [];
+    for (const chunk of source) {
+      const key = chunk.toLowerCase();
+      if (dedup.has(key)) continue;
+      dedup.add(key);
+      signals.push(chunk);
+      if (signals.length >= AGENT_STATE_SIGNAL_MAX_ITEMS) break;
+    }
+    return signals;
+  }
+
+  function buildAgentStateSnapshot({
+    llmNodes,
+    llmEdges,
+    sourceHistory,
+    llmHistory,
+    message,
+  }) {
+    const latestUserRequestFull =
+      toTrimmedString(message, 2400) || toTrimmedString(llmHistory[llmHistory.length - 1]?.text, 2400);
+    const goalHints = (Array.isArray(llmNodes) ? llmNodes : [])
+      .filter((node) => ['goal', 'result', 'task'].includes(toTrimmedString(node.type, 24).toLowerCase()))
+      .slice(0, 4)
+      .map((node) => ({
+        id: node.id,
+        type: node.type,
+        name: node.name,
+        description: toTrimmedString(node.description, 280),
+      }));
+
+    return {
+      stage: sourceHistory.length > 1 ? 'follow_up' : 'initial',
+      currentUserRequest: toTrimmedString(latestUserRequestFull, 420),
+      latestUserSignals: extractUserSignals(latestUserRequestFull),
+      recentUserTurns: llmHistory.slice(-3).map((item) => item.text),
+      latestAssistantQuestion: extractLatestAssistantQuestion(sourceHistory),
+      goals: goalHints,
+      graphStats: {
+        entities: Array.isArray(llmNodes) ? llmNodes.length : 0,
+        connections: Array.isArray(llmEdges) ? llmEdges.length : 0,
+      },
+      memoryPolicy: {
+        historyMode: 'user_only_tail',
+        historyMaxItems: AGENT_LLM_HISTORY_MAX_ITEMS,
+        latestUserFactPriority: true,
+      },
+    };
+  }
+
+  function buildAgentLlmContextData({ scopeContext, history, attachments, message }) {
     const scope = toProfile(scopeContext);
     const rawEntities = Array.isArray(scope.sourceEntities)
       ? scope.sourceEntities
@@ -343,6 +505,16 @@ function createAiPrompts(deps) {
       llmEdges.push(relation);
     }
 
+    const historyContext = normalizeAgentHistoryForLlm(history);
+    const attachmentContext = normalizeAgentAttachmentsForLlm(attachments);
+    const stateSnapshot = buildAgentStateSnapshot({
+      llmNodes,
+      llmEdges,
+      sourceHistory: historyContext.sourceHistory,
+      llmHistory: historyContext.llmHistory,
+      message,
+    });
+
     const contextData = {
       scope: {
         type: scope.scopeType,
@@ -355,17 +527,25 @@ function createAiPrompts(deps) {
       },
       entities: llmNodes,
       connections: llmEdges,
-      attachments,
-      history,
+      attachments: attachmentContext.llmAttachments,
+      history: historyContext.llmHistory,
+      stateSnapshot,
     };
 
     const contextJson = JSON.stringify(contextData);
     const trace = {
       sourceNodes,
       sourceEdges,
+      sourceHistory: historyContext.sourceHistory,
+      sourceAttachments: attachmentContext.sourceAttachments,
       llmNodes,
       llmEdges,
+      llmHistory: historyContext.llmHistory,
+      llmAttachments: attachmentContext.llmAttachments,
+      historyPolicy: historyContext.stats,
+      attachmentsPolicy: attachmentContext.stats,
       droppedEdges,
+      stateSnapshot,
       payloadSize: {
         chars: contextJson.length,
         bytes: Buffer.byteLength(contextJson, 'utf8'),
@@ -373,6 +553,8 @@ function createAiPrompts(deps) {
       preview: {
         entities: llmNodes.slice(0, 8),
         relations: llmEdges.slice(0, 12),
+        history: historyContext.llmHistory.slice(-3),
+        stateSnapshot,
       },
     };
 
@@ -426,6 +608,8 @@ function createAiPrompts(deps) {
       scopeDescription,
       'Жесткое правило: используй ТОЛЬКО данные из переданного контекста.',
       projectExtractionHint,
+      'Критично: при конфликте между старым контекстом и новыми фактами пользователя приоритет у САМЫХ СВЕЖИХ user-сообщений.',
+      'Не повторяй дословно предыдущие ответы ассистента: каждый ход должен обновлять оценку по новым данным.',
       STRICT_FORMATTING_RULES,
     ].join('\n');
   }
@@ -438,14 +622,38 @@ function createAiPrompts(deps) {
             scopeContext,
             history,
             attachments,
+            message,
           }).contextData;
+    const stateSnapshot = toProfile(payloadContext?.stateSnapshot);
+    const graphContext = {
+      scope: toProfile(payloadContext?.scope),
+      entities: Array.isArray(payloadContext?.entities) ? payloadContext.entities : [],
+      connections: Array.isArray(payloadContext?.connections) ? payloadContext.connections : [],
+      attachments: Array.isArray(payloadContext?.attachments) ? payloadContext.attachments : [],
+    };
+    const dialogueMemory = {
+      history: Array.isArray(payloadContext?.history) ? payloadContext.history : [],
+      latestAssistantQuestion: toTrimmedString(stateSnapshot?.latestAssistantQuestion, 360),
+    };
+    const currentRequest = toTrimmedString(message, 2400);
 
     return [
-      'Контекст Synapse12 (JSON):',
-      JSON.stringify(payloadContext, null, 2),
+      'State Snapshot (JSON):',
+      JSON.stringify(stateSnapshot, null, 2),
       '',
-      'Текущий запрос пользователя:',
-      toTrimmedString(message, 2400),
+      'Relevant Graph Context (JSON):',
+      JSON.stringify(graphContext, null, 2),
+      '',
+      'Dialogue Memory (JSON):',
+      JSON.stringify(dialogueMemory, null, 2),
+      '',
+      'Current User Turn:',
+      currentRequest,
+      '',
+      'Response Contract:',
+      '- Сначала обнови оценку вероятностей и рисков именно по новым фактам из Current User Turn.',
+      '- При конфликте с устаревшими данными используй приоритет новых фактов пользователя.',
+      '- Не копируй прошлый ответ, дай обновленный анализ и 1 точный следующий вопрос.',
     ].join('\n');
   }
 
