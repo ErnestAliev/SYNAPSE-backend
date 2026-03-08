@@ -1068,7 +1068,7 @@ function createAiRouter(deps) {
             model: OPENAI_MODEL,
             temperature: 0.3,
             maxOutputTokens: 4000,
-            timeoutMs: 130_000,
+            timeoutMs: 180_000,
             jsonSchema: ENTITY_ANALYSIS_OUTPUT_SCHEMA,
           }));
 
