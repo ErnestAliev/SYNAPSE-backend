@@ -147,14 +147,8 @@ function collectEntitySemanticSignals(entity) {
   const metaRoles = Array.isArray(metadata.roles) ? metadata.roles : [];
   const directName = typeof entity.name === 'string' ? entity.name : '';
   const directType = typeof entity.type === 'string' ? entity.type : '';
-  const directDescription =
-    typeof entity.description === 'string'
-      ? entity.description
-      : typeof metadata.description === 'string'
-        ? metadata.description
-        : '';
 
-  return [...directTags, ...directRoles, ...metaTags, ...metaRoles, directName, directType, directDescription]
+  return [...directTags, ...directRoles, ...metaTags, ...metaRoles, directName, directType]
     .map((item) => (typeof item === 'string' ? item.trim() : ''))
     .filter(Boolean);
 }
