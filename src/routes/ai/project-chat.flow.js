@@ -4,7 +4,7 @@ const PROJECT_DEEP_REASONING_OUTPUT_SCHEMA = Object.freeze({
   strict: true,
   schema: {
     type: 'object',
-    required: ['final_answer', 'reasoning_state', 'next_best_question'],
+    required: ['final_answer', 'reasoning_state', 'next_best_question', 'answer_pattern'],
     additionalProperties: false,
     properties: {
       final_answer: { type: 'string' },
