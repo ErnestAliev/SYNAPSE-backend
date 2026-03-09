@@ -808,6 +808,7 @@ function createProjectChatFlow({ deps, helpers }) {
     attachments,
     includeDebug,
     roleHint,
+    monitorMode = false,
   }) {
     const historyDedup = dedupeHistoryTailByCurrentMessage(rawHistory, message);
     const history = historyDedup.history;
@@ -936,7 +937,11 @@ function createProjectChatFlow({ deps, helpers }) {
     });
 
     const canRunProjectAutoEnrichment = typeof runProjectChatAutoEnrichment === 'function';
-    const shouldQueueProjectAutoEnrichment = scopeContext.scopeType === 'project' && canRunProjectAutoEnrichment;
+    const shouldQueueProjectAutoEnrichment = (
+      scopeContext.scopeType === 'project'
+      && canRunProjectAutoEnrichment
+      && monitorMode !== true
+    );
     if (shouldQueueProjectAutoEnrichment) {
       void runProjectChatAutoEnrichment({
         ownerId,
@@ -1016,6 +1021,7 @@ function createProjectChatFlow({ deps, helpers }) {
           selectedAttempt: selectedAttempt?.attemptIndex || 1,
           qualityGate: selectedAttempt?.qualityGate || null,
           reasoningState: selectedCandidate?.reasoning_state || null,
+          answerPattern: selectedCandidate?.answer_pattern || '',
           nextBestQuestion: nextQuestionDecision,
           attempts: attempts.map((attempt) => ({
             attemptIndex: attempt.attemptIndex,
@@ -1035,6 +1041,7 @@ function createProjectChatFlow({ deps, helpers }) {
           ? {
             queued: shouldQueueProjectAutoEnrichment,
             projectId: scopeContext.projectId,
+            monitorMode: monitorMode === true,
           }
           : null,
         provider: selectedAttempt?.aiResponse?.debug || {},

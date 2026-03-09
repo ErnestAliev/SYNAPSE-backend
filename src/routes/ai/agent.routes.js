@@ -312,7 +312,8 @@ function registerAgentRoutes({ router, deps, helpers }) {
     try {
       const ownerId = requireOwnerId(req);
       const message = toTrimmedString(req.body?.message, 2400);
-      const includeDebug = AI_DEBUG_ECHO || req.body?.debug === true;
+      const monitorMode = req.body?.monitorMode === true;
+      const includeDebug = AI_DEBUG_ECHO || req.body?.debug === true || monitorMode;
 
       if (!message) {
         return res.status(400).json({ message: 'message is required' });
@@ -331,6 +332,7 @@ function registerAgentRoutes({ router, deps, helpers }) {
         attachments,
         includeDebug,
         roleHint: req.body?.detectedRole,
+        monitorMode,
       });
 
       return res.status(200).json(result);
