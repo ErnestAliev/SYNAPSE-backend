@@ -155,7 +155,7 @@ function createProjectChatFlow({ deps, helpers }) {
         ? Math.max(PROJECT_DEEP_REASONING_MIN_TIMEOUT_MS, Math.floor(configuredTimeout))
         : PROJECT_DEEP_REASONING_MIN_TIMEOUT_MS,
       reasoningEffort: AGENT_CHAT_MAIN_REQUEST_CONFIG.reasoningEffort,
-      verbosity: configuredVerbosity === 'low' ? 'medium' : configuredVerbosity || 'medium',
+      verbosity: configuredVerbosity || 'low',
     };
   }
 
@@ -392,7 +392,14 @@ function createProjectChatFlow({ deps, helpers }) {
 
     const missingMandatoryBlocks = PROJECT_REQUIRED_REASONING_BLOCKS.filter((key) => !blockChecks[key]);
     const finalAnswerPresent = hasNonEmptyString(candidate?.final_answer);
-    const finalAnswerStructured = countMeaningfulParagraphs(candidate?.final_answer) >= 5;
+    const finalAnswerStructured = countMeaningfulParagraphs(candidate?.final_answer) >= 5
+      || (
+        blockChecks.core_conclusion
+        && blockChecks.why_not_enough
+        && blockChecks.next_growth_contour
+        && blockChecks.fast_levers
+        && blockChecks.excluded_paths
+      );
 
     const finalAnswerLower = toTrimmedString(candidate?.final_answer, 9000).toLowerCase();
     const entityNames = (Array.isArray(contextData?.entities) ? contextData.entities : [])
@@ -1102,6 +1109,8 @@ function createProjectChatFlow({ deps, helpers }) {
     const payloadSizeAfterRoleInjection = buildRequestBodySize(toProfile(mainReplyRequestPreview?.requestBody));
 
     const attempts = [];
+    const replyStartedAt = Date.now();
+    let regenerationSkippedReason = '';
 
     const passOne = await requestProjectReasoningAttempt({
       attemptIndex: 1,
@@ -1121,7 +1130,14 @@ function createProjectChatFlow({ deps, helpers }) {
     });
     attempts.push(passOne);
 
-    if (!passOne.qualityGate.passed && PROJECT_DEEP_REASONING_MAX_CALLS > 1) {
+    const regenerationDeadlineMs = Math.max(45_000, Math.floor(requestConfig.timeoutMs * 0.55));
+    const elapsedAfterPassOne = Date.now() - replyStartedAt;
+    const canRunRegeneration =
+      !passOne.qualityGate.passed
+      && PROJECT_DEEP_REASONING_MAX_CALLS > 1
+      && elapsedAfterPassOne < regenerationDeadlineMs;
+
+    if (canRunRegeneration) {
       const passTwoPromptPack = buildProjectReasoningPrompts({
         contextData,
         message,
@@ -1146,6 +1162,10 @@ function createProjectChatFlow({ deps, helpers }) {
         llmSerializationTrace,
       });
       attempts.push(passTwo);
+    } else if (!passOne.qualityGate.passed && PROJECT_DEEP_REASONING_MAX_CALLS > 1) {
+      regenerationSkippedReason = elapsedAfterPassOne >= regenerationDeadlineMs
+        ? 'skipped_due_time_budget'
+        : 'skipped_by_policy';
     }
 
     const selectedAttempt = pickBestAttempt(attempts) || passOne;
@@ -1244,6 +1264,7 @@ function createProjectChatFlow({ deps, helpers }) {
           answerPatterns: PROJECT_ANSWER_PATTERNS,
           maxCalls: PROJECT_DEEP_REASONING_MAX_CALLS,
           regenerationUsed: attempts.length > 1,
+          regenerationSkippedReason,
           selectedAttempt: selectedAttempt?.attemptIndex || 1,
           qualityGate: selectedAttempt?.qualityGate || null,
           reasoningState: selectedCandidate?.reasoning_state || null,
