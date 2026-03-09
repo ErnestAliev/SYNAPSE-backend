@@ -44,6 +44,10 @@ const ROLE_ON_DEMAND_CATALOG = Object.freeze([
       'ltv',
       'mrr',
       'arr',
+      'доход',
+      'профит',
+      'дефицит',
+      'расход',
       'выручк',
       'маржа',
       'cash',
@@ -141,7 +145,7 @@ const ROLE_ON_DEMAND_CATALOG = Object.freeze([
     key: 'contradiction_detector',
     name: 'Детектор противоречий',
     playbook: 'Найди несостыковки между фактами, целями и ограничениями.',
-    keywords: ['противореч', 'несостык', 'конфликт', 'но', 'однако', 'в то же время', 'не совпад'],
+    keywords: ['противореч', 'несостык', 'конфликт', 'взаимоисключ', 'не сходится', 'не совпад', 'расхожд'],
   },
   {
     key: 'omission_detector',
@@ -153,7 +157,7 @@ const ROLE_ON_DEMAND_CATALOG = Object.freeze([
     key: 'prioritizer',
     name: 'Приоритизатор',
     playbook: 'Отранжируй действия по эффекту, срочности и стоимости.',
-    keywords: ['приоритет', 'сначала', 'первым', 'очеред', 'самое важное', 'focus', 'rank'],
+    keywords: ['приоритет', 'сначала', 'первым', 'очеред', 'самое важное', 'focus', 'rank', 'конкретно', 'пошаг'],
   },
   {
     key: 'hidden_potential_hunter',
@@ -186,6 +190,27 @@ const LEGACY_ROLE_HINT_TO_ON_DEMAND = Object.freeze({
   hr: ['operations_analyst', 'contradiction_detector'],
   default: ['structure_mapper'],
 });
+const ROLE_SELECTION_GROUPS = Object.freeze({
+  structure_mapper: 'structure',
+  meaning_editor: 'structure',
+  contradiction_detector: 'structure',
+  omission_detector: 'structure',
+  change_archivist: 'structure',
+  strategist: 'strategy',
+  tactician_7_30: 'strategy',
+  prioritizer: 'strategy',
+  hidden_potential_hunter: 'strategy',
+  financial_analyst: 'finance',
+  risk_analyst: 'finance',
+  operations_analyst: 'operations',
+  marketing_decoder: 'growth',
+  product_analyst: 'growth',
+  sales_negotiator: 'negotiation',
+  negotiator: 'negotiation',
+  illusion_breaker: 'reality',
+});
+const ROLE_SELECTION_NEGOTIATION_KEYS = new Set(['sales_negotiator', 'negotiator']);
+const ROLE_SELECTION_DIVERSITY_DUPLICATE_MIN_SCORE = 8;
 const PROJECT_CHAT_ENRICHMENT_FIELDS = Object.freeze([
   'tags',
   'markers',
@@ -370,6 +395,209 @@ function createAiPrompts(deps) {
     }, 0);
   }
 
+  function countWordLikeTokens(value) {
+    const normalized = toTrimmedString(value, 2000);
+    if (!normalized) return 0;
+    return normalized.split(/[\s,.;:!?()\[\]{}"']+/g).map((item) => item.trim()).filter(Boolean).length;
+  }
+
+  function isVagueFollowUpMessage(value) {
+    const normalized = toTrimmedString(value, 2400).toLowerCase();
+    if (!normalized) return true;
+    const wordCount = countWordLikeTokens(normalized);
+    const vaguePattern = /^(ок|окей|ясно|понял|понятно|и что|что дальше|так что|так что конкретно|конкретно|ну и|дальше)\??$/i;
+    return wordCount <= 4 || vaguePattern.test(normalized);
+  }
+
+  function sumWeightedHits(weightedSignals, keywords) {
+    const source = Array.isArray(weightedSignals) ? weightedSignals : [];
+    let total = 0;
+    for (const signal of source) {
+      const weight = Number(signal?.weight);
+      if (!Number.isFinite(weight) || weight <= 0) continue;
+      const text = normalizeSignalText(signal?.text || '', 24_000);
+      if (!text) continue;
+      const hits = countKeywordHits(text, keywords);
+      if (!hits) continue;
+      total += hits * weight;
+    }
+    return total;
+  }
+
+  function buildRoleSelectionSignals({
+    payloadContext,
+    stateSnapshot,
+    message,
+    entities,
+    connections,
+    attachments,
+    stage,
+  }) {
+    const currentMessage = toTrimmedString(message, 2400);
+    const currentRequest = toTrimmedString(stateSnapshot?.currentUserRequest, 1200);
+    const latestUserSignals = (Array.isArray(stateSnapshot?.latestUserSignals) ? stateSnapshot.latestUserSignals : [])
+      .map((item) => toTrimmedString(item, 280))
+      .filter(Boolean);
+    const recentUserTurns = (Array.isArray(stateSnapshot?.recentUserTurns) ? stateSnapshot.recentUserTurns : [])
+      .map((item) => toTrimmedString(item, 420))
+      .filter(Boolean);
+    const goalsText = (Array.isArray(stateSnapshot?.goals) ? stateSnapshot.goals : [])
+      .map((goal) => {
+        const row = toProfile(goal);
+        return [toTrimmedString(row.name, 160), toTrimmedString(row.description, 320)].filter(Boolean).join(' ');
+      })
+      .filter(Boolean)
+      .join('\n');
+    const entityFactsText = entities
+      .slice(0, 120)
+      .map((entity) => {
+        const row = toProfile(entity);
+        return [toTrimmedString(row.type, 40), toTrimmedString(row.name, 180)].filter(Boolean).join(' ');
+      })
+      .filter(Boolean)
+      .join('\n');
+    const entityDescriptionsText = entities
+      .slice(0, 80)
+      .map((entity) => {
+        const row = toProfile(entity);
+        return toTrimmedString(row.description, 260);
+      })
+      .filter(Boolean)
+      .join('\n');
+    const connectionLabelsText = connections
+      .slice(0, 140)
+      .map((edge) => {
+        const row = toProfile(edge);
+        return [toTrimmedString(row.type, 48), toTrimmedString(row.label, 180)].filter(Boolean).join(' ');
+      })
+      .filter(Boolean)
+      .join('\n');
+    const attachmentsText = attachments
+      .slice(0, 8)
+      .map((attachment) => {
+        const row = toProfile(attachment);
+        return [toTrimmedString(row.name, 80), toTrimmedString(row.contentCategory, 24), toTrimmedString(row.text, 420)]
+          .filter(Boolean)
+          .join(' ');
+      })
+      .filter(Boolean)
+      .join('\n');
+    const scopeSignals = [
+      toTrimmedString(payloadContext?.scope?.name, 120),
+      toTrimmedString(payloadContext?.scope?.projectName, 120),
+      toTrimmedString(payloadContext?.scope?.entityType, 120),
+    ]
+      .filter(Boolean)
+      .join('\n');
+    const userIntentText = [
+      currentMessage,
+      currentRequest,
+      ...latestUserSignals,
+      ...recentUserTurns.slice(-2),
+      goalsText,
+    ]
+      .filter(Boolean)
+      .join('\n');
+    const followUpVague = stage === 'follow_up' && isVagueFollowUpMessage(currentMessage);
+    const weightedSignals = [
+      { id: 'current_message', text: currentMessage, weight: followUpVague ? 1.2 : 3.4 },
+      { id: 'state_current_request', text: currentRequest, weight: 2.6 },
+      { id: 'latest_user_signals', text: latestUserSignals.join('\n'), weight: 2.4 },
+      { id: 'recent_user_turns', text: recentUserTurns.join('\n'), weight: followUpVague ? 3.6 : 2.8 },
+      { id: 'goals', text: goalsText, weight: 2.6 },
+      { id: 'entity_facts', text: entityFactsText, weight: 1.1 },
+      { id: 'entity_descriptions', text: entityDescriptionsText, weight: 0.55 },
+      { id: 'connections', text: connectionLabelsText, weight: 0.8 },
+      { id: 'attachments', text: attachmentsText, weight: 1.3 },
+      { id: 'scope', text: scopeSignals, weight: 0.8 },
+    ];
+
+    return {
+      currentMessage,
+      currentRequest,
+      userIntentText,
+      followUpVague,
+      weightedSignals,
+      combinedSignalText: normalizeSignalText(
+        weightedSignals.map((item) => `${item.id}: ${item.text}`).join('\n'),
+        36_000,
+      ),
+      contextHeavyText: normalizeSignalText([entityFactsText, entityDescriptionsText, connectionLabelsText].join('\n'), 24_000),
+    };
+  }
+
+  function applyRoleSelectionCoverage({
+    selected,
+    sorted,
+    userIntentText,
+    followUpVague,
+    scopeType,
+  }) {
+    const nextSelected = Array.isArray(selected) ? [...selected] : [];
+    const selectedKeys = new Set(nextSelected.map((item) => item.key));
+    const selectedGroups = new Set(nextSelected.map((item) => ROLE_SELECTION_GROUPS[item.key] || 'general'));
+    const intent = normalizeSignalText(userIntentText, 8000);
+
+    function upsertRoleIfNeeded(roleKeys, reason) {
+      if (roleKeys.some((key) => selectedKeys.has(key))) return;
+      const candidate = sorted.find((item) => roleKeys.includes(item.key));
+      const fallbackKey = roleKeys.find((key) => ROLE_ON_DEMAND_BY_KEY[key]);
+      if (!candidate && !fallbackKey) return;
+      const withReason = candidate
+        ? {
+          ...candidate,
+          reasons: [...candidate.reasons, reason],
+        }
+        : {
+          ...ROLE_ON_DEMAND_BY_KEY[fallbackKey],
+          score: 1.2,
+          reasons: [`${reason} (fallback injection)`],
+        };
+      if (nextSelected.length < ROLE_ON_DEMAND_SELECTION_LIMIT) {
+        nextSelected.push(withReason);
+        selectedKeys.add(withReason.key);
+        selectedGroups.add(ROLE_SELECTION_GROUPS[withReason.key] || 'general');
+        return;
+      }
+      const replacementIndex = nextSelected
+        .map((item, index) => ({ index, score: item.score }))
+        .sort((left, right) => left.score - right.score)[0]?.index;
+      if (Number.isFinite(replacementIndex)) {
+        selectedKeys.delete(nextSelected[replacementIndex].key);
+        selectedGroups.delete(ROLE_SELECTION_GROUPS[nextSelected[replacementIndex].key] || 'general');
+        nextSelected[replacementIndex] = withReason;
+        selectedKeys.add(withReason.key);
+        selectedGroups.add(ROLE_SELECTION_GROUPS[withReason.key] || 'general');
+      }
+    }
+
+    const needsFinancial = /доход|деньг|финанс|дефицит|расход|маржа|выруч|cash|roi|kpi|прибыл/i.test(intent);
+    const needsPriority = /конкретно|что делать|следующ|план|по шагам|приоритет|дорожн|сначала/i.test(intent);
+    const needsHidden = /скрыт|потенциал|рычаг|возможност|неочевид/i.test(intent);
+    const needsNegotiation = /переговор|оппонент|уступк|batna|договорен|эскалац/i.test(intent);
+
+    if (needsFinancial) {
+      upsertRoleIfNeeded(['financial_analyst', 'risk_analyst'], 'coverage: финансовый контур');
+    }
+    if (needsPriority) {
+      upsertRoleIfNeeded(['prioritizer', 'tactician_7_30'], 'coverage: нужен конкретный следующий шаг');
+    }
+    if (needsHidden) {
+      upsertRoleIfNeeded(['hidden_potential_hunter'], 'coverage: запрос на скрытые резервы');
+    }
+    if (needsNegotiation) {
+      upsertRoleIfNeeded(['negotiator', 'sales_negotiator'], 'coverage: переговорный контур');
+    }
+
+    if (scopeType === 'project' && followUpVague) {
+      upsertRoleIfNeeded(['change_archivist', 'structure_mapper'], 'coverage: follow-up требует фиксации сдвига');
+    }
+
+    return nextSelected
+      .sort((left, right) => right.score - left.score || left.name.localeCompare(right.name))
+      .slice(0, ROLE_ON_DEMAND_SELECTION_LIMIT);
+  }
+
   function mapLegacyRoleHintToRoleKeys(rawRoleHint) {
     const normalizedHint = normalizeDetectedRole(rawRoleHint);
     return Array.isArray(LEGACY_ROLE_HINT_TO_ON_DEMAND[normalizedHint])
@@ -389,58 +617,40 @@ function createAiPrompts(deps) {
     const attachments = Array.isArray(payloadContext?.attachments) ? payloadContext.attachments : [];
     const scopeType = toTrimmedString(payloadContext?.scope?.type, 24).toLowerCase();
     const stage = toTrimmedString(stateSnapshot?.stage, 24).toLowerCase();
-
-    const signalParts = [
-      toTrimmedString(message, 2400),
-      toTrimmedString(stateSnapshot?.currentUserRequest, 1200),
-      ...(Array.isArray(stateSnapshot?.latestUserSignals) ? stateSnapshot.latestUserSignals : []).map((item) =>
-        toTrimmedString(item, 280),
-      ),
-      ...(Array.isArray(stateSnapshot?.recentUserTurns) ? stateSnapshot.recentUserTurns : []).map((item) =>
-        toTrimmedString(item, 280),
-      ),
-      ...entities
-        .slice(0, 100)
-        .flatMap((entity) => {
-          const row = toProfile(entity);
-          return [
-            toTrimmedString(row.type, 40),
-            toTrimmedString(row.name, 180),
-            toTrimmedString(row.description, 320),
-          ];
-        }),
-      ...connections
-        .slice(0, 120)
-        .flatMap((edge) => {
-          const row = toProfile(edge);
-          return [toTrimmedString(row.type, 48), toTrimmedString(row.label, 180)];
-        }),
-      ...attachments
-        .slice(0, 8)
-        .flatMap((attachment) => {
-          const row = toProfile(attachment);
-          return [
-            toTrimmedString(row.name, 80),
-            toTrimmedString(row.contentCategory, 24),
-            toTrimmedString(row.text, 360),
-          ];
-        }),
-    ].filter(Boolean);
-
-    const signalText = normalizeSignalText(signalParts.join('\n'), 24_000);
+    const roleSignals = buildRoleSelectionSignals({
+      payloadContext,
+      stateSnapshot,
+      message,
+      entities,
+      connections,
+      attachments,
+      stage,
+    });
+    const signalText = roleSignals.combinedSignalText;
+    const userIntentText = roleSignals.userIntentText;
+    const contextHeavyText = roleSignals.contextHeavyText;
     const legacyHintRoleKeys = mapLegacyRoleHintToRoleKeys(roleHint);
     const scored = [];
-    const decisionIntent = /как|что делать|план|приоритет|выбрать|стоит ли|запуск|масштаб|переговор|бюджет|риск|стратег|тактик/i
-      .test(toTrimmedString(message, 2400));
+    const decisionIntent = /как|что делать|план|приоритет|выбрать|стоит ли|запуск|масштаб|переговор|бюджет|риск|стратег|тактик|по шагам|конкретно/i
+      .test(normalizeSignalText(userIntentText, 8000));
+    const explicitNegotiationIntent = /переговор|оппонент|уступк|batna|эскалац|договорен|жестк/i
+      .test(normalizeSignalText(userIntentText, 8000));
+    const explicitHiddenPotentialIntent = /скрыт|потенциал|рычаг|неочевид|возможност/i
+      .test(normalizeSignalText(userIntentText, 8000));
+    const explicitFinancialIntent = /доход|деньг|финанс|дефицит|расход|маржа|выруч|cash|roi|kpi|прибыл|монет/i
+      .test(normalizeSignalText(userIntentText, 8000));
+    const explicitConcretenessIntent = /конкретно|по шагам|что делать|следующ|сначала|приоритет|чеклист/i
+      .test(normalizeSignalText(userIntentText, 8000));
+    const followUpVague = roleSignals.followUpVague;
 
     for (const role of ROLE_ON_DEMAND_CATALOG) {
       let score = 0;
       const reasons = [];
 
-      const keywordHits = countKeywordHits(signalText, role.keywords);
-      if (keywordHits > 0) {
-        score += keywordHits * 2;
-        reasons.push(`совпадения по сигналам: ${keywordHits}`);
+      const keywordScore = sumWeightedHits(roleSignals.weightedSignals, role.keywords);
+      if (keywordScore > 0) {
+        score += keywordScore;
+        reasons.push(`взвешенные совпадения: ${keywordScore.toFixed(1)}`);
       }
 
       if (legacyHintRoleKeys.includes(role.key)) {
@@ -463,8 +673,13 @@ function createAiPrompts(deps) {
         reasons.push('обнаружен decision intent');
       }
 
+      if (explicitConcretenessIntent && ['prioritizer', 'tactician_7_30'].includes(role.key)) {
+        score += 3;
+        reasons.push('запрос на конкретный план действий');
+      }
+
       if (
-        /противореч|несостык|конфликт|но |однако|в то же время/i.test(signalText)
+        /противореч|несостык|взаимоисключ|конфликт|не сходится|расхожд/i.test(signalText)
         && role.key === 'contradiction_detector'
       ) {
         score += 3;
@@ -494,6 +709,11 @@ function createAiPrompts(deps) {
         reasons.push('контур продаж/переговоров');
       }
 
+      if (explicitNegotiationIntent && role.key === 'negotiator') {
+        score += 5;
+        reasons.push('явный запрос на подготовку/ведение переговоров');
+      }
+
       if (
         /сложн[а-я]*\s*переговор|переговор|оппонент|эскалац|конфликт|batna|якор|уступк|позици|подготов/i
           .test(signalText)
@@ -501,6 +721,16 @@ function createAiPrompts(deps) {
       ) {
         score += 4;
         reasons.push('контур сложных переговоров/подготовки');
+      }
+
+      if (explicitHiddenPotentialIntent && role.key === 'hidden_potential_hunter') {
+        score += 5;
+        reasons.push('явный запрос на скрытые рычаги и резервы');
+      }
+
+      if (explicitFinancialIntent && role.key === 'financial_analyst') {
+        score += 4;
+        reasons.push('явный финансовый запрос');
       }
 
       if (/продукт|mvp|retention|onboarding|конверс|фича|гипотез/i.test(signalText) && role.key === 'product_analyst') {
@@ -518,20 +748,53 @@ function createAiPrompts(deps) {
         reasons.push('проверка гипотез на реализм');
       }
 
-      if (score > 0) {
+      if (ROLE_SELECTION_NEGOTIATION_KEYS.has(role.key) && !explicitNegotiationIntent) {
+        const contextNegotiationNoise = countKeywordHits(contextHeavyText, role.keywords);
+        if (contextNegotiationNoise > 0) {
+          score -= Math.min(3, contextNegotiationNoise);
+          reasons.push('штраф: переговорная лексика только из фонового контекста');
+        }
+      }
+
+      if (followUpVague && ROLE_SELECTION_NEGOTIATION_KEYS.has(role.key) && !explicitNegotiationIntent) {
+        score -= 2;
+        reasons.push('штраф: короткий follow-up без переговорного интента');
+      }
+
+      if (score > 0.2) {
         scored.push({
           ...role,
-          score,
+          score: Number(score.toFixed(2)),
           reasons,
         });
       }
     }
 
     const sorted = scored.sort((left, right) => right.score - left.score || left.name.localeCompare(right.name));
-    const selected = sorted.slice(
-      0,
-      Math.max(ROLE_ON_DEMAND_MIN_SELECTION, Math.min(ROLE_ON_DEMAND_SELECTION_LIMIT, sorted.length || 1)),
-    );
+    const selected = [];
+    const selectedGroups = new Set();
+    for (const candidate of sorted) {
+      if (selected.length >= ROLE_ON_DEMAND_SELECTION_LIMIT) break;
+      const group = ROLE_SELECTION_GROUPS[candidate.key] || 'general';
+      if (
+        selectedGroups.has(group)
+        && candidate.score < ROLE_SELECTION_DIVERSITY_DUPLICATE_MIN_SCORE
+      ) {
+        continue;
+      }
+      selected.push(candidate);
+      selectedGroups.add(group);
+    }
+
+    const selectedKeysSeed = new Set(selected.map((item) => item.key));
+    if (selected.length < ROLE_ON_DEMAND_MIN_SELECTION) {
+      for (const candidate of sorted) {
+        if (selected.length >= ROLE_ON_DEMAND_MIN_SELECTION) break;
+        if (selectedKeysSeed.has(candidate.key)) continue;
+        selected.push(candidate);
+        selectedKeysSeed.add(candidate.key);
+      }
+    }
 
     if (!selected.length) {
       const fallback = ROLE_ON_DEMAND_BY_KEY.structure_mapper || ROLE_ON_DEMAND_CATALOG[0];
@@ -542,7 +805,15 @@ function createAiPrompts(deps) {
       });
     }
 
-    const selectedKeySet = new Set(selected.map((item) => item.key));
+    const coveredSelected = applyRoleSelectionCoverage({
+      selected,
+      sorted,
+      userIntentText,
+      followUpVague,
+      scopeType,
+    });
+
+    const selectedKeySet = new Set(coveredSelected.map((item) => item.key));
     const dropped = ROLE_ON_DEMAND_CATALOG
       .filter((role) => !selectedKeySet.has(role.key))
       .map((role) => {
@@ -552,18 +823,22 @@ function createAiPrompts(deps) {
           key: role.key,
           name: role.name,
           score,
-          reason: score > 0 ? 'ниже top-3' : 'нет релевантных сигналов',
+          reason: score > 0
+            ? score >= ROLE_SELECTION_DIVERSITY_DUPLICATE_MIN_SCORE
+              ? 'уступил coverage/diversity выбору'
+              : 'ниже top-3 после взвешивания'
+            : 'нет релевантных сигналов',
         };
       });
 
     return {
-      selectedRoles: selected.map((item) => ({
+      selectedRoles: coveredSelected.map((item) => ({
         key: item.key,
         name: item.name,
         playbook: item.playbook,
         score: item.score,
       })),
-      whySelected: selected.map((item) => ({
+      whySelected: coveredSelected.map((item) => ({
         key: item.key,
         name: item.name,
         reasons: item.reasons,
@@ -589,19 +864,55 @@ function createAiPrompts(deps) {
   }) {
     const payloadContext = toProfile(contextData);
     const normalizedMessage = toTrimmedString(message, 2400);
-    const messageLower = normalizedMessage.toLowerCase();
     const entitiesCount = Array.isArray(payloadContext?.entities) ? payloadContext.entities.length : 0;
     const stage = toTrimmedString(payloadContext?.stateSnapshot?.stage, 24).toLowerCase();
+    const stateSnapshot = toProfile(payloadContext?.stateSnapshot);
+    const recentUserTurns = (Array.isArray(stateSnapshot?.recentUserTurns) ? stateSnapshot.recentUserTurns : [])
+      .map((item) => toTrimmedString(item, 420))
+      .filter(Boolean);
+    const latestUserSignals = (Array.isArray(stateSnapshot?.latestUserSignals) ? stateSnapshot.latestUserSignals : [])
+      .map((item) => toTrimmedString(item, 220))
+      .filter(Boolean);
+    const goalsText = (Array.isArray(stateSnapshot?.goals) ? stateSnapshot.goals : [])
+      .map((goal) => {
+        const row = toProfile(goal);
+        return [toTrimmedString(row.name, 120), toTrimmedString(row.description, 220)].filter(Boolean).join(' ');
+      })
+      .filter(Boolean)
+      .join('\n');
+    const entitiesText = (Array.isArray(payloadContext?.entities) ? payloadContext.entities : [])
+      .slice(0, 90)
+      .map((entity) => {
+        const row = toProfile(entity);
+        return [toTrimmedString(row.name, 120), toTrimmedString(row.description, 220)].filter(Boolean).join(' ');
+      })
+      .filter(Boolean)
+      .join('\n');
+    const contextIntentText = normalizeSignalText([
+      normalizedMessage,
+      toTrimmedString(stateSnapshot?.currentUserRequest, 420),
+      latestUserSignals.join('\n'),
+      recentUserTurns.join('\n'),
+      goalsText,
+      entitiesText,
+    ].join('\n'), 24_000);
+    const followUpVague = stage === 'follow_up' && isVagueFollowUpMessage(normalizedMessage);
     const selectedRoleKeys = (Array.isArray(selectedRoles) ? selectedRoles : [])
       .map((item) => toTrimmedString(item?.key, 64))
       .filter(Boolean);
 
-    const decisionIntent = /как|что делать|план|приоритет|выбрать|стоит ли|нужно ли|сценар|дорожн|шаг/i.test(messageLower);
-    const hasGoal = /цель|хочу|нужно|надо|добиться|увелич|сниз|запустить|сделать/i.test(messageLower);
-    const hasConstraints = /бюджет|лимит|ресурс|команда|дедлайн|срок|огранич/i.test(messageLower);
-    const hasTimeframe = /дн|недел|месяц|квартал|год|до\s+\d{1,2}[./-]\d{1,2}|q[1-4]|\d+\s*(дней|недель|месяцев)/i
-      .test(messageLower);
-    const hasMetric = /(\d+[%$₸€₽])|kpi|roi|ltv|cac|mrr|arr|конверс|маржа|выручк/i.test(messageLower);
+    let decisionIntent = /как|что делать|план|приоритет|выбрать|стоит ли|нужно ли|сценар|дорожн|шаг|конкретно|по шагам/i
+      .test(contextIntentText);
+    if (!decisionIntent && followUpVague) {
+      decisionIntent = /цель|доход|план|приоритет|конкрет|вариант|рычаг|рост/i.test(contextIntentText);
+    }
+    const hasGoal = /цель|хочу|нужно|надо|добиться|увелич|сниз|запустить|сделать/i.test(contextIntentText)
+      || (Array.isArray(stateSnapshot?.goals) && stateSnapshot.goals.length > 0);
+    const hasConstraints = /бюджет|лимит|ресурс|команда|дедлайн|срок|огранич|расход|кредит|обязательств|дефицит/i
+      .test(contextIntentText);
+    const hasTimeframe = /дн|недел|месяц|квартал|год|до\s+\d{1,2}[./-]\d{1,2}|q[1-4]|202\d|\d+\s*(дней|недель|месяцев)/i
+      .test(contextIntentText);
+    const hasMetric = /(\d+[%$₸€₽])|kpi|roi|ltv|cac|mrr|arr|конверс|маржа|выручк|x[2-9]/i.test(contextIntentText);
 
     const missingSignals = [];
     if (!hasGoal) missingSignals.push('цель');
@@ -609,7 +920,7 @@ function createAiPrompts(deps) {
     if (!hasTimeframe) missingSignals.push('срок');
     if (!hasMetric) missingSignals.push('метрика');
 
-    const baseCanProgressWithoutQuestion = !decisionIntent || missingSignals.length <= 1;
+    const baseCanProgressWithoutQuestion = !decisionIntent || missingSignals.length <= 1 || followUpVague;
     const contextIsThin = entitiesCount < 2 && stage === 'initial';
     const roleNeedsClarification = selectedRoleKeys.some((key) =>
       ['financial_analyst', 'prioritizer', 'tactician_7_30', 'sales_negotiator', 'negotiator'].includes(key),
@@ -622,8 +933,10 @@ function createAiPrompts(deps) {
     const allowReason = allowQuestion
       ? `без уточнения страдают решение и план: не хватает ${missingSignals.slice(0, 2).join(', ')}`
       : baseCanProgressWithoutQuestion
-        ? 'данных достаточно для следующего шага без уточнений'
-        : 'вопрос не меняет решение/приоритет/план';
+        ? followUpVague
+          ? 'follow-up короткий, но контекст уже позволяет дать конкретный шаг без уточнений'
+          : 'данных достаточно для следующего шага без уточнений'
+        : 'можно продвинуть решение по текущему контексту без дополнительного вопроса';
 
     return {
       allowQuestion,
@@ -633,6 +946,13 @@ function createAiPrompts(deps) {
       questionFocus: resolveQuestionFocus(missingSignals),
       entitiesInContext: entitiesCount,
       stage: stage || 'unknown',
+      followUpVague,
+      contextIntentSignals: {
+        hasGoal,
+        hasConstraints,
+        hasTimeframe,
+        hasMetric,
+      },
       policy: allowQuestion
         ? 'question_allowed_if_it_changes_plan'
         : 'question_blocked_unless_plan_changes',
