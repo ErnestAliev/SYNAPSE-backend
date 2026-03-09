@@ -1,25 +1,191 @@
 const SYSTEM_CONTEXT_KEYS_TO_DROP = new Set(['__v', 'createdAt', 'updatedAt']);
-const EXPERT_PROFILES = Object.freeze({
-  investor:
-    'Ты Жесткий Инвест-аналитик. Фокус: юнит-экономика, кассовые разрывы, ROI, риски договоров.',
-  hr: 'Ты HR-профайлер. Фокус: совместимость команды, стили управления, психотипы, риск конфликтов.',
-  strategist: 'Ты Бизнес-стратег. Фокус: поиск неочевидных рычагов, транзитных связей, точек роста.',
-  default: 'Ты Аналитик Synapse12. Фокус: базовая оценка связей.',
-});
+const BASE_AGENT_PROFILE = 'Ты аналитик Synapse12. Твоя цель: быстрый практичный анализ и следующий осмысленный шаг.';
 
 const STRICT_FORMATTING_RULES = `
 ПРАВИЛА ВЫДАЧИ (КРИТИЧЕСКИ ВАЖНО):
 1. ПИШИ ТОЛЬКО ЧИСТЫМ ТЕКСТОМ.
 2. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать Markdown (звездочки **, решетки #, списки -, _, жирный шрифт, курсив).
 3. ЗАПРЕЩЕНО использовать эмодзи.
-4. НИКАКОЙ ВОДЫ. Отвечай строго в 4 абзаца:
+4. НИКАКОЙ ВОДЫ. Базовый формат ответа — строго 3 абзаца:
 Факт: [сухой факт из данных]
 Связь: [твой инсайт]
 Вывод: [оценка риска/вероятности]
-Вопрос: [один хирургический вопрос пользователю для следующего шага]
+5. Блок "Вопрос:" НЕ ОБЯЗАТЕЛЕН. Добавляй его только если явно разрешено Question Gate.
+6. Если Question Gate не разрешил вопрос — заверши ответ на "Вывод:" без "Вопрос:".
+7. Если Question Gate разрешил вопрос — задай максимум 1 короткий операционный вопрос, который меняет решение, приоритет или план.
 `.trim();
 
 const ALLOWED_ROUTER_ROLES = new Set(['investor', 'hr', 'strategist', 'default']);
+const ROLE_ON_DEMAND_SELECTION_LIMIT = 3;
+const ROLE_ON_DEMAND_MIN_SELECTION = 1;
+const ROLE_ON_DEMAND_CATALOG = Object.freeze([
+  {
+    key: 'structure_mapper',
+    name: 'Картограф структуры',
+    playbook: 'Разложи задачу по сущностям, связям, узким местам и зависимостям.',
+    keywords: ['структур', 'карта', 'связ', 'граф', 'узел', 'система', 'контекст', 'entity', 'topology'],
+  },
+  {
+    key: 'meaning_editor',
+    name: 'Смысловой редактор',
+    playbook: 'Убери размытость формулировок и оставь проверяемые, операционные тезисы.',
+    keywords: ['переформулир', 'смысл', 'ясно', 'четко', 'формулиров', 'позиционир', 'коммуникац'],
+  },
+  {
+    key: 'financial_analyst',
+    name: 'Финансовый аналитик',
+    playbook: 'Фокус на деньгах: экономика, денежный поток, маржа, окупаемость.',
+    keywords: [
+      'бюджет',
+      'деньги',
+      'финанс',
+      'roi',
+      'cac',
+      'ltv',
+      'mrr',
+      'arr',
+      'выручк',
+      'маржа',
+      'cash',
+      'окуп',
+      'экономик',
+    ],
+  },
+  {
+    key: 'operations_analyst',
+    name: 'Операционный аналитик',
+    playbook: 'Проверь процессы, ресурсы, загрузку команды, bottlenecks и SLA.',
+    keywords: [
+      'операц',
+      'процесс',
+      'регламент',
+      'поставка',
+      'логист',
+      'срок',
+      'дедлайн',
+      'команда',
+      'ресурс',
+      'исполнен',
+      'sla',
+    ],
+  },
+  {
+    key: 'risk_analyst',
+    name: 'Риск-аналитик',
+    playbook: 'Ищи вероятность срыва, цену ошибки и защитные меры.',
+    keywords: ['риск', 'угроза', 'срыв', 'потер', 'штраф', 'регулятор', 'sensitivity', 'неопредел'],
+  },
+  {
+    key: 'strategist',
+    name: 'Стратег',
+    playbook: 'Сфокусируйся на рычагах роста, позиционировании и выборе направления.',
+    keywords: ['стратег', 'направлен', 'позиционир', 'рынок', 'экспанс', 'growth', 'масштаб', 'долгосроч'],
+  },
+  {
+    key: 'tactician_7_30',
+    name: 'Тактик (7–30 дней)',
+    playbook: 'Преобразуй идею в короткий исполнимый план на 7-30 дней.',
+    keywords: ['7', '14', '30', 'недел', 'месяц', 'спринт', 'быстро', 'завтра', 'план', 'roadmap'],
+  },
+  {
+    key: 'marketing_decoder',
+    name: 'Маркетинговый дешифровщик',
+    playbook: 'Разбери аудиторию, оффер, канал и воронку спроса.',
+    keywords: [
+      'маркет',
+      'бренд',
+      'аудитор',
+      'сегмент',
+      'воронк',
+      'лид',
+      'трафик',
+      'контент',
+      'креатив',
+      'позиционир',
+      'utm',
+    ],
+  },
+  {
+    key: 'sales_negotiator',
+    name: 'Продажник/переговорщик',
+    playbook: 'Определи тактику сделки, аргументы, уступки и закрытие.',
+    keywords: ['продаж', 'сделк', 'переговор', 'клиент', 'возражен', 'чек', 'лид', 'закрыт', 'договор'],
+  },
+  {
+    key: 'negotiator',
+    name: 'Переговорщик',
+    playbook: 'Подготовь и проведи сложные переговоры: BATNA, цели, рамки уступок, якорь, сценарии и фиксация договоренностей.',
+    keywords: [
+      'переговор',
+      'сложн',
+      'конфликт',
+      'эскалац',
+      'оппонент',
+      'давление',
+      'batna',
+      'уступк',
+      'якор',
+      'аргумент',
+      'позици',
+      'договорен',
+      'подготовк',
+    ],
+  },
+  {
+    key: 'product_analyst',
+    name: 'Продуктовый аналитик',
+    playbook: 'Свяжи пользовательскую проблему, ценность и продуктовые метрики.',
+    keywords: ['продукт', 'фича', 'mvp', 'retention', 'конверс', 'onboarding', 'ux', 'jtbd', 'гипотез'],
+  },
+  {
+    key: 'contradiction_detector',
+    name: 'Детектор противоречий',
+    playbook: 'Найди несостыковки между фактами, целями и ограничениями.',
+    keywords: ['противореч', 'несостык', 'конфликт', 'но', 'однако', 'в то же время', 'не совпад'],
+  },
+  {
+    key: 'omission_detector',
+    name: 'Детектор упущений',
+    playbook: 'Покажи, каких данных/шагов не хватает для качественного решения.',
+    keywords: ['упустил', 'не хватает', 'пробел', 'слепая зона', 'чего нет', 'missing'],
+  },
+  {
+    key: 'prioritizer',
+    name: 'Приоритизатор',
+    playbook: 'Отранжируй действия по эффекту, срочности и стоимости.',
+    keywords: ['приоритет', 'сначала', 'первым', 'очеред', 'самое важное', 'focus', 'rank'],
+  },
+  {
+    key: 'hidden_potential_hunter',
+    name: 'Охотник за скрытым потенциалом',
+    playbook: 'Найди недоиспользованные активы, связи и короткие рычаги роста.',
+    keywords: ['рычаг', 'скрыт', 'резерв', 'потенциал', 'неочевид', 'быстрый рост', 'leverage'],
+  },
+  {
+    key: 'illusion_breaker',
+    name: 'Разрушитель иллюзий',
+    playbook: 'Отдели гипотезы от фактов, вскрой ложные допущения.',
+    keywords: ['иллюз', 'самообман', 'допущен', 'провер', 'реальн', 'факт', 'wishful'],
+  },
+  {
+    key: 'change_archivist',
+    name: 'Архивариус изменений',
+    playbook: 'Сопоставь новый запрос с прошлым контекстом и зафиксируй сдвиг.',
+    keywords: ['изменен', 'раньше', 'теперь', 'обнови', 'динамик', 'история', 'эволюц'],
+  },
+]);
+const ROLE_ON_DEMAND_BY_KEY = Object.freeze(
+  ROLE_ON_DEMAND_CATALOG.reduce((acc, role) => {
+    acc[role.key] = role;
+    return acc;
+  }, {}),
+);
+const LEGACY_ROLE_HINT_TO_ON_DEMAND = Object.freeze({
+  investor: ['financial_analyst', 'risk_analyst'],
+  strategist: ['strategist', 'hidden_potential_hunter'],
+  hr: ['operations_analyst', 'contradiction_detector'],
+  default: ['structure_mapper'],
+});
 const PROJECT_CHAT_ENRICHMENT_FIELDS = Object.freeze([
   'tags',
   'markers',
@@ -188,6 +354,329 @@ function createAiPrompts(deps) {
     normalizeDescriptionHistory,
     normalizeImportanceHistory,
   } = deps;
+
+  function normalizeSignalText(value, maxLength = 24_000) {
+    return toTrimmedString(value, maxLength).toLowerCase();
+  }
+
+  function countKeywordHits(text, keywords) {
+    const source = typeof text === 'string' ? text : '';
+    if (!source) return 0;
+    const list = Array.isArray(keywords) ? keywords : [];
+    return list.reduce((count, keyword) => {
+      const normalized = toTrimmedString(keyword, 64).toLowerCase();
+      if (!normalized) return count;
+      return source.includes(normalized) ? count + 1 : count;
+    }, 0);
+  }
+
+  function mapLegacyRoleHintToRoleKeys(rawRoleHint) {
+    const normalizedHint = normalizeDetectedRole(rawRoleHint);
+    return Array.isArray(LEGACY_ROLE_HINT_TO_ON_DEMAND[normalizedHint])
+      ? LEGACY_ROLE_HINT_TO_ON_DEMAND[normalizedHint]
+      : [];
+  }
+
+  function selectAgentRolesOnDemand({
+    contextData,
+    message,
+    roleHint = '',
+  }) {
+    const payloadContext = toProfile(contextData);
+    const stateSnapshot = toProfile(payloadContext?.stateSnapshot);
+    const entities = Array.isArray(payloadContext?.entities) ? payloadContext.entities : [];
+    const connections = Array.isArray(payloadContext?.connections) ? payloadContext.connections : [];
+    const attachments = Array.isArray(payloadContext?.attachments) ? payloadContext.attachments : [];
+    const scopeType = toTrimmedString(payloadContext?.scope?.type, 24).toLowerCase();
+    const stage = toTrimmedString(stateSnapshot?.stage, 24).toLowerCase();
+
+    const signalParts = [
+      toTrimmedString(message, 2400),
+      toTrimmedString(stateSnapshot?.currentUserRequest, 1200),
+      ...(Array.isArray(stateSnapshot?.latestUserSignals) ? stateSnapshot.latestUserSignals : []).map((item) =>
+        toTrimmedString(item, 280),
+      ),
+      ...(Array.isArray(stateSnapshot?.recentUserTurns) ? stateSnapshot.recentUserTurns : []).map((item) =>
+        toTrimmedString(item, 280),
+      ),
+      ...entities
+        .slice(0, 100)
+        .flatMap((entity) => {
+          const row = toProfile(entity);
+          return [
+            toTrimmedString(row.type, 40),
+            toTrimmedString(row.name, 180),
+            toTrimmedString(row.description, 320),
+          ];
+        }),
+      ...connections
+        .slice(0, 120)
+        .flatMap((edge) => {
+          const row = toProfile(edge);
+          return [toTrimmedString(row.type, 48), toTrimmedString(row.label, 180)];
+        }),
+      ...attachments
+        .slice(0, 8)
+        .flatMap((attachment) => {
+          const row = toProfile(attachment);
+          return [
+            toTrimmedString(row.name, 80),
+            toTrimmedString(row.contentCategory, 24),
+            toTrimmedString(row.text, 360),
+          ];
+        }),
+    ].filter(Boolean);
+
+    const signalText = normalizeSignalText(signalParts.join('\n'), 24_000);
+    const legacyHintRoleKeys = mapLegacyRoleHintToRoleKeys(roleHint);
+    const scored = [];
+    const decisionIntent = /как|что делать|план|приоритет|выбрать|стоит ли|запуск|масштаб|переговор|бюджет|риск|стратег|тактик/i
+      .test(toTrimmedString(message, 2400));
+
+    for (const role of ROLE_ON_DEMAND_CATALOG) {
+      let score = 0;
+      const reasons = [];
+
+      const keywordHits = countKeywordHits(signalText, role.keywords);
+      if (keywordHits > 0) {
+        score += keywordHits * 2;
+        reasons.push(`совпадения по сигналам: ${keywordHits}`);
+      }
+
+      if (legacyHintRoleKeys.includes(role.key)) {
+        score += 4;
+        reasons.push('усилен legacy role hint');
+      }
+
+      if (scopeType === 'project' && ['structure_mapper', 'strategist', 'tactician_7_30'].includes(role.key)) {
+        score += 1;
+        reasons.push('релевантно project scope');
+      }
+
+      if (stage === 'follow_up' && ['change_archivist', 'contradiction_detector'].includes(role.key)) {
+        score += 2;
+        reasons.push('релевантно follow-up стадии');
+      }
+
+      if (decisionIntent && ['prioritizer', 'tactician_7_30', 'strategist'].includes(role.key)) {
+        score += 2;
+        reasons.push('обнаружен decision intent');
+      }
+
+      if (
+        /противореч|несостык|конфликт|но |однако|в то же время/i.test(signalText)
+        && role.key === 'contradiction_detector'
+      ) {
+        score += 3;
+        reasons.push('найден конфликт в формулировках');
+      }
+
+      if (
+        /деньг|финанс|cash|roi|маржа|выруч|затрат|бюджет|окуп/i.test(signalText)
+        && role.key === 'financial_analyst'
+      ) {
+        score += 3;
+        reasons.push('финансовый контур задачи');
+      }
+
+      if (/риск|угроз|штраф|неопредел|потер/i.test(signalText) && role.key === 'risk_analyst') {
+        score += 3;
+        reasons.push('повышенная риск-нагруженность');
+      }
+
+      if (/воронк|лид|трафик|аудитор|бренд|креатив/i.test(signalText) && role.key === 'marketing_decoder') {
+        score += 3;
+        reasons.push('маркетинговый контур задачи');
+      }
+
+      if (/продаж|сделк|переговор|возражен|договор|чек/i.test(signalText) && role.key === 'sales_negotiator') {
+        score += 3;
+        reasons.push('контур продаж/переговоров');
+      }
+
+      if (
+        /сложн[а-я]*\s*переговор|переговор|оппонент|эскалац|конфликт|batna|якор|уступк|позици|подготов/i
+          .test(signalText)
+        && role.key === 'negotiator'
+      ) {
+        score += 4;
+        reasons.push('контур сложных переговоров/подготовки');
+      }
+
+      if (/продукт|mvp|retention|onboarding|конверс|фича|гипотез/i.test(signalText) && role.key === 'product_analyst') {
+        score += 3;
+        reasons.push('продуктовый контур');
+      }
+
+      if (/слепая зона|упуст|не хватает|пробел|чего нет|missing/i.test(signalText) && role.key === 'omission_detector') {
+        score += 3;
+        reasons.push('явный запрос на поиск упущений');
+      }
+
+      if (/иллюз|самообман|розовы|wishful|нереал/i.test(signalText) && role.key === 'illusion_breaker') {
+        score += 3;
+        reasons.push('проверка гипотез на реализм');
+      }
+
+      if (score > 0) {
+        scored.push({
+          ...role,
+          score,
+          reasons,
+        });
+      }
+    }
+
+    const sorted = scored.sort((left, right) => right.score - left.score || left.name.localeCompare(right.name));
+    const selected = sorted.slice(
+      0,
+      Math.max(ROLE_ON_DEMAND_MIN_SELECTION, Math.min(ROLE_ON_DEMAND_SELECTION_LIMIT, sorted.length || 1)),
+    );
+
+    if (!selected.length) {
+      const fallback = ROLE_ON_DEMAND_BY_KEY.structure_mapper || ROLE_ON_DEMAND_CATALOG[0];
+      selected.push({
+        ...fallback,
+        score: 1,
+        reasons: ['fallback: базовый структурный разбор'],
+      });
+    }
+
+    const selectedKeySet = new Set(selected.map((item) => item.key));
+    const dropped = ROLE_ON_DEMAND_CATALOG
+      .filter((role) => !selectedKeySet.has(role.key))
+      .map((role) => {
+        const scoredRow = sorted.find((item) => item.key === role.key);
+        const score = scoredRow?.score || 0;
+        return {
+          key: role.key,
+          name: role.name,
+          score,
+          reason: score > 0 ? 'ниже top-3' : 'нет релевантных сигналов',
+        };
+      });
+
+    return {
+      selectedRoles: selected.map((item) => ({
+        key: item.key,
+        name: item.name,
+        playbook: item.playbook,
+        score: item.score,
+      })),
+      whySelected: selected.map((item) => ({
+        key: item.key,
+        name: item.name,
+        reasons: item.reasons,
+      })),
+      droppedRoles: dropped,
+      roleHint: normalizeDetectedRole(roleHint),
+    };
+  }
+
+  function resolveQuestionFocus(missingSignals) {
+    const source = Array.isArray(missingSignals) ? missingSignals : [];
+    if (source.includes('цель')) return 'цель следующего шага';
+    if (source.includes('ограничения')) return 'ограничения (бюджет/команда/дедлайн)';
+    if (source.includes('срок')) return 'срок реализации';
+    if (source.includes('метрика')) return 'метрика успеха';
+    return 'ключевой операционный блокер';
+  }
+
+  function evaluateAgentQuestionGate({
+    contextData,
+    message,
+    selectedRoles,
+  }) {
+    const payloadContext = toProfile(contextData);
+    const normalizedMessage = toTrimmedString(message, 2400);
+    const messageLower = normalizedMessage.toLowerCase();
+    const entitiesCount = Array.isArray(payloadContext?.entities) ? payloadContext.entities.length : 0;
+    const stage = toTrimmedString(payloadContext?.stateSnapshot?.stage, 24).toLowerCase();
+    const selectedRoleKeys = (Array.isArray(selectedRoles) ? selectedRoles : [])
+      .map((item) => toTrimmedString(item?.key, 64))
+      .filter(Boolean);
+
+    const decisionIntent = /как|что делать|план|приоритет|выбрать|стоит ли|нужно ли|сценар|дорожн|шаг/i.test(messageLower);
+    const hasGoal = /цель|хочу|нужно|надо|добиться|увелич|сниз|запустить|сделать/i.test(messageLower);
+    const hasConstraints = /бюджет|лимит|ресурс|команда|дедлайн|срок|огранич/i.test(messageLower);
+    const hasTimeframe = /дн|недел|месяц|квартал|год|до\s+\d{1,2}[./-]\d{1,2}|q[1-4]|\d+\s*(дней|недель|месяцев)/i
+      .test(messageLower);
+    const hasMetric = /(\d+[%$₸€₽])|kpi|roi|ltv|cac|mrr|arr|конверс|маржа|выручк/i.test(messageLower);
+
+    const missingSignals = [];
+    if (!hasGoal) missingSignals.push('цель');
+    if (!hasConstraints) missingSignals.push('ограничения');
+    if (!hasTimeframe) missingSignals.push('срок');
+    if (!hasMetric) missingSignals.push('метрика');
+
+    const baseCanProgressWithoutQuestion = !decisionIntent || missingSignals.length <= 1;
+    const contextIsThin = entitiesCount < 2 && stage === 'initial';
+    const roleNeedsClarification = selectedRoleKeys.some((key) =>
+      ['financial_analyst', 'prioritizer', 'tactician_7_30', 'sales_negotiator', 'negotiator'].includes(key),
+    );
+    const allowQuestion =
+      decisionIntent
+      && roleNeedsClarification
+      && (missingSignals.length >= 2 || contextIsThin);
+
+    const allowReason = allowQuestion
+      ? `без уточнения страдают решение и план: не хватает ${missingSignals.slice(0, 2).join(', ')}`
+      : baseCanProgressWithoutQuestion
+        ? 'данных достаточно для следующего шага без уточнений'
+        : 'вопрос не меняет решение/приоритет/план';
+
+    return {
+      allowQuestion,
+      allowReason,
+      decisionIntent,
+      missingSignals,
+      questionFocus: resolveQuestionFocus(missingSignals),
+      entitiesInContext: entitiesCount,
+      stage: stage || 'unknown',
+      policy: allowQuestion
+        ? 'question_allowed_if_it_changes_plan'
+        : 'question_blocked_unless_plan_changes',
+    };
+  }
+
+  function extractQuestionFromReply(replyText) {
+    const text = toTrimmedString(replyText, 6000);
+    if (!text) return '';
+    const labeledMatch = text.match(/(?:^|\n)\s*Вопрос:\s*(.+)$/im);
+    if (labeledMatch && labeledMatch[1]) {
+      return toTrimmedString(labeledMatch[1], 320);
+    }
+    const chunks = text
+      .split(/(?<=[?!])\s+/g)
+      .map((item) => toTrimmedString(item, 320))
+      .filter(Boolean);
+    for (let index = chunks.length - 1; index >= 0; index -= 1) {
+      if (chunks[index].includes('?')) return chunks[index];
+    }
+    return '';
+  }
+
+  function inspectAgentReplyQuestionGate({
+    reply,
+    questionGate,
+  }) {
+    const gate = toProfile(questionGate);
+    const extractedQuestion = extractQuestionFromReply(reply);
+    const asked = Boolean(extractedQuestion);
+    let reason = '';
+    if (asked && gate.allowQuestion) reason = 'вопрос добавлен и gate разрешил';
+    if (asked && !gate.allowQuestion) reason = 'вопрос добавлен несмотря на запрет gate';
+    if (!asked && gate.allowQuestion) reason = 'вопрос не добавлен: можно двигаться без уточнений';
+    if (!asked && !gate.allowQuestion) reason = 'вопрос пропущен: gate запретил';
+
+    return {
+      asked,
+      reason,
+      extractedQuestion,
+      allowQuestion: gate.allowQuestion === true,
+      allowReason: toTrimmedString(gate.allowReason, 240),
+    };
+  }
 
   function buildAgentContextData({ scopeContext, history, attachments }) {
     const cleanedEntities = cleanContextData(scopeContext.entities);
@@ -581,9 +1070,11 @@ function createAiPrompts(deps) {
     ].join('\n');
   }
 
-  function buildAgentSystemPrompt(contextData, detectedRole = 'default') {
-    const normalizedRole = normalizeDetectedRole(detectedRole);
-    const expertText = EXPERT_PROFILES[normalizedRole] || EXPERT_PROFILES.default;
+  function buildAgentSystemPrompt(contextData, options = {}) {
+    const config = options && typeof options === 'object' ? options : {};
+    const selectedRoles = Array.isArray(config.selectedRoles) ? config.selectedRoles : [];
+    const questionGate = toProfile(config.questionGate);
+    const skipRolePlaybooks = config.skipRolePlaybooks === true;
     const scopeSource =
       contextData && typeof contextData === 'object'
         ? contextData.scope && typeof contextData.scope === 'object'
@@ -602,19 +1093,43 @@ function createAiPrompts(deps) {
       scopeType === 'project'
         ? 'Важно: для проектного чата выделяй факты, риски, задачи и метрики максимально конкретно.'
         : '';
+    const rolePlaybookText = skipRolePlaybooks
+      ? 'Role-on-demand: baseline режим без инъекции role playbook.'
+      : selectedRoles.length
+        ? [
+          `Role-on-demand: выбраны ${selectedRoles.length} роли.`,
+          ...selectedRoles.map((role, index) => {
+            const roleName = toTrimmedString(role?.name, 120) || `Роль ${index + 1}`;
+            const rolePlaybook = toTrimmedString(role?.playbook, 360);
+            return `${index + 1}) ${roleName}: ${rolePlaybook}`;
+          }),
+        ].join('\n')
+        : 'Role-on-demand: выбран fallback "Картограф структуры". Фокус: структурный разбор и связи.';
+    const questionGateRule = questionGate.allowQuestion
+      ? [
+        `Question Gate: allow=true. Причина: ${toTrimmedString(questionGate.allowReason, 240) || 'недостаточно критичных входных данных'}.`,
+        `Если вопрос реально нужен, задай максимум 1 короткий операционный вопрос на тему "${toTrimmedString(questionGate.questionFocus, 120) || 'следующего шага'}".`,
+        'Перед вопросом внутренне проверь: изменит ли ответ пользователя решение/приоритет/план. Если не изменит — вопрос не задавай.',
+      ].join('\n')
+      : [
+        `Question Gate: allow=false. Причина: ${toTrimmedString(questionGate.allowReason, 240) || 'можно двигаться без уточнений'}.`,
+        'Блок "Вопрос:" не добавляй.',
+      ].join('\n');
 
     return [
-      expertText,
+      BASE_AGENT_PROFILE,
+      rolePlaybookText,
       scopeDescription,
       'Жесткое правило: используй ТОЛЬКО данные из переданного контекста.',
       projectExtractionHint,
       'Критично: при конфликте между старым контекстом и новыми фактами пользователя приоритет у САМЫХ СВЕЖИХ user-сообщений.',
       'Не повторяй дословно предыдущие ответы ассистента: каждый ход должен обновлять оценку по новым данным.',
+      questionGateRule,
       STRICT_FORMATTING_RULES,
     ].join('\n');
   }
 
-  function buildAgentUserPrompt({ contextData, scopeContext, message, history, attachments }) {
+  function buildAgentUserPrompt({ contextData, scopeContext, message, history, attachments, questionGate }) {
     const payloadContext =
       contextData && typeof contextData === 'object'
         ? contextData
@@ -636,6 +1151,7 @@ function createAiPrompts(deps) {
       latestAssistantQuestion: toTrimmedString(stateSnapshot?.latestAssistantQuestion, 360),
     };
     const currentRequest = toTrimmedString(message, 2400);
+    const gateSnapshot = toProfile(questionGate);
 
     return [
       'State Snapshot (JSON):',
@@ -647,13 +1163,17 @@ function createAiPrompts(deps) {
       'Dialogue Memory (JSON):',
       JSON.stringify(dialogueMemory, null, 2),
       '',
+      'Question Gate (JSON):',
+      JSON.stringify(gateSnapshot, null, 2),
+      '',
       'Current User Turn:',
       currentRequest,
       '',
       'Response Contract:',
       '- Сначала обнови оценку вероятностей и рисков именно по новым фактам из Current User Turn.',
       '- При конфликте с устаревшими данными используй приоритет новых фактов пользователя.',
-      '- Не копируй прошлый ответ, дай обновленный анализ и 1 точный следующий вопрос.',
+      '- Не копируй прошлый ответ, дай обновленный анализ в формате Факт -> Связь -> Вывод.',
+      '- Вопрос добавляй только при allowQuestion=true и только если ответ пользователя реально поменяет следующий шаг.',
     ].join('\n');
   }
 
@@ -997,6 +1517,9 @@ function createAiPrompts(deps) {
     buildAgentLlmContextData,
     buildRouterPrompt,
     normalizeDetectedRole,
+    selectAgentRolesOnDemand,
+    evaluateAgentQuestionGate,
+    inspectAgentReplyQuestionGate,
     buildAgentSystemPrompt,
     buildAgentUserPrompt,
     buildProjectEnrichmentSystemPrompt,

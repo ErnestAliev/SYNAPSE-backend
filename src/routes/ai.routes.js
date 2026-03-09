@@ -741,6 +741,39 @@ function createAiRouter(deps) {
     });
   }
 
+  function buildRequestBodySize(requestBody) {
+    if (!requestBody || typeof requestBody !== 'object') {
+      return {
+        chars: 0,
+        bytes: 0,
+      };
+    }
+    const serialized = JSON.stringify(requestBody);
+    return {
+      chars: serialized.length,
+      bytes: Buffer.byteLength(serialized, 'utf8'),
+    };
+  }
+
+  function mapRoleOnDemandToLegacyRole(roleKey) {
+    const normalized = toTrimmedString(roleKey, 64);
+    if (!normalized) return 'default';
+    if (['financial_analyst', 'risk_analyst'].includes(normalized)) return 'investor';
+    if (
+      ['strategist', 'tactician_7_30', 'prioritizer', 'hidden_potential_hunter', 'illusion_breaker', 'negotiator']
+        .includes(normalized)
+    ) return 'strategist';
+    if (['operations_analyst', 'change_archivist'].includes(normalized)) return 'hr';
+    return 'default';
+  }
+
+  function resolveCompatibleDetectedRole(roleSelection, roleHint) {
+    const hinted = aiPrompts.normalizeDetectedRole(toTrimmedString(roleHint, 24) || 'default');
+    if (hinted && hinted !== 'default') return hinted;
+    const firstSelectedKey = toTrimmedString(roleSelection?.selectedRoles?.[0]?.key, 64);
+    return mapRoleOnDemandToLegacyRole(firstSelectedKey);
+  }
+
   router.post('/agent-chat-preview', requireAuth, async (req, res, next) => {
     try {
       const ownerId = requireOwnerId(req);
@@ -787,12 +820,53 @@ function createAiRouter(deps) {
       });
       const contextData = llmContextResult.contextData;
       const llmSerializationTrace = llmContextResult.trace;
-      const selectedRole = aiPrompts.normalizeDetectedRole(toTrimmedString(req.body?.detectedRole, 24) || 'default');
-      const systemPrompt = hasQuestion ? aiPrompts.buildAgentSystemPrompt(contextData, selectedRole) : '';
+      const roleHint = toTrimmedString(req.body?.detectedRole, 24) || 'default';
+      const roleSelection = hasQuestion
+        ? aiPrompts.selectAgentRolesOnDemand({
+          contextData,
+          message,
+          roleHint,
+        })
+        : {
+          selectedRoles: [],
+          whySelected: [],
+          droppedRoles: [],
+          roleHint: aiPrompts.normalizeDetectedRole(roleHint),
+        };
+      const questionGate = hasQuestion
+        ? aiPrompts.evaluateAgentQuestionGate({
+          contextData,
+          message,
+          selectedRoles: roleSelection.selectedRoles,
+        })
+        : {
+          allowQuestion: false,
+          allowReason: 'empty user message',
+          decisionIntent: false,
+          missingSignals: [],
+          questionFocus: '',
+          entitiesInContext: Array.isArray(contextData?.entities) ? contextData.entities.length : 0,
+          stage: toTrimmedString(contextData?.stateSnapshot?.stage, 24) || 'unknown',
+          policy: 'question_blocked_unless_plan_changes',
+        };
+      const detectedRole = resolveCompatibleDetectedRole(roleSelection, roleHint);
+      const systemPromptWithoutRoleInjection = hasQuestion
+        ? aiPrompts.buildAgentSystemPrompt(contextData, {
+          questionGate,
+          skipRolePlaybooks: true,
+        })
+        : '';
+      const systemPrompt = hasQuestion
+        ? aiPrompts.buildAgentSystemPrompt(contextData, {
+          selectedRoles: roleSelection.selectedRoles,
+          questionGate,
+        })
+        : '';
       const userPrompt = hasQuestion
         ? aiPrompts.buildAgentUserPrompt({
           contextData,
           message,
+          questionGate,
         })
         : '';
 
@@ -800,6 +874,18 @@ function createAiRouter(deps) {
         toTrimmedString(OPENAI_DEEP_MODEL, 120) ||
         toTrimmedString(OPENAI_PROJECT_MODEL, 120) ||
         'gpt-5';
+      const requestPreviewBeforeRoleInjection = hasQuestion && typeof aiProvider.previewOpenAiAgentRequest === 'function'
+        ? aiProvider.previewOpenAiAgentRequest({
+          model: deepModel,
+          systemPrompt: systemPromptWithoutRoleInjection,
+          userPrompt,
+          temperature: AGENT_CHAT_MAIN_REQUEST_CONFIG.temperature,
+          maxOutputTokens: AGENT_CHAT_MAIN_REQUEST_CONFIG.maxOutputTokens,
+          timeoutMs: AGENT_CHAT_MAIN_REQUEST_CONFIG.timeoutMs,
+          reasoningEffort: AGENT_CHAT_MAIN_REQUEST_CONFIG.reasoningEffort,
+          verbosity: AGENT_CHAT_MAIN_REQUEST_CONFIG.verbosity,
+        })
+        : null;
       const mainReplyRequestPreview = hasQuestion && typeof aiProvider.previewOpenAiAgentRequest === 'function'
         ? aiProvider.previewOpenAiAgentRequest({
           model: deepModel,
@@ -812,6 +898,8 @@ function createAiRouter(deps) {
           verbosity: AGENT_CHAT_MAIN_REQUEST_CONFIG.verbosity,
         })
         : null;
+      const payloadSizeBeforeRoleInjection = buildRequestBodySize(toProfile(requestPreviewBeforeRoleInjection?.requestBody));
+      const payloadSizeAfterRoleInjection = buildRequestBodySize(toProfile(mainReplyRequestPreview?.requestBody));
 
       const contextJson = JSON.stringify(contextData, null, 2);
       const llmPromptText = hasQuestion ? `${systemPrompt}\n${userPrompt}` : '';
@@ -843,15 +931,32 @@ function createAiRouter(deps) {
           },
         },
         semanticRouter: {
-          mode: 'disabled',
-          reason: 'single-request-mode',
+          mode: 'role-on-demand',
+          roleHint: roleSelection.roleHint,
+          selectedRoles: roleSelection.selectedRoles,
+          whySelected: roleSelection.whySelected,
+          droppedRoles: roleSelection.droppedRoles,
+          questionGate: {
+            asked: false,
+            reason: 'preview-mode-no-assistant-reply',
+            allowed: questionGate.allowQuestion === true,
+            allowReason: questionGate.allowReason,
+            questionFocus: questionGate.questionFocus,
+          },
           requestBody: null,
         },
         prompts: {
-          detectedRole: selectedRole,
+          detectedRole,
+          selectedRoles: roleSelection.selectedRoles,
           model: deepModel,
+          systemPromptWithoutRoleInjection,
           systemPrompt,
           userPrompt,
+          payloadSizeBeforeRoleInjection,
+          payloadSizeAfterRoleInjection,
+          requestBodyBeforeRoleInjection: hasQuestion
+            ? toProfile(requestPreviewBeforeRoleInjection?.requestBody)
+            : null,
           requestBody: hasQuestion
             ? toProfile(mainReplyRequestPreview?.requestBody)
             : null,
@@ -879,6 +984,10 @@ function createAiRouter(deps) {
           llmPayloadBytes: Number(llmSerializationTrace?.payloadSize?.bytes) || 0,
           routerPromptChars: 0,
           routerPromptBytes: 0,
+          requestBodyBeforeRoleInjectionChars: payloadSizeBeforeRoleInjection.chars,
+          requestBodyBeforeRoleInjectionBytes: payloadSizeBeforeRoleInjection.bytes,
+          requestBodyAfterRoleInjectionChars: payloadSizeAfterRoleInjection.chars,
+          requestBodyAfterRoleInjectionBytes: payloadSizeAfterRoleInjection.bytes,
           llmPromptChars: hasQuestion ? llmPromptText.length : 0,
           llmPromptBytes: hasQuestion ? Buffer.byteLength(llmPromptText, 'utf8') : 0,
           previewJsonBytes: Buffer.byteLength(previewJson, 'utf8'),
@@ -1111,17 +1220,48 @@ function createAiRouter(deps) {
       });
       const contextData = llmContextResult.contextData;
       const llmSerializationTrace = llmContextResult.trace;
-      const detectedRole = aiPrompts.normalizeDetectedRole(toTrimmedString(req.body?.detectedRole, 24) || 'default');
+      const roleHint = toTrimmedString(req.body?.detectedRole, 24) || 'default';
+      const roleSelection = aiPrompts.selectAgentRolesOnDemand({
+        contextData,
+        message,
+        roleHint,
+      });
+      const questionGate = aiPrompts.evaluateAgentQuestionGate({
+        contextData,
+        message,
+        selectedRoles: roleSelection.selectedRoles,
+      });
+      const detectedRole = resolveCompatibleDetectedRole(roleSelection, roleHint);
       const deepModel =
         toTrimmedString(OPENAI_DEEP_MODEL, 120) ||
         toTrimmedString(OPENAI_PROJECT_MODEL, 120) ||
         'gpt-5';
 
-      const systemPrompt = aiPrompts.buildAgentSystemPrompt(contextData, detectedRole);
+      const systemPromptWithoutRoleInjection = aiPrompts.buildAgentSystemPrompt(contextData, {
+        questionGate,
+        skipRolePlaybooks: true,
+      });
+      const systemPrompt = aiPrompts.buildAgentSystemPrompt(contextData, {
+        selectedRoles: roleSelection.selectedRoles,
+        questionGate,
+      });
       const userPrompt = aiPrompts.buildAgentUserPrompt({
         contextData,
         message,
+        questionGate,
       });
+      const requestPreviewBeforeRoleInjection = typeof aiProvider.previewOpenAiAgentRequest === 'function'
+        ? aiProvider.previewOpenAiAgentRequest({
+          model: deepModel,
+          systemPrompt: systemPromptWithoutRoleInjection,
+          userPrompt,
+          temperature: AGENT_CHAT_MAIN_REQUEST_CONFIG.temperature,
+          maxOutputTokens: AGENT_CHAT_MAIN_REQUEST_CONFIG.maxOutputTokens,
+          timeoutMs: AGENT_CHAT_MAIN_REQUEST_CONFIG.timeoutMs,
+          reasoningEffort: AGENT_CHAT_MAIN_REQUEST_CONFIG.reasoningEffort,
+          verbosity: AGENT_CHAT_MAIN_REQUEST_CONFIG.verbosity,
+        })
+        : null;
       const mainReplyRequestPreview = typeof aiProvider.previewOpenAiAgentRequest === 'function'
         ? aiProvider.previewOpenAiAgentRequest({
           model: deepModel,
@@ -1134,6 +1274,8 @@ function createAiRouter(deps) {
           verbosity: AGENT_CHAT_MAIN_REQUEST_CONFIG.verbosity,
         })
         : null;
+      const payloadSizeBeforeRoleInjection = buildRequestBodySize(toProfile(requestPreviewBeforeRoleInjection?.requestBody));
+      const payloadSizeAfterRoleInjection = buildRequestBodySize(toProfile(mainReplyRequestPreview?.requestBody));
 
       const chatTraceMeta = {
         label: 'agent-chat.reply',
@@ -1154,6 +1296,10 @@ function createAiRouter(deps) {
         llmPayload: llmSerializationTrace?.payloadSize || { chars: 0, bytes: 0 },
         includeDebug,
         detectedRole,
+        selectedRoles: roleSelection.selectedRoles.map((role) => role.name),
+        questionGate,
+        payloadSizeBeforeRoleInjection,
+        payloadSizeAfterRoleInjection,
       };
       const aiResponse = await withAiTrace(chatTraceMeta, () => aiProvider.requestOpenAiAgentReply({
         systemPrompt,
@@ -1170,6 +1316,10 @@ function createAiRouter(deps) {
         singleRequest: true,
       }));
       const usedModel = toTrimmedString(aiResponse?.debug?.response?.model, 120) || deepModel;
+      const questionGateResult = aiPrompts.inspectAgentReplyQuestionGate({
+        reply: aiResponse.reply,
+        questionGate,
+      });
 
       const canRunProjectAutoEnrichment = typeof runProjectChatAutoEnrichment === 'function';
       const shouldQueueProjectAutoEnrichment = scopeContext.scopeType === 'project' && canRunProjectAutoEnrichment;
@@ -1211,13 +1361,28 @@ function createAiRouter(deps) {
         },
           llmSerialization: llmSerializationTrace,
           semanticRouter: {
-            mode: 'disabled',
-            reason: 'single-request-mode',
+            mode: 'role-on-demand',
+            roleHint: roleSelection.roleHint,
+            selectedRoles: roleSelection.selectedRoles,
+            whySelected: roleSelection.whySelected,
+            droppedRoles: roleSelection.droppedRoles,
+            questionGate: {
+              asked: questionGateResult.asked,
+              reason: questionGateResult.reason,
+              allowed: questionGate.allowQuestion === true,
+              allowReason: questionGate.allowReason,
+              questionFocus: questionGate.questionFocus,
+              extractedQuestion: questionGateResult.extractedQuestion,
+            },
             detectedRole,
           },
           prompts: {
+            systemPromptWithoutRoleInjection,
             systemPrompt,
             userPrompt,
+            payloadSizeBeforeRoleInjection,
+            payloadSizeAfterRoleInjection,
+            requestBodyBeforeRoleInjection: toProfile(requestPreviewBeforeRoleInjection?.requestBody),
             requestBody: toProfile(mainReplyRequestPreview?.requestBody),
           },
           response: {
@@ -1240,6 +1405,7 @@ function createAiRouter(deps) {
         usage: aiResponse.usage,
         model: usedModel,
         detectedRole,
+        selectedRoles: roleSelection.selectedRoles,
         context: {
           scopeType: scopeContext.scopeType,
           entityType: scopeContext.entityType,
