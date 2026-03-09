@@ -85,6 +85,7 @@ const PROJECT_REQUIRED_REASONING_BLOCKS = Object.freeze([
   'fast_levers',
   'excluded_paths',
 ]);
+const PROJECT_DEEP_REASONING_MAX_CALLS = 1;
 
 function createProjectChatFlow({ deps, helpers }) {
   const {
@@ -372,27 +373,75 @@ function createProjectChatFlow({ deps, helpers }) {
     regenerationFeedback = '',
     previousAttempt = null,
   }) {
-    const baseSystemPrompt = aiPrompts.buildAgentSystemPrompt(contextData);
-    const baseUserPrompt = aiPrompts.buildAgentUserPrompt({
-      contextData,
-      message,
-    });
+    const payloadContext = toProfile(contextData);
+    const compactEntities = (Array.isArray(payloadContext.entities) ? payloadContext.entities : [])
+      .slice(0, 140)
+      .map((entity) => {
+        const row = toProfile(entity);
+        return {
+          id: toTrimmedString(row.id || row._id, 120),
+          type: toTrimmedString(row.type, 48),
+          name: toTrimmedString(row.name, 160),
+          description: toTrimmedString(row.description || toProfile(row.ai_metadata).description, 1800),
+        };
+      });
+    const compactConnections = (Array.isArray(payloadContext.connections) ? payloadContext.connections : [])
+      .slice(0, 220)
+      .map((edge) => {
+        const row = toProfile(edge);
+        return {
+          source: toTrimmedString(row.source, 120),
+          target: toTrimmedString(row.target, 120),
+          type: toTrimmedString(row.type, 64),
+          label: toTrimmedString(row.label, 160),
+        };
+      });
+    const compactHistory = (Array.isArray(payloadContext.history) ? payloadContext.history : [])
+      .slice(-10)
+      .map((historyItem) => {
+        const row = toProfile(historyItem);
+        return {
+          role: row.role === 'assistant' ? 'assistant' : 'user',
+          text: toTrimmedString(row.text, 1200),
+        };
+      });
+    const compactAttachments = (Array.isArray(payloadContext.attachments) ? payloadContext.attachments : [])
+      .slice(0, 8)
+      .map((attachment) => {
+        const row = toProfile(attachment);
+        return {
+          name: toTrimmedString(row.name, 160),
+          contentCategory: toTrimmedString(row.contentCategory, 40),
+          text: toTrimmedString(row.text, 1400),
+        };
+      });
+    const reasoningPayload = {
+      scope: toProfile(payloadContext.scope),
+      stateSnapshot: toProfile(payloadContext.stateSnapshot),
+      entities: compactEntities,
+      connections: compactConnections,
+      history: compactHistory,
+      attachments: compactAttachments,
+      currentUserMessage: toTrimmedString(message, 2400),
+    };
 
     const contractText = PROJECT_REASONING_CONTRACT.map((line) => `- ${line}`).join('\n');
     const patternsText = PROJECT_ANSWER_PATTERNS.map((line) => `- ${line}`).join('\n');
 
     const systemPrompt = [
-      baseSystemPrompt,
-      '',
       'PROJECT DEEP REASONING MODE (single-call):',
-      'Сначала выполни внутренний анализ по reasoning_contract, затем верни только JSON по схеме.',
+      'Ты Synapse12 Project Deep Reasoning Analyst.',
+      'Работай только по данным из входного JSON-контекста.',
+      'Сначала выполни внутренний анализ по reasoning_contract, затем верни строго JSON по схеме.',
       'Не выдумывай факты вне переданного контекста.',
+      'Не добавляй markdown и не добавляй текст вне JSON-объекта.',
       'next_best_question добавляй только если он реально открывает новый слой анализа.',
       'Если вопрос не нужен — верни next_best_question = null.',
     ].join('\n');
 
     const userPrompt = [
-      baseUserPrompt,
+      'PROJECT_CONTEXT_JSON:',
+      JSON.stringify(reasoningPayload, null, 2),
       '',
       'REASONING_CONTRACT (обязательный порядок):',
       contractText,
@@ -613,7 +662,7 @@ function createProjectChatFlow({ deps, helpers }) {
     const deepModel =
       toTrimmedString(OPENAI_DEEP_MODEL, 120) ||
       toTrimmedString(OPENAI_PROJECT_MODEL, 120) ||
-      'gpt-5';
+      '';
 
     const promptPack = hasQuestion
       ? buildProjectReasoningPrompts({
@@ -786,7 +835,7 @@ function createProjectChatFlow({ deps, helpers }) {
     const deepModel =
       toTrimmedString(OPENAI_DEEP_MODEL, 120) ||
       toTrimmedString(OPENAI_PROJECT_MODEL, 120) ||
-      'gpt-5';
+      '';
 
     const passOnePromptPack = buildProjectReasoningPrompts({
       contextData,
@@ -846,7 +895,7 @@ function createProjectChatFlow({ deps, helpers }) {
     });
     attempts.push(passOne);
 
-    if (!passOne.qualityGate.passed) {
+    if (!passOne.qualityGate.passed && PROJECT_DEEP_REASONING_MAX_CALLS > 1) {
       const passTwoPromptPack = buildProjectReasoningPrompts({
         contextData,
         message,
@@ -908,7 +957,8 @@ function createProjectChatFlow({ deps, helpers }) {
     const selectedModel =
       toTrimmedString(selectedAttempt?.aiResponse?.debug?.response?.model, 120)
       || toTrimmedString(selectedAttempt?.aiResponse?.debug?.request?.model, 120)
-      || deepModel;
+      || deepModel
+      || 'unknown';
 
     const debugPayload = includeDebug
       ? {
@@ -956,10 +1006,12 @@ function createProjectChatFlow({ deps, helpers }) {
           requestBody: toProfile(mainReplyRequestPreview?.requestBody),
         },
         deepReasoning: {
-          mode: 'single_call_with_one_regeneration_max',
+          mode: PROJECT_DEEP_REASONING_MAX_CALLS > 1
+            ? 'single_call_with_one_regeneration_max'
+            : 'single_call_only',
           reasoningContract: PROJECT_REASONING_CONTRACT,
           answerPatterns: PROJECT_ANSWER_PATTERNS,
-          maxCalls: 2,
+          maxCalls: PROJECT_DEEP_REASONING_MAX_CALLS,
           regenerationUsed: attempts.length > 1,
           selectedAttempt: selectedAttempt?.attemptIndex || 1,
           qualityGate: selectedAttempt?.qualityGate || null,
