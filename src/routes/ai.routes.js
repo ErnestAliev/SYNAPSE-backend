@@ -851,22 +851,15 @@ function createAiRouter(deps) {
         };
       const detectedRole = resolveCompatibleDetectedRole(roleSelection, roleHint);
       const systemPromptWithoutRoleInjection = hasQuestion
-        ? aiPrompts.buildAgentSystemPrompt(contextData, {
-          questionGate,
-          skipRolePlaybooks: true,
-        })
+        ? aiPrompts.buildAgentSystemPrompt(contextData)
         : '';
       const systemPrompt = hasQuestion
-        ? aiPrompts.buildAgentSystemPrompt(contextData, {
-          selectedRoles: roleSelection.selectedRoles,
-          questionGate,
-        })
+        ? aiPrompts.buildAgentSystemPrompt(contextData)
         : '';
       const userPrompt = hasQuestion
         ? aiPrompts.buildAgentUserPrompt({
           contextData,
           message,
-          questionGate,
         })
         : '';
 
@@ -1237,18 +1230,11 @@ function createAiRouter(deps) {
         toTrimmedString(OPENAI_PROJECT_MODEL, 120) ||
         'gpt-5';
 
-      const systemPromptWithoutRoleInjection = aiPrompts.buildAgentSystemPrompt(contextData, {
-        questionGate,
-        skipRolePlaybooks: true,
-      });
-      const systemPrompt = aiPrompts.buildAgentSystemPrompt(contextData, {
-        selectedRoles: roleSelection.selectedRoles,
-        questionGate,
-      });
+      const systemPrompt = aiPrompts.buildAgentSystemPrompt(contextData);
+      const systemPromptWithoutRoleInjection = systemPrompt;
       const userPrompt = aiPrompts.buildAgentUserPrompt({
         contextData,
         message,
-        questionGate,
       });
       const requestPreviewBeforeRoleInjection = typeof aiProvider.previewOpenAiAgentRequest === 'function'
         ? aiProvider.previewOpenAiAgentRequest({

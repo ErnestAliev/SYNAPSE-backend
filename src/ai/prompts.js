@@ -6,13 +6,10 @@ const STRICT_FORMATTING_RULES = `
 1. ПИШИ ТОЛЬКО ЧИСТЫМ ТЕКСТОМ.
 2. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать Markdown (звездочки **, решетки #, списки -, _, жирный шрифт, курсив).
 3. ЗАПРЕЩЕНО использовать эмодзи.
-4. НИКАКОЙ ВОДЫ. Базовый формат ответа — строго 3 абзаца:
-Факт: [сухой факт из данных]
-Связь: [твой инсайт]
-Вывод: [оценка риска/вероятности]
-5. Блок "Вопрос:" НЕ ОБЯЗАТЕЛЕН. Добавляй его только если явно разрешено Question Gate.
-6. Если Question Gate не разрешил вопрос — заверши ответ на "Вывод:" без "Вопрос:".
-7. Если Question Gate разрешил вопрос — задай максимум 1 короткий операционный вопрос, который меняет решение, приоритет или план.
+4. По умолчанию дай ОДИН короткий абзац: прямой ответ на вопрос пользователя + минимум необходимой аргументации из контекста.
+5. Не показывай внутренний анализ, цепочку рассуждений, промежуточные шаги и служебные метки.
+6. Не пересказывай весь контекст: используй только релевантные сигналы, которые реально влияют на вывод.
+7. Развернутое объяснение давай только если пользователь явно просит разбор/обоснование.
 `.trim();
 
 const ALLOWED_ROUTER_ROLES = new Set(['investor', 'hr', 'strategist', 'default']);
@@ -1390,11 +1387,7 @@ function createAiPrompts(deps) {
     ].join('\n');
   }
 
-  function buildAgentSystemPrompt(contextData, options = {}) {
-    const config = options && typeof options === 'object' ? options : {};
-    const selectedRoles = Array.isArray(config.selectedRoles) ? config.selectedRoles : [];
-    const questionGate = toProfile(config.questionGate);
-    const skipRolePlaybooks = config.skipRolePlaybooks === true;
+  function buildAgentSystemPrompt(contextData) {
     const scopeSource =
       contextData && typeof contextData === 'object'
         ? contextData.scope && typeof contextData.scope === 'object'
@@ -1413,43 +1406,19 @@ function createAiPrompts(deps) {
       scopeType === 'project'
         ? 'Важно: для проектного чата выделяй факты, риски, задачи и метрики максимально конкретно.'
         : '';
-    const rolePlaybookText = skipRolePlaybooks
-      ? 'Role-on-demand: baseline режим без инъекции role playbook.'
-      : selectedRoles.length
-        ? [
-          `Role-on-demand: выбраны ${selectedRoles.length} роли.`,
-          ...selectedRoles.map((role, index) => {
-            const roleName = toTrimmedString(role?.name, 120) || `Роль ${index + 1}`;
-            const rolePlaybook = toTrimmedString(role?.playbook, 360);
-            return `${index + 1}) ${roleName}: ${rolePlaybook}`;
-          }),
-        ].join('\n')
-        : 'Role-on-demand: выбран fallback "Картограф структуры". Фокус: структурный разбор и связи.';
-    const questionGateRule = questionGate.allowQuestion
-      ? [
-        `Question Gate: allow=true. Причина: ${toTrimmedString(questionGate.allowReason, 240) || 'недостаточно критичных входных данных'}.`,
-        `Если вопрос реально нужен, задай максимум 1 короткий операционный вопрос на тему "${toTrimmedString(questionGate.questionFocus, 120) || 'следующего шага'}".`,
-        'Перед вопросом внутренне проверь: изменит ли ответ пользователя решение/приоритет/план. Если не изменит — вопрос не задавай.',
-      ].join('\n')
-      : [
-        `Question Gate: allow=false. Причина: ${toTrimmedString(questionGate.allowReason, 240) || 'можно двигаться без уточнений'}.`,
-        'Блок "Вопрос:" не добавляй.',
-      ].join('\n');
 
     return [
       BASE_AGENT_PROFILE,
-      rolePlaybookText,
       scopeDescription,
       'Жесткое правило: используй ТОЛЬКО данные из переданного контекста.',
       projectExtractionHint,
       'Критично: при конфликте между старым контекстом и новыми фактами пользователя приоритет у САМЫХ СВЕЖИХ user-сообщений.',
       'Не повторяй дословно предыдущие ответы ассистента: каждый ход должен обновлять оценку по новым данным.',
-      questionGateRule,
       STRICT_FORMATTING_RULES,
     ].join('\n');
   }
 
-  function buildAgentUserPrompt({ contextData, scopeContext, message, history, attachments, questionGate }) {
+  function buildAgentUserPrompt({ contextData, scopeContext, message, history, attachments }) {
     const payloadContext =
       contextData && typeof contextData === 'object'
         ? contextData
@@ -1471,7 +1440,6 @@ function createAiPrompts(deps) {
       latestAssistantQuestion: toTrimmedString(stateSnapshot?.latestAssistantQuestion, 360),
     };
     const currentRequest = toTrimmedString(message, 2400);
-    const gateSnapshot = toProfile(questionGate);
 
     return [
       'State Snapshot (JSON):',
@@ -1483,17 +1451,14 @@ function createAiPrompts(deps) {
       'Dialogue Memory (JSON):',
       JSON.stringify(dialogueMemory, null, 2),
       '',
-      'Question Gate (JSON):',
-      JSON.stringify(gateSnapshot, null, 2),
-      '',
       'Current User Turn:',
       currentRequest,
       '',
       'Response Contract:',
-      '- Сначала обнови оценку вероятностей и рисков именно по новым фактам из Current User Turn.',
+      '- Сначала молча разберись в смысле вопроса, проверь релевантные связи и ограничения в переданном контексте.',
       '- При конфликте с устаревшими данными используй приоритет новых фактов пользователя.',
-      '- Не копируй прошлый ответ, дай обновленный анализ в формате Факт -> Связь -> Вывод.',
-      '- Вопрос добавляй только при allowQuestion=true и только если ответ пользователя реально поменяет следующий шаг.',
+      '- По умолчанию верни короткий прямой ответ одним абзацем без показа внутреннего анализа.',
+      '- Развернутое объяснение давай только если пользователь явно запросил обоснование.',
     ].join('\n');
   }
 
