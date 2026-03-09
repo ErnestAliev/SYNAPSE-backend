@@ -7,9 +7,9 @@ const PROJECT_DEEP_REASONING_OUTPUT_SCHEMA = Object.freeze({
     required: ['final_answer', 'reasoning_state', 'next_best_question', 'answer_pattern'],
     additionalProperties: false,
     properties: {
-      final_answer: { type: 'string' },
+      final_answer: { type: 'string', maxLength: 3200 },
       next_best_question: { anyOf: [{ type: 'string' }, { type: 'null' }] },
-      answer_pattern: { type: 'string' },
+      answer_pattern: { type: 'string', maxLength: 80 },
       reasoning_state: {
         type: 'object',
         required: [
@@ -25,38 +25,41 @@ const PROJECT_DEEP_REASONING_OUTPUT_SCHEMA = Object.freeze({
           'confirmed_facts',
           'uncertain_facts',
           'conflicts',
-          'conclusion',
-          'insufficiency_reason',
+          'core_conclusion',
+          'why_not_enough',
+          'next_growth_contour',
         ],
         additionalProperties: false,
         properties: {
-          actor: { type: 'string' },
-          intent: { type: 'string' },
-          current_point: { type: 'string' },
-          target_point: { type: 'string' },
-          constraints: { type: 'array', items: { type: 'string' } },
-          fast_levers: { type: 'array', items: { type: 'string' } },
-          excluded_paths: { type: 'array', items: { type: 'string' } },
+          actor: { type: 'string', maxLength: 240 },
+          intent: { type: 'string', maxLength: 320 },
+          current_point: { type: 'string', maxLength: 900 },
+          target_point: { type: 'string', maxLength: 900 },
+          constraints: { type: 'array', maxItems: 5, items: { type: 'string', maxLength: 180 } },
+          fast_levers: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 180 } },
+          excluded_paths: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 180 } },
           next_best_question: { anyOf: [{ type: 'string' }, { type: 'null' }] },
           relevant_entities: {
             type: 'array',
+            maxItems: 6,
             items: {
               type: 'object',
               required: ['id', 'name', 'type', 'why_relevant'],
               additionalProperties: false,
               properties: {
-                id: { type: 'string' },
-                name: { type: 'string' },
-                type: { type: 'string' },
-                why_relevant: { type: 'string' },
+                id: { type: 'string', maxLength: 120 },
+                name: { type: 'string', maxLength: 120 },
+                type: { type: 'string', maxLength: 48 },
+                why_relevant: { type: 'string', maxLength: 220 },
               },
             },
           },
-          confirmed_facts: { type: 'array', items: { type: 'string' } },
-          uncertain_facts: { type: 'array', items: { type: 'string' } },
-          conflicts: { type: 'array', items: { type: 'string' } },
-          conclusion: { type: 'string' },
-          insufficiency_reason: { type: 'string' },
+          confirmed_facts: { type: 'array', maxItems: 6, items: { type: 'string', maxLength: 220 } },
+          uncertain_facts: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 220 } },
+          conflicts: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 220 } },
+          core_conclusion: { type: 'string', maxLength: 1000 },
+          why_not_enough: { type: 'string', maxLength: 1000 },
+          next_growth_contour: { type: 'string', maxLength: 1000 },
         },
       },
     },
@@ -71,9 +74,10 @@ const PROJECT_REASONING_CONTRACT = Object.freeze([
   '5. Выдели constraints (реальные ограничения: ресурс, срок, риски, зависимости).',
   '6. Найди fast_levers (быстрые рычаги наибольшего эффекта).',
   '7. Отсеки excluded_paths (что сейчас делать не стоит и почему).',
-  '8. Сформулируй conclusion (к какому промежуточному выводу пришел анализ).',
-  '9. Зафиксируй insufficiency_reason (почему текущего вывода пока недостаточно для финального решения).',
-  '10. При необходимости задай один next_best_question, только если он открывает новый слой анализа.',
+  '8. Сформулируй core_conclusion (главный вывод, а не пересказ фактов).',
+  '9. Зафиксируй why_not_enough (почему найденные шаги пока не решают главную цель).',
+  '10. Зафиксируй next_growth_contour (куда копать дальше для следующего слоя роста).',
+  '11. При необходимости задай один next_best_question, только если он открывает новый слой анализа.',
 ]);
 
 const PROJECT_ANSWER_PATTERNS = Object.freeze([
@@ -90,10 +94,13 @@ const PROJECT_REQUIRED_REASONING_BLOCKS = Object.freeze([
   'constraints',
   'fast_levers',
   'excluded_paths',
-  'conclusion',
-  'insufficiency_reason',
+  'core_conclusion',
+  'why_not_enough',
+  'next_growth_contour',
 ]);
-const PROJECT_DEEP_REASONING_MAX_CALLS = 1;
+const PROJECT_DEEP_REASONING_MAX_CALLS = 2;
+const PROJECT_DEEP_REASONING_MIN_OUTPUT_TOKENS = 3200;
+const PROJECT_DEEP_REASONING_MIN_TIMEOUT_MS = 130_000;
 
 function createProjectChatFlow({ deps, helpers }) {
   const {
@@ -115,6 +122,24 @@ function createProjectChatFlow({ deps, helpers }) {
     runProjectChatAutoEnrichment,
     buildAgentLlmContext,
   } = helpers;
+
+  function resolveProjectDeepReasoningRequestConfig() {
+    const configuredTokens = Number(AGENT_CHAT_MAIN_REQUEST_CONFIG.maxOutputTokens);
+    const configuredTimeout = Number(AGENT_CHAT_MAIN_REQUEST_CONFIG.timeoutMs);
+    const configuredVerbosity = toTrimmedString(AGENT_CHAT_MAIN_REQUEST_CONFIG.verbosity, 12).toLowerCase();
+
+    return {
+      temperature: AGENT_CHAT_MAIN_REQUEST_CONFIG.temperature,
+      maxOutputTokens: Number.isFinite(configuredTokens)
+        ? Math.max(PROJECT_DEEP_REASONING_MIN_OUTPUT_TOKENS, Math.floor(configuredTokens))
+        : PROJECT_DEEP_REASONING_MIN_OUTPUT_TOKENS,
+      timeoutMs: Number.isFinite(configuredTimeout)
+        ? Math.max(PROJECT_DEEP_REASONING_MIN_TIMEOUT_MS, Math.floor(configuredTimeout))
+        : PROJECT_DEEP_REASONING_MIN_TIMEOUT_MS,
+      reasoningEffort: AGENT_CHAT_MAIN_REQUEST_CONFIG.reasoningEffort,
+      verbosity: configuredVerbosity === 'low' ? 'medium' : configuredVerbosity || 'medium',
+    };
+  }
 
   function normalizeStringList(values, {
     maxItems = 12,
@@ -187,8 +212,9 @@ function createProjectChatFlow({ deps, helpers }) {
       confirmed_facts: normalizeStringList(state.confirmed_facts, { maxItems: 14, itemMaxLength: 360 }),
       uncertain_facts: normalizeStringList(state.uncertain_facts, { maxItems: 10, itemMaxLength: 360 }),
       conflicts: normalizeStringList(state.conflicts, { maxItems: 8, itemMaxLength: 360 }),
-      conclusion: toTrimmedString(state.conclusion, 1400),
-      insufficiency_reason: toTrimmedString(state.insufficiency_reason || state.why_insufficient, 1400),
+      core_conclusion: toTrimmedString(state.core_conclusion || state.conclusion, 1400),
+      why_not_enough: toTrimmedString(state.why_not_enough || state.insufficiency_reason || state.why_insufficient, 1400),
+      next_growth_contour: toTrimmedString(state.next_growth_contour, 1400),
     };
   }
 
@@ -257,6 +283,34 @@ function createProjectChatFlow({ deps, helpers }) {
     return Array.isArray(value) && value.length > 0;
   }
 
+  function normalizeComparableText(value) {
+    return toTrimmedString(value, 2400)
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function areSemanticallyClose(left, right) {
+    const a = normalizeComparableText(left);
+    const b = normalizeComparableText(right);
+    if (!a || !b) return false;
+    if (a === b) return true;
+    if (a.length >= 24 && b.includes(a)) return true;
+    if (b.length >= 24 && a.includes(b)) return true;
+    return false;
+  }
+
+  function countMeaningfulParagraphs(value) {
+    const text = toTrimmedString(value, 8000);
+    if (!text) return 0;
+    return text
+      .split(/\n\s*\n/g)
+      .map((part) => part.trim())
+      .filter((part) => part.length >= 12)
+      .length;
+  }
+
   function evaluateNextBestQuestionQuality(question, contextData) {
     const normalized = normalizeOptionalQuestion(question);
     if (!normalized) {
@@ -313,12 +367,14 @@ function createProjectChatFlow({ deps, helpers }) {
       constraints: hasNonEmptyArray(reasoningState.constraints),
       fast_levers: hasNonEmptyArray(reasoningState.fast_levers),
       excluded_paths: hasNonEmptyArray(reasoningState.excluded_paths),
-      conclusion: hasNonEmptyString(reasoningState.conclusion),
-      insufficiency_reason: hasNonEmptyString(reasoningState.insufficiency_reason),
+      core_conclusion: hasNonEmptyString(reasoningState.core_conclusion),
+      why_not_enough: hasNonEmptyString(reasoningState.why_not_enough),
+      next_growth_contour: hasNonEmptyString(reasoningState.next_growth_contour),
     };
 
     const missingMandatoryBlocks = PROJECT_REQUIRED_REASONING_BLOCKS.filter((key) => !blockChecks[key]);
     const finalAnswerPresent = hasNonEmptyString(candidate?.final_answer);
+    const finalAnswerStructured = countMeaningfulParagraphs(candidate?.final_answer) >= 5;
 
     const finalAnswerLower = toTrimmedString(candidate?.final_answer, 9000).toLowerCase();
     const entityNames = (Array.isArray(contextData?.entities) ? contextData.entities : [])
@@ -331,6 +387,19 @@ function createProjectChatFlow({ deps, helpers }) {
     const factAnchored = entityNames.length === 0
       ? finalAnswerPresent
       : hasConfirmedFacts || hasRelevantEntities || mentionsKnownEntity;
+    const coreConclusion = toTrimmedString(reasoningState.core_conclusion, 1400);
+    const whyNotEnough = toTrimmedString(reasoningState.why_not_enough, 1400);
+    const nextGrowthContour = toTrimmedString(reasoningState.next_growth_contour, 1400);
+    const coreConclusionTooShort = coreConclusion.length < 40;
+    const whyNotEnoughTooShort = whyNotEnough.length < 40;
+    const nextGrowthContourTooShort = nextGrowthContour.length < 30;
+    const factualPool = [
+      ...(Array.isArray(reasoningState.confirmed_facts) ? reasoningState.confirmed_facts : []),
+      ...(Array.isArray(reasoningState.uncertain_facts) ? reasoningState.uncertain_facts : []),
+      ...(Array.isArray(reasoningState.conflicts) ? reasoningState.conflicts : []),
+    ];
+    const coreConclusionEchoesFacts = factualPool.some((item) => areSemanticallyClose(coreConclusion, item));
+    const factRetellingDetected = coreConclusionTooShort || coreConclusionEchoesFacts;
 
     const nextQuestionQuality = evaluateNextBestQuestionQuality(
       candidate?.next_best_question || reasoningState?.next_best_question,
@@ -340,14 +409,22 @@ function createProjectChatFlow({ deps, helpers }) {
     let score = 0;
     score += Object.values(blockChecks).filter(Boolean).length * 12;
     if (finalAnswerPresent) score += 10;
+    if (finalAnswerStructured) score += 8;
     if (factAnchored) score += 10;
+    if (!factRetellingDetected) score += 8;
+    if (!whyNotEnoughTooShort) score += 6;
+    if (!nextGrowthContourTooShort) score += 6;
     if (nextQuestionQuality.present && nextQuestionQuality.accepted) score += 4;
     if (nextQuestionQuality.present && !nextQuestionQuality.accepted) score -= 2;
 
     const passed =
       missingMandatoryBlocks.length === 0
       && finalAnswerPresent
-      && factAnchored;
+      && finalAnswerStructured
+      && factAnchored
+      && !factRetellingDetected
+      && !whyNotEnoughTooShort
+      && !nextGrowthContourTooShort;
 
     return {
       passed,
@@ -355,7 +432,13 @@ function createProjectChatFlow({ deps, helpers }) {
       blocks: blockChecks,
       missingMandatoryBlocks,
       finalAnswerPresent,
+      finalAnswerStructured,
       factAnchored,
+      factRetellingDetected,
+      coreConclusionTooShort,
+      coreConclusionEchoesFacts,
+      whyNotEnoughTooShort,
+      nextGrowthContourTooShort,
       nextQuestionQuality,
     };
   }
@@ -370,6 +453,10 @@ function createProjectChatFlow({ deps, helpers }) {
         ? `Не покрыты обязательные блоки: ${failedBlocks.join(', ')}.`
         : 'Обязательные блоки покрыты, но есть проблемы качества.',
       gateResult?.factAnchored ? '' : 'Усиль привязку к фактам и сущностям из контекста.',
+      gateResult?.finalAnswerStructured ? '' : 'Сделай final_answer в 5 смысловых абзацах по заданной структуре.',
+      gateResult?.factRetellingDetected ? 'Избегай пересказа фактов: дай явный синтетический главный вывод.' : '',
+      gateResult?.whyNotEnoughTooShort ? 'Подробно объясни, почему найденные шаги пока недостаточны для главной цели.' : '',
+      gateResult?.nextGrowthContourTooShort ? 'Определи следующий контур роста (next_growth_contour), а не общий совет.' : '',
       gateResult?.nextQuestionQuality?.present && !gateResult?.nextQuestionQuality?.accepted
         ? `next_best_question некорректен: ${gateResult.nextQuestionQuality.reason}.`
         : '',
@@ -447,6 +534,8 @@ function createProjectChatFlow({ deps, helpers }) {
       'Сначала выполни внутренний анализ по reasoning_contract, затем верни строго JSON по схеме.',
       'Не выдумывай факты вне переданного контекста.',
       'Не добавляй markdown и не добавляй текст вне JSON-объекта.',
+      'final_answer не должен быть пересказом фактов: сначала дай главный вывод, затем действие/ограничения/следующий контур.',
+      'final_answer должен быть из 5 отдельных абзацев (с пустой строкой между абзацами).',
       'next_best_question добавляй только если он реально открывает новый слой анализа.',
       'Если вопрос не нужен — верни next_best_question = null.',
     ].join('\n');
@@ -479,13 +568,21 @@ function createProjectChatFlow({ deps, helpers }) {
       '    "confirmed_facts": ["string"],',
       '    "uncertain_facts": ["string"],',
       '    "conflicts": ["string"],',
-      '    "conclusion": "string",',
-      '    "insufficiency_reason": "string"',
+      '    "core_conclusion": "string",',
+      '    "why_not_enough": "string",',
+      '    "next_growth_contour": "string"',
       '  }',
       '}',
       '',
+      'ФОРМАТ final_answer (обязателен, 5 абзацев, между абзацами пустая строка):',
+      '1. Главный вывод.',
+      '2. Что делать прямо сейчас.',
+      '3. Что не делать сейчас.',
+      '4. Почему этого недостаточно для главной цели.',
+      '5. Куда копать дальше / следующий вопрос.',
+      '',
       'КРИТИЧЕСКОЕ ТРЕБОВАНИЕ: обязательные блоки reasoning_state должны быть заполнены содержательно:',
-      '- actor, intent, current_point, target_point, constraints, fast_levers, excluded_paths, conclusion, insufficiency_reason.',
+      '- actor, intent, current_point, target_point, constraints, fast_levers, excluded_paths, core_conclusion, why_not_enough, next_growth_contour.',
       '- next_best_question — условный блок, только при реальной пользе.',
       regenerationFeedback ? '' : '',
       regenerationFeedback ? regenerationFeedback : '',
@@ -502,17 +599,48 @@ function createProjectChatFlow({ deps, helpers }) {
     };
   }
 
-  function composeFinalReply(finalAnswer, nextQuestionDecision) {
-    const answer = toTrimmedString(finalAnswer, 9000);
-    if (!answer) {
-      return 'Пустой ответ от модели. Уточните запрос или повторите через несколько секунд.';
-    }
+  function joinNumberedList(values, fallbackText) {
+    const items = normalizeStringList(values, { maxItems: 3, itemMaxLength: 260 });
+    if (!items.length) return fallbackText;
+    return items.map((item, index) => `${index + 1}) ${item}`).join('\n');
+  }
 
-    if (!nextQuestionDecision?.present || !nextQuestionDecision?.accepted || !nextQuestionDecision?.value) {
-      return answer;
-    }
+  function buildStructuredFinalAnswer(candidate, nextQuestionDecision) {
+    const payload = toProfile(candidate);
+    const state = toProfile(payload.reasoning_state);
+    const rawFinalAnswer = toTrimmedString(payload.final_answer, 8000);
+    const coreConclusion = toTrimmedString(state.core_conclusion, 1400);
+    const whyNotEnough = toTrimmedString(state.why_not_enough, 1400);
+    const nextGrowthContour = toTrimmedString(state.next_growth_contour, 1400);
+    const doNow = joinNumberedList(
+      state.fast_levers,
+      'Критические быстрые действия не выделены; нужно уточнить контекст исполнения.',
+    );
+    const dontDo = joinNumberedList(
+      state.excluded_paths,
+      'Неподходящие шаги не выделены; высок риск распыления ресурсов.',
+    );
+    const nextQuestion = nextQuestionDecision?.present && nextQuestionDecision?.accepted
+      ? toTrimmedString(nextQuestionDecision.value, 360)
+      : '';
 
-    return `${answer}\n\nВопрос: ${nextQuestionDecision.value}`;
+    const blocks = [
+      `1. Главный вывод.\n${coreConclusion || 'Главный вывод не зафиксирован.'}`,
+      `2. Что делать прямо сейчас.\n${doNow}`,
+      `3. Что не делать сейчас.\n${dontDo}`,
+      `4. Почему этого недостаточно для главной цели.\n${whyNotEnough || 'Причина недостаточности не раскрыта.'}`,
+      `5. Куда копать дальше / следующий вопрос.\n${[
+        nextGrowthContour || 'Следующий контур роста не определен.',
+        nextQuestion ? `Уточняющий вопрос: ${nextQuestion}` : '',
+      ].filter(Boolean).join('\n')}`,
+    ];
+    const structured = blocks.join('\n\n');
+
+    // Keep fallback for emergency cases when reasoning-state synthesis is empty.
+    if (!coreConclusion && !whyNotEnough && !nextGrowthContour && rawFinalAnswer) {
+      return rawFinalAnswer;
+    }
+    return structured;
   }
 
   async function requestProjectReasoningAttempt({
@@ -531,16 +659,17 @@ function createProjectChatFlow({ deps, helpers }) {
     contextData,
     llmSerializationTrace,
   }) {
+    const requestConfig = resolveProjectDeepReasoningRequestConfig();
     const requestPreview = typeof aiProvider.previewOpenAiAgentRequest === 'function'
       ? aiProvider.previewOpenAiAgentRequest({
         model: deepModel,
         systemPrompt,
         userPrompt,
-        temperature: AGENT_CHAT_MAIN_REQUEST_CONFIG.temperature,
-        maxOutputTokens: AGENT_CHAT_MAIN_REQUEST_CONFIG.maxOutputTokens,
-        timeoutMs: AGENT_CHAT_MAIN_REQUEST_CONFIG.timeoutMs,
-        reasoningEffort: AGENT_CHAT_MAIN_REQUEST_CONFIG.reasoningEffort,
-        verbosity: AGENT_CHAT_MAIN_REQUEST_CONFIG.verbosity,
+        temperature: requestConfig.temperature,
+        maxOutputTokens: requestConfig.maxOutputTokens,
+        timeoutMs: requestConfig.timeoutMs,
+        reasoningEffort: requestConfig.reasoningEffort,
+        verbosity: requestConfig.verbosity,
         jsonSchema: PROJECT_DEEP_REASONING_OUTPUT_SCHEMA,
       })
       : null;
@@ -575,13 +704,13 @@ function createProjectChatFlow({ deps, helpers }) {
       userPrompt,
       includeRawPayload: includeDebug,
       model: deepModel,
-      temperature: AGENT_CHAT_MAIN_REQUEST_CONFIG.temperature,
-      maxOutputTokens: AGENT_CHAT_MAIN_REQUEST_CONFIG.maxOutputTokens,
+      temperature: requestConfig.temperature,
+      maxOutputTokens: requestConfig.maxOutputTokens,
       allowEmptyResponse: true,
       emptyResponseFallback: 'Пустой ответ от модели. Уточните запрос или повторите через несколько секунд.',
-      timeoutMs: AGENT_CHAT_MAIN_REQUEST_CONFIG.timeoutMs,
-      reasoningEffort: AGENT_CHAT_MAIN_REQUEST_CONFIG.reasoningEffort,
-      verbosity: AGENT_CHAT_MAIN_REQUEST_CONFIG.verbosity,
+      timeoutMs: requestConfig.timeoutMs,
+      reasoningEffort: requestConfig.reasoningEffort,
+      verbosity: requestConfig.verbosity,
       jsonSchema: PROJECT_DEEP_REASONING_OUTPUT_SCHEMA,
       singleRequest: true,
     }));
@@ -688,17 +817,18 @@ function createProjectChatFlow({ deps, helpers }) {
     const systemPromptWithoutRoleInjection = promptPack.systemPrompt;
     const systemPrompt = promptPack.systemPrompt;
     const userPrompt = promptPack.userPrompt;
+    const requestConfig = resolveProjectDeepReasoningRequestConfig();
 
     const requestPreviewBeforeRoleInjection = hasQuestion && typeof aiProvider.previewOpenAiAgentRequest === 'function'
       ? aiProvider.previewOpenAiAgentRequest({
         model: deepModel,
         systemPrompt: systemPromptWithoutRoleInjection,
         userPrompt,
-        temperature: AGENT_CHAT_MAIN_REQUEST_CONFIG.temperature,
-        maxOutputTokens: AGENT_CHAT_MAIN_REQUEST_CONFIG.maxOutputTokens,
-        timeoutMs: AGENT_CHAT_MAIN_REQUEST_CONFIG.timeoutMs,
-        reasoningEffort: AGENT_CHAT_MAIN_REQUEST_CONFIG.reasoningEffort,
-        verbosity: AGENT_CHAT_MAIN_REQUEST_CONFIG.verbosity,
+        temperature: requestConfig.temperature,
+        maxOutputTokens: requestConfig.maxOutputTokens,
+        timeoutMs: requestConfig.timeoutMs,
+        reasoningEffort: requestConfig.reasoningEffort,
+        verbosity: requestConfig.verbosity,
         jsonSchema: PROJECT_DEEP_REASONING_OUTPUT_SCHEMA,
       })
       : null;
@@ -707,11 +837,11 @@ function createProjectChatFlow({ deps, helpers }) {
         model: deepModel,
         systemPrompt,
         userPrompt,
-        temperature: AGENT_CHAT_MAIN_REQUEST_CONFIG.temperature,
-        maxOutputTokens: AGENT_CHAT_MAIN_REQUEST_CONFIG.maxOutputTokens,
-        timeoutMs: AGENT_CHAT_MAIN_REQUEST_CONFIG.timeoutMs,
-        reasoningEffort: AGENT_CHAT_MAIN_REQUEST_CONFIG.reasoningEffort,
-        verbosity: AGENT_CHAT_MAIN_REQUEST_CONFIG.verbosity,
+        temperature: requestConfig.temperature,
+        maxOutputTokens: requestConfig.maxOutputTokens,
+        timeoutMs: requestConfig.timeoutMs,
+        reasoningEffort: requestConfig.reasoningEffort,
+        verbosity: requestConfig.verbosity,
         jsonSchema: PROJECT_DEEP_REASONING_OUTPUT_SCHEMA,
       })
       : null;
@@ -859,17 +989,18 @@ function createProjectChatFlow({ deps, helpers }) {
     const systemPromptWithoutRoleInjection = passOnePromptPack.systemPrompt;
     const systemPrompt = passOnePromptPack.systemPrompt;
     const userPrompt = passOnePromptPack.userPrompt;
+    const requestConfig = resolveProjectDeepReasoningRequestConfig();
 
     const requestPreviewBeforeRoleInjection = typeof aiProvider.previewOpenAiAgentRequest === 'function'
       ? aiProvider.previewOpenAiAgentRequest({
         model: deepModel,
         systemPrompt: systemPromptWithoutRoleInjection,
         userPrompt,
-        temperature: AGENT_CHAT_MAIN_REQUEST_CONFIG.temperature,
-        maxOutputTokens: AGENT_CHAT_MAIN_REQUEST_CONFIG.maxOutputTokens,
-        timeoutMs: AGENT_CHAT_MAIN_REQUEST_CONFIG.timeoutMs,
-        reasoningEffort: AGENT_CHAT_MAIN_REQUEST_CONFIG.reasoningEffort,
-        verbosity: AGENT_CHAT_MAIN_REQUEST_CONFIG.verbosity,
+        temperature: requestConfig.temperature,
+        maxOutputTokens: requestConfig.maxOutputTokens,
+        timeoutMs: requestConfig.timeoutMs,
+        reasoningEffort: requestConfig.reasoningEffort,
+        verbosity: requestConfig.verbosity,
         jsonSchema: PROJECT_DEEP_REASONING_OUTPUT_SCHEMA,
       })
       : null;
@@ -878,11 +1009,11 @@ function createProjectChatFlow({ deps, helpers }) {
         model: deepModel,
         systemPrompt,
         userPrompt,
-        temperature: AGENT_CHAT_MAIN_REQUEST_CONFIG.temperature,
-        maxOutputTokens: AGENT_CHAT_MAIN_REQUEST_CONFIG.maxOutputTokens,
-        timeoutMs: AGENT_CHAT_MAIN_REQUEST_CONFIG.timeoutMs,
-        reasoningEffort: AGENT_CHAT_MAIN_REQUEST_CONFIG.reasoningEffort,
-        verbosity: AGENT_CHAT_MAIN_REQUEST_CONFIG.verbosity,
+        temperature: requestConfig.temperature,
+        maxOutputTokens: requestConfig.maxOutputTokens,
+        timeoutMs: requestConfig.timeoutMs,
+        reasoningEffort: requestConfig.reasoningEffort,
+        verbosity: requestConfig.verbosity,
         jsonSchema: PROJECT_DEEP_REASONING_OUTPUT_SCHEMA,
       })
       : null;
@@ -944,7 +1075,7 @@ function createProjectChatFlow({ deps, helpers }) {
       contextData,
     );
 
-    const finalReply = composeFinalReply(selectedCandidate?.final_answer, nextQuestionDecision);
+    const finalReply = buildStructuredFinalAnswer(selectedCandidate, nextQuestionDecision);
     const questionGateResult = aiPrompts.inspectAgentReplyQuestionGate({
       reply: finalReply,
       questionGate,
@@ -1028,6 +1159,7 @@ function createProjectChatFlow({ deps, helpers }) {
           mode: PROJECT_DEEP_REASONING_MAX_CALLS > 1
             ? 'single_call_with_one_regeneration_max'
             : 'single_call_only',
+          requestConfig,
           reasoningContract: PROJECT_REASONING_CONTRACT,
           answerPatterns: PROJECT_ANSWER_PATTERNS,
           maxCalls: PROJECT_DEEP_REASONING_MAX_CALLS,
@@ -1037,6 +1169,7 @@ function createProjectChatFlow({ deps, helpers }) {
           reasoningState: selectedCandidate?.reasoning_state || null,
           answerPattern: selectedCandidate?.answer_pattern || '',
           nextBestQuestion: nextQuestionDecision,
+          finalAnswerAssembly: 'server_structured_from_reasoning_state',
           attempts: attempts.map((attempt) => ({
             attemptIndex: attempt.attemptIndex,
             qualityGate: attempt.qualityGate,
