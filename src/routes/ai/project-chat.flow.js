@@ -494,8 +494,27 @@ function createProjectChatFlow({ deps, helpers }) {
         ? `Не покрыты обязательные блоки: ${failedBlocks.join(', ')}.`
         : 'Обязательные блоки покрыты, но есть проблемы качества.',
       gateResult?.factAnchored ? '' : 'Усиль привязку к фактам и сущностям из контекста.',
-      gateResult?.finalAnswerStructured ? '' : 'Сделай final_answer в 5 смысловых абзацах по заданной структуре.',
+      // Empty final_answer — must regenerate with actual text.
+      !gateResult?.finalAnswerPresent
+        ? 'final_answer пустой: напиши 5 абзацев человеческого текста в поле final_answer.'
+        : '',
+      // Structure check — only if answer is present but lacks 5 paragraphs.
+      gateResult?.finalAnswerPresent && !gateResult?.finalAnswerStructured
+        ? 'Сделай final_answer в 5 смысловых абзацах, разделённых пустой строкой.'
+        : '',
       gateResult?.factRetellingDetected ? 'Избегай пересказа фактов: дай явный синтетический главный вывод.' : '',
+      // New: first paragraph starts with a retelling phrase.
+      gateResult?.finalAnswerLeadsWithFact
+        ? 'Первый абзац final_answer не должен начинаться с пересказа данных ("По контексту...", "Согласно данным..." и т.п.): начни с синтетического вывода, которого не было явно на поверхности.'
+        : '',
+      // New: field label names copied into the answer.
+      gateResult?.finalAnswerContainsFieldLabels
+        ? 'Запрещено копировать названия JSON-полей (core_conclusion, fast_levers, excluded_paths и т.д.) в final_answer: перепиши как связный человеческий текст.'
+        : '',
+      // New: sub-list items "1) ...\n2) ..." inside paragraphs.
+      gateResult?.finalAnswerHasSubLists
+        ? 'final_answer не должен содержать нумерованных подсписков вида "1) ...", "2) ...": встраивай fast_levers и excluded_paths в связный текст абзацев.'
+        : '',
       gateResult?.whyNotEnoughTooShort ? 'Подробно объясни, почему найденные шаги пока недостаточны для главной цели.' : '',
       gateResult?.nextGrowthContourTooShort ? 'Определи следующий контур роста (next_growth_contour), а не общий совет.' : '',
       gateResult?.nextQuestionQuality?.present && !gateResult?.nextQuestionQuality?.accepted
