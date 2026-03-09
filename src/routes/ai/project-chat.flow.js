@@ -25,6 +25,8 @@ const PROJECT_DEEP_REASONING_OUTPUT_SCHEMA = Object.freeze({
           'confirmed_facts',
           'uncertain_facts',
           'conflicts',
+          'conclusion',
+          'insufficiency_reason',
         ],
         additionalProperties: false,
         properties: {
@@ -53,6 +55,8 @@ const PROJECT_DEEP_REASONING_OUTPUT_SCHEMA = Object.freeze({
           confirmed_facts: { type: 'array', items: { type: 'string' } },
           uncertain_facts: { type: 'array', items: { type: 'string' } },
           conflicts: { type: 'array', items: { type: 'string' } },
+          conclusion: { type: 'string' },
+          insufficiency_reason: { type: 'string' },
         },
       },
     },
@@ -67,7 +71,9 @@ const PROJECT_REASONING_CONTRACT = Object.freeze([
   '5. Выдели constraints (реальные ограничения: ресурс, срок, риски, зависимости).',
   '6. Найди fast_levers (быстрые рычаги наибольшего эффекта).',
   '7. Отсеки excluded_paths (что сейчас делать не стоит и почему).',
-  '8. При необходимости задай один next_best_question, только если он открывает новый слой анализа.',
+  '8. Сформулируй conclusion (к какому промежуточному выводу пришел анализ).',
+  '9. Зафиксируй insufficiency_reason (почему текущего вывода пока недостаточно для финального решения).',
+  '10. При необходимости задай один next_best_question, только если он открывает новый слой анализа.',
 ]);
 
 const PROJECT_ANSWER_PATTERNS = Object.freeze([
@@ -84,6 +90,8 @@ const PROJECT_REQUIRED_REASONING_BLOCKS = Object.freeze([
   'constraints',
   'fast_levers',
   'excluded_paths',
+  'conclusion',
+  'insufficiency_reason',
 ]);
 const PROJECT_DEEP_REASONING_MAX_CALLS = 1;
 
@@ -179,6 +187,8 @@ function createProjectChatFlow({ deps, helpers }) {
       confirmed_facts: normalizeStringList(state.confirmed_facts, { maxItems: 14, itemMaxLength: 360 }),
       uncertain_facts: normalizeStringList(state.uncertain_facts, { maxItems: 10, itemMaxLength: 360 }),
       conflicts: normalizeStringList(state.conflicts, { maxItems: 8, itemMaxLength: 360 }),
+      conclusion: toTrimmedString(state.conclusion, 1400),
+      insufficiency_reason: toTrimmedString(state.insufficiency_reason || state.why_insufficient, 1400),
     };
   }
 
@@ -303,6 +313,8 @@ function createProjectChatFlow({ deps, helpers }) {
       constraints: hasNonEmptyArray(reasoningState.constraints),
       fast_levers: hasNonEmptyArray(reasoningState.fast_levers),
       excluded_paths: hasNonEmptyArray(reasoningState.excluded_paths),
+      conclusion: hasNonEmptyString(reasoningState.conclusion),
+      insufficiency_reason: hasNonEmptyString(reasoningState.insufficiency_reason),
     };
 
     const missingMandatoryBlocks = PROJECT_REQUIRED_REASONING_BLOCKS.filter((key) => !blockChecks[key]);
@@ -466,12 +478,14 @@ function createProjectChatFlow({ deps, helpers }) {
       '    "relevant_entities": [{"id":"string","name":"string","type":"string","why_relevant":"string"}],',
       '    "confirmed_facts": ["string"],',
       '    "uncertain_facts": ["string"],',
-      '    "conflicts": ["string"]',
+      '    "conflicts": ["string"],',
+      '    "conclusion": "string",',
+      '    "insufficiency_reason": "string"',
       '  }',
       '}',
       '',
       'КРИТИЧЕСКОЕ ТРЕБОВАНИЕ: обязательные блоки reasoning_state должны быть заполнены содержательно:',
-      '- actor, intent, current_point, target_point, constraints, fast_levers, excluded_paths.',
+      '- actor, intent, current_point, target_point, constraints, fast_levers, excluded_paths, conclusion, insufficiency_reason.',
       '- next_best_question — условный блок, только при реальной пользе.',
       regenerationFeedback ? '' : '',
       regenerationFeedback ? regenerationFeedback : '',
