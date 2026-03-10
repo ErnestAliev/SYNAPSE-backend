@@ -1,3 +1,5 @@
+const { parseResourceLink } = require('../../ai/resource-link-parser');
+
 // PROTECTED: Entity chat/analyze branch. Keep behavior unchanged.
 function registerEntityProtectedRoutes({ router, deps, helpers }) {
   const {
@@ -30,6 +32,45 @@ function registerEntityProtectedRoutes({ router, deps, helpers }) {
     ENTITY_ANALYSIS_OUTPUT_SCHEMA,
     postValidateEntityAnalysis,
   } = helpers;
+
+  router.post('/entity-link-preview', requireAuth, async (req, res, next) => {
+    try {
+      const ownerId = requireOwnerId(req);
+      const entityId = toTrimmedString(req.body?.entityId, 80);
+      const sourceUrl = toTrimmedString(req.body?.url, 2048);
+
+      if (!entityId) {
+        return res.status(400).json({ message: 'entityId is required' });
+      }
+
+      if (!sourceUrl) {
+        return res.status(400).json({ message: 'url is required' });
+      }
+
+      const entity = await Entity.findOne({
+        _id: entityId,
+        owner_id: ownerId,
+      });
+
+      if (!entity) {
+        return res.status(404).json({ message: 'Entity not found' });
+      }
+
+      if (entity.type !== 'resource') {
+        return res.status(400).json({ message: 'Link preview is available only for resource entities' });
+      }
+
+      try {
+        const preview = await parseResourceLink(sourceUrl);
+        return res.json(preview);
+      } catch (error) {
+        const safeMessage = toTrimmedString(error?.message, 240) || 'Не удалось подготовить данные по ссылке';
+        return res.status(422).json({ message: safeMessage });
+      }
+    } catch (error) {
+      return next(error);
+    }
+  });
 
   router.post('/entity-analyze', requireAuth, async (req, res, next) => {
     try {
