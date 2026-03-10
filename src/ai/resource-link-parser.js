@@ -36,6 +36,7 @@ const GENERIC_TITLE_PATTERNS = [
   /^telegram$/i,
   /^youtube$/i,
   /^tiktok$/i,
+  /^tiktok\s*-\s*make your day$/i,
   /^x$/i,
   /^twitter$/i,
   /^vk(?:ontakte)?$/i,
@@ -321,6 +322,59 @@ function extractInstagramProfileStats(value) {
   return trimTextBlock(match?.[1] || '', 220);
 }
 
+function decodeJsonString(rawValue) {
+  const raw = String(rawValue || '');
+  if (!raw) return '';
+  try {
+    return JSON.parse(`"${raw}"`);
+  } catch {
+    return raw.replace(/\\u002F/g, '/').replace(/\\"/g, '"').replace(/\\\\/g, '\\').trim();
+  }
+}
+
+function extractJsonStringByPattern(html, pattern) {
+  const match = String(html || '').match(pattern);
+  return decodeJsonString(match?.[1] || '');
+}
+
+function extractJsonNumberByPattern(html, pattern) {
+  const match = String(html || '').match(pattern);
+  return match?.[1] ? String(match[1]).trim() : '';
+}
+
+function formatTiktokStats(parts) {
+  const rows = [];
+  if (parts.followers) rows.push(`Подписчики: ${parts.followers}`);
+  if (parts.following) rows.push(`Подписки: ${parts.following}`);
+  if (parts.likes) rows.push(`Лайки: ${parts.likes}`);
+  if (parts.videos) rows.push(`Видео: ${parts.videos}`);
+  return rows.join(', ');
+}
+
+function extractTiktokProfileData(html) {
+  const uniqueId = extractJsonStringByPattern(html, /"uniqueId":"((?:\\.|[^"])*)"/);
+  const nickname = extractJsonStringByPattern(html, /"nickname":"((?:\\.|[^"])*)"/);
+  const signature = extractJsonStringByPattern(html, /"signature":"((?:\\.|[^"])*)"/);
+  const shareDesc = extractJsonStringByPattern(html, /"shareMeta":\{"title":"(?:\\.|[^"])*","desc":"((?:\\.|[^"])*)"/);
+  const followers = extractJsonNumberByPattern(html, /"followerCount":"?(\d+(?:\.\d+)?)"?/);
+  const following = extractJsonNumberByPattern(html, /"followingCount":"?(\d+(?:\.\d+)?)"?/);
+  const likes = extractJsonNumberByPattern(html, /"heartCount":"?(\d+(?:\.\d+)?)"?/);
+  const videos = extractJsonNumberByPattern(html, /"videoCount":"?(\d+(?:\.\d+)?)"?/);
+
+  const handle = uniqueId ? `@${uniqueId.replace(/^@+/, '')}` : '';
+  const title = trimTextBlock(
+    [nickname, handle].filter(Boolean).join(handle && nickname ? ' ' : '').trim() ? `${nickname || handle} ${nickname && handle ? `(${handle})` : ''} | TikTok`.trim() : '',
+    180,
+  );
+
+  return {
+    title,
+    profileBio: trimTextBlock(signature, 500),
+    profileStats: trimTextBlock(formatTiktokStats({ followers, following, likes, videos }), 220),
+    description: trimTextBlock(shareDesc, 420),
+  };
+}
+
 function extractUrlHints(finalUrl, hostname) {
   const host = String(hostname || '').toLowerCase();
   const segments = parseUrlPathSegments(finalUrl);
@@ -556,10 +610,13 @@ async function parseResourceLink(rawUrl) {
   const sourceKind = pickSourceKind(hostname);
   const metaDescription = trimTextBlock(extractMetaContent(html, ['description']), 800);
   const socialDescription = trimTextBlock(extractMetaContent(html, ['og:description', 'twitter:description']), 420);
-  const profileBio = hostname.includes('instagram.com') ? extractInstagramProfileBio(metaDescription) : '';
+  const tiktokProfile = hostname.includes('tiktok.com') ? extractTiktokProfileData(html) : null;
+  const profileBio = hostname.includes('instagram.com')
+    ? extractInstagramProfileBio(metaDescription)
+    : tiktokProfile?.profileBio || '';
   const profileStats = hostname.includes('instagram.com')
     ? extractInstagramProfileStats(socialDescription || metaDescription)
-    : '';
+    : tiktokProfile?.profileStats || '';
 
   const rawTitle = trimTextBlock(
     extractMetaContent(html, ['og:title', 'twitter:title']) ||
@@ -575,11 +632,14 @@ async function parseResourceLink(rawUrl) {
     800,
   );
   const textSnippet = trimTextBlock(extractVisibleText(html), 1_400);
-  const title = isGenericTitle(rawTitle, siteLabel) ? trimTextBlock(fallbackTitle, 180) : rawTitle;
-  const description = profileBio || (isGenericDescription(rawDescription) ? '' : rawDescription);
+  const title = isGenericTitle(rawTitle, siteLabel)
+    ? trimTextBlock(tiktokProfile?.title || fallbackTitle, 180)
+    : rawTitle;
+  const description = profileBio || tiktokProfile?.description || (isGenericDescription(rawDescription) ? '' : rawDescription);
   const hasRealPageText = Boolean(textSnippet);
+  const hasStructuredProfileData = Boolean(profileBio || profileStats || description);
   const accessNote =
-    !hasRealPageText && urlHints.length
+    !hasRealPageText && !hasStructuredProfileData && urlHints.length
       ? 'Площадка не отдала содержимое страницы без авторизации или клиентского рендера. Ниже сохранены только признаки, которые удалось извлечь из самой ссылки.'
       : '';
 
