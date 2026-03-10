@@ -432,6 +432,18 @@ function extractUrlHints(finalUrl, hostname) {
   };
 }
 
+function hasUsefulParsedPayload(parsed) {
+  return Boolean(
+    (parsed.title && parsed.title.trim()) ||
+      (parsed.profileBio && parsed.profileBio.trim()) ||
+      (parsed.profileStats && parsed.profileStats.trim()) ||
+      (parsed.description && parsed.description.trim()) ||
+      (parsed.textSnippet && parsed.textSnippet.trim()) ||
+      (Array.isArray(parsed.urlHints) && parsed.urlHints.length) ||
+      (parsed.accessNote && parsed.accessNote.trim()),
+  );
+}
+
 function buildPreparedTextBlock(parsed) {
   const parts = [];
 
@@ -554,7 +566,15 @@ async function parseResourceLink(rawUrl) {
     accessNote,
   });
 
-  if (!preparedText) {
+  if (!preparedText || !hasUsefulParsedPayload({
+    title,
+    profileBio,
+    profileStats,
+    description,
+    textSnippet,
+    urlHints,
+    accessNote,
+  })) {
     throw new Error('Парсер не нашёл полезный текст на странице');
   }
 
