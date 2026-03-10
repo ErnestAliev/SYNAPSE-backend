@@ -29,6 +29,30 @@ const TEXT_NOISE_PATTERNS = [
   /подписывайтесь/i,
 ];
 
+const GENERIC_TITLE_PATTERNS = [
+  /^instagram$/i,
+  /^facebook$/i,
+  /^linkedin$/i,
+  /^telegram$/i,
+  /^youtube$/i,
+  /^tiktok$/i,
+  /^x$/i,
+  /^twitter$/i,
+  /^vk(?:ontakte)?$/i,
+  /^github$/i,
+];
+
+const GENERIC_DESCRIPTION_PATTERNS = [
+  /создайте аккаунт или войдите/i,
+  /create an account or log in/i,
+  /share (?:photos|videos|moments)/i,
+  /людьми, которые вас понимают/i,
+  /sign up .* instagram/i,
+  /from breaking news and entertainment/i,
+  /join facebook/i,
+  /connect with friends/i,
+];
+
 function normalizeResourceLinkUrl(rawValue) {
   const raw = String(rawValue || '').trim();
   if (!raw) return '';
@@ -64,10 +88,6 @@ function decodeHtmlEntities(value) {
 
 function collapseWhitespace(value) {
   return decodeHtmlEntities(value).replace(/\s+/g, ' ').trim();
-}
-
-function stripTags(value) {
-  return collapseWhitespace(String(value || '').replace(/<[^>]+>/g, ' '));
 }
 
 function extractTagInnerHtml(html, tagName) {
@@ -210,6 +230,176 @@ function trimTextBlock(value, maxLength = RESOURCE_LINK_TEXT_MAX_LENGTH) {
   return `${sliced.slice(0, lastBoundary > 160 ? lastBoundary : maxLength).trim()}…`;
 }
 
+function parseUrlPathSegments(urlString) {
+  try {
+    const url = new URL(urlString);
+    return url.pathname
+      .split('/')
+      .map((part) => decodeURIComponent(part || '').trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function isReservedSocialSegment(segment) {
+  const value = String(segment || '').toLowerCase();
+  return new Set([
+    'p',
+    'reel',
+    'reels',
+    'tv',
+    'explore',
+    'stories',
+    'accounts',
+    'about',
+    'legal',
+    'directory',
+    'developer',
+    'developers',
+    'privacy',
+    'terms',
+    'login',
+    'signup',
+    'share',
+    'watch',
+    'shorts',
+    'video',
+    'videos',
+    'status',
+    'channel',
+    'c',
+    'user',
+    'company',
+    'in',
+    's',
+  ]).has(value);
+}
+
+function isGenericTitle(title, siteLabel) {
+  const value = String(title || '').trim();
+  if (!value) return true;
+  if (GENERIC_TITLE_PATTERNS.some((pattern) => pattern.test(value))) return true;
+  return siteLabel ? value.toLowerCase() === String(siteLabel).trim().toLowerCase() : false;
+}
+
+function isGenericDescription(description) {
+  const value = String(description || '').trim();
+  if (!value) return true;
+  return GENERIC_DESCRIPTION_PATTERNS.some((pattern) => pattern.test(value));
+}
+
+function extractUrlHints(finalUrl, hostname) {
+  const host = String(hostname || '').toLowerCase();
+  const segments = parseUrlPathSegments(finalUrl);
+  const hints = [];
+  let fallbackTitle = '';
+
+  if (host.includes('instagram.com')) {
+    const [first, second] = segments;
+    if (first && !isReservedSocialSegment(first)) {
+      fallbackTitle = `Instagram @${first}`;
+      hints.push(`Аккаунт: @${first}`);
+    } else if (first === 'p' && second) {
+      fallbackTitle = `Instagram пост ${second}`;
+      hints.push(`Тип ссылки: пост Instagram`);
+      hints.push(`Идентификатор поста: ${second}`);
+    } else if ((first === 'reel' || first === 'reels' || first === 'tv') && second) {
+      fallbackTitle = `Instagram ${first} ${second}`;
+      hints.push(`Тип ссылки: ${first === 'tv' ? 'видео Instagram TV' : 'reel Instagram'}`);
+      hints.push(`Идентификатор: ${second}`);
+    }
+  } else if (host.includes('tiktok.com')) {
+    const [first, second, third] = segments;
+    if (first && first.startsWith('@')) {
+      fallbackTitle = `TikTok ${first}`;
+      hints.push(`Аккаунт: ${first}`);
+      if (second === 'video' && third) {
+        hints.push(`Тип ссылки: TikTok видео`);
+        hints.push(`Идентификатор видео: ${third}`);
+      }
+    }
+  } else if (host === 't.me' || host.includes('telegram.')) {
+    const [first, second] = segments;
+    if (first === 's' && second) {
+      fallbackTitle = `Telegram ${second}`;
+      hints.push(`Канал или профиль: @${second}`);
+    } else if (first) {
+      fallbackTitle = `Telegram ${first}`;
+      hints.push(`Канал или профиль: @${first}`);
+    }
+  } else if (host.includes('youtube.com') || host.includes('youtu.be')) {
+    const url = new URL(finalUrl);
+    const [first, second] = segments;
+    if (host.includes('youtu.be') && first) {
+      fallbackTitle = `YouTube видео ${first}`;
+      hints.push(`Тип ссылки: YouTube видео`);
+      hints.push(`Идентификатор видео: ${first}`);
+    } else if (first === '@' || (first && first.startsWith('@'))) {
+      const handle = first === '@' ? second : first;
+      if (handle) {
+        fallbackTitle = `YouTube ${handle}`;
+        hints.push(`Канал: ${handle.startsWith('@') ? handle : `@${handle}`}`);
+      }
+    } else if (first === 'watch' && url.searchParams.get('v')) {
+      fallbackTitle = `YouTube видео ${url.searchParams.get('v')}`;
+      hints.push(`Тип ссылки: YouTube видео`);
+      hints.push(`Идентификатор видео: ${url.searchParams.get('v')}`);
+    } else if ((first === 'shorts' || first === 'channel' || first === 'c' || first === 'user') && second) {
+      fallbackTitle = `YouTube ${second}`;
+      hints.push(`Тип ссылки: ${first === 'shorts' ? 'YouTube Shorts' : 'YouTube канал'}`);
+      hints.push(`Идентификатор: ${second}`);
+    }
+  } else if (host.includes('x.com') || host.includes('twitter.com')) {
+    const [first, second, third] = segments;
+    if (first && !isReservedSocialSegment(first)) {
+      fallbackTitle = `X @${first}`;
+      hints.push(`Аккаунт: @${first}`);
+      if (second === 'status' && third) {
+        hints.push(`Тип ссылки: пост X`);
+        hints.push(`Идентификатор поста: ${third}`);
+      }
+    }
+  } else if (host.includes('linkedin.com')) {
+    const [first, second] = segments;
+    if ((first === 'in' || first === 'company') && second) {
+      fallbackTitle = `LinkedIn ${second}`;
+      hints.push(`Тип ссылки: ${first === 'company' ? 'страница компании' : 'профиль'}`);
+      hints.push(`Slug: ${second}`);
+    }
+  } else if (host.includes('github.com')) {
+    const [first, second] = segments;
+    if (first && second) {
+      fallbackTitle = `GitHub ${first}/${second}`;
+      hints.push(`Тип ссылки: репозиторий`);
+      hints.push(`Репозиторий: ${first}/${second}`);
+    } else if (first) {
+      fallbackTitle = `GitHub ${first}`;
+      hints.push(`Аккаунт: ${first}`);
+    }
+  } else if (host.includes('vk.com') || host.includes('vkontakte.ru')) {
+    const [first] = segments;
+    if (first) {
+      fallbackTitle = `VK ${first}`;
+      hints.push(`Идентификатор или slug: ${first}`);
+    }
+  } else if (host === 'wa.me' || host.includes('whatsapp.com')) {
+    const [first] = segments;
+    if (first) {
+      fallbackTitle = `WhatsApp ${first}`;
+      hints.push(`Номер или код ссылки: ${first}`);
+    }
+  } else if (segments[0]) {
+    fallbackTitle = segments[0];
+    hints.push(`Путь ссылки: /${segments.join('/')}`);
+  }
+
+  return {
+    hints,
+    fallbackTitle,
+  };
+}
+
 function buildPreparedTextBlock(parsed) {
   const parts = [];
 
@@ -225,8 +415,14 @@ function buildPreparedTextBlock(parsed) {
   if (parsed.description) {
     parts.push(`Краткое описание: ${parsed.description}`);
   }
+  if (Array.isArray(parsed.urlHints) && parsed.urlHints.length) {
+    parts.push(`Что удалось понять из ссылки:\n${parsed.urlHints.join('\n')}`);
+  }
   if (parsed.textSnippet) {
     parts.push(`Извлечённый текст:\n${parsed.textSnippet}`);
+  }
+  if (parsed.accessNote) {
+    parts.push(`Ограничение: ${parsed.accessNote}`);
   }
 
   return trimTextBlock(parts.join('\n\n'));
@@ -276,26 +472,38 @@ async function parseResourceLink(rawUrl) {
   const { html, finalUrl } = await fetchPage(sourceUrl);
   const jsonLdObjects = extractJsonLdObjects(html);
   const hostname = new URL(finalUrl).hostname.toLowerCase();
+  const { hints: urlHints, fallbackTitle } = extractUrlHints(finalUrl, hostname);
+  const siteLabel = pickSiteLabel(hostname);
+  const sourceKind = pickSourceKind(hostname);
 
-  const title = trimTextBlock(
+  const rawTitle = trimTextBlock(
     extractMetaContent(html, ['og:title', 'twitter:title']) ||
       collapseWhitespace(extractTagInnerHtml(html, 'title')) ||
       pickJsonLdValue(jsonLdObjects, ['headline', 'name']),
     180,
   );
-  const description = trimTextBlock(
+  const rawDescription = trimTextBlock(
     extractMetaContent(html, ['og:description', 'twitter:description', 'description']) ||
       pickJsonLdValue(jsonLdObjects, ['description']),
     420,
   );
   const textSnippet = trimTextBlock(extractVisibleText(html), 1_400);
+  const title = isGenericTitle(rawTitle, siteLabel) ? trimTextBlock(fallbackTitle, 180) : rawTitle;
+  const description = isGenericDescription(rawDescription) ? '' : rawDescription;
+  const hasRealPageText = Boolean(textSnippet);
+  const accessNote =
+    !hasRealPageText && urlHints.length
+      ? 'Площадка не отдала содержимое страницы без авторизации или клиентского рендера. Ниже сохранены только признаки, которые удалось извлечь из самой ссылки.'
+      : '';
 
   const preparedText = buildPreparedTextBlock({
-    siteLabel: pickSiteLabel(hostname),
-    sourceKind: pickSourceKind(hostname),
+    siteLabel,
+    sourceKind,
     title,
     description,
     textSnippet,
+    urlHints,
+    accessNote,
   });
 
   if (!preparedText) {
@@ -306,8 +514,8 @@ async function parseResourceLink(rawUrl) {
     sourceUrl,
     finalUrl,
     hostname,
-    siteLabel: pickSiteLabel(hostname),
-    sourceKind: pickSourceKind(hostname),
+    siteLabel,
+    sourceKind,
     title,
     description,
     textSnippet,
