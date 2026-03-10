@@ -444,6 +444,35 @@ function hasUsefulParsedPayload(parsed) {
   );
 }
 
+function buildFallbackPreparedText({ siteLabel, sourceKind, sourceUrl, finalUrl, hostname, urlHints }) {
+  const parts = [];
+
+  if (siteLabel) {
+    parts.push(`Площадка: ${siteLabel}`);
+  }
+  if (sourceKind) {
+    parts.push(`Тип источника: ${sourceKind}`);
+  }
+  if (hostname) {
+    parts.push(`Домен: ${hostname}`);
+  }
+  if (sourceUrl) {
+    parts.push(`Исходная ссылка: ${sourceUrl}`);
+  }
+  if (finalUrl && finalUrl !== sourceUrl) {
+    parts.push(`Финальная ссылка: ${finalUrl}`);
+  }
+  if (Array.isArray(urlHints) && urlHints.length) {
+    parts.push(`Что удалось понять из ссылки:\n${urlHints.join('\n')}`);
+  }
+
+  parts.push(
+    'Ограничение: страница не отдала полезный текст. Проверьте ссылку или дополните описание вручную перед отправкой в LLM.',
+  );
+
+  return trimTextBlock(parts.join('\n\n'));
+}
+
 function buildPreparedTextBlock(parsed) {
   const parts = [];
 
@@ -566,7 +595,7 @@ async function parseResourceLink(rawUrl) {
     accessNote,
   });
 
-  if (!preparedText || !hasUsefulParsedPayload({
+  const hasUsefulPayload = hasUsefulParsedPayload({
     title,
     profileBio,
     profileStats,
@@ -574,9 +603,17 @@ async function parseResourceLink(rawUrl) {
     textSnippet,
     urlHints,
     accessNote,
-  })) {
-    throw new Error('Парсер не нашёл полезный текст на странице');
-  }
+  });
+  const safePreparedText = hasUsefulPayload
+    ? preparedText
+    : buildFallbackPreparedText({
+        siteLabel,
+        sourceKind,
+        sourceUrl,
+        finalUrl,
+        hostname,
+        urlHints,
+      });
 
   return {
     sourceUrl,
@@ -587,7 +624,7 @@ async function parseResourceLink(rawUrl) {
     title,
     description,
     textSnippet,
-    preparedText,
+    preparedText: safePreparedText,
   };
 }
 
