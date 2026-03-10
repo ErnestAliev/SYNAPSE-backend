@@ -707,6 +707,14 @@ function createProjectChatFlow({ deps, helpers }) {
         : rawFinalAnswer;
     }
 
+    const hasCoreTriplet = Boolean(coreConclusion || whyNotEnough || nextGrowthContour);
+    if (!hasCoreTriplet) {
+      if (rawFinalAnswer && rawFinalAnswer !== '{}' && rawFinalAnswer !== '[]') {
+        return rawFinalAnswer;
+      }
+      return 'Не удалось получить содержательный ответ от LLM (structured payload пустой). Повторите запрос.';
+    }
+
     // Fallback: assemble structured answer from reasoning_state fields.
     // Used when final_answer is absent or failed the issues check.
     const doNow = joinNumberedList(
