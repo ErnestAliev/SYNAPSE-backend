@@ -1,5 +1,5 @@
 const RESOURCE_LINK_FETCH_TIMEOUT_MS = 12_000;
-const RESOURCE_LINK_HTML_MAX_LENGTH = 400_000;
+const RESOURCE_LINK_HTML_MAX_LENGTH = 1_200_000;
 const RESOURCE_LINK_TEXT_MAX_LENGTH = 2_400;
 const RESOURCE_LINK_LINE_MAX_LENGTH = 260;
 const RESOURCE_LINK_MAX_LINES = 8;
@@ -27,6 +27,11 @@ const TEXT_NOISE_PATTERNS = [
   /войти/i,
   /cookies/i,
   /подписывайтесь/i,
+  /window\.ytplayer/i,
+  /^\(function\(\)\s*\{/i,
+  /ytcfg\.set/i,
+  /о сервисе прессе авторские права/i,
+  /google llc/i,
 ];
 
 const GENERIC_TITLE_PATTERNS = [
@@ -375,6 +380,34 @@ function extractTiktokProfileData(html) {
   };
 }
 
+function extractYouTubeChannelData(html) {
+  const title = trimTextBlock(
+    extractJsonStringByPattern(html, /"channelMetadataRenderer":\{"title":"((?:\\.|[^"])*)"/) ||
+      extractMetaContent(html, ['og:title', 'twitter:title']),
+    180,
+  );
+  const profileBio = trimTextBlock(
+    extractJsonStringByPattern(html, /"channelMetadataRenderer":\{[^}]*"description":"((?:\\.|[^"])*)"/) ||
+      extractMetaContent(html, ['og:description', 'twitter:description', 'description']),
+    700,
+  );
+  const subscriberText = trimTextBlock(
+    extractJsonStringByPattern(html, /"content":"((?:\\.|[^"]*(?:подписчик|subscriber)[^"]*))"/i),
+    120,
+  );
+  const videoText = trimTextBlock(
+    extractJsonStringByPattern(html, /"content":"((?:\\.|[^"]*(?:видео|video)[^"]*))"/i),
+    80,
+  );
+
+  return {
+    title,
+    profileBio,
+    profileStats: trimTextBlock([subscriberText, videoText].filter(Boolean).join(', '), 220),
+    description: trimTextBlock(extractMetaContent(html, ['description']), 700),
+  };
+}
+
 function extractUrlHints(finalUrl, hostname) {
   const host = String(hostname || '').toLowerCase();
   const segments = parseUrlPathSegments(finalUrl);
@@ -605,37 +638,48 @@ async function parseResourceLink(rawUrl) {
   const { html, finalUrl } = await fetchPage(sourceUrl);
   const jsonLdObjects = extractJsonLdObjects(html);
   const hostname = new URL(finalUrl).hostname.toLowerCase();
+  const isInstagramHost = hostname.includes('instagram.com');
+  const isTikTokHost = hostname.includes('tiktok.com');
+  const isYouTubeHost = hostname.includes('youtube.com') || hostname.includes('youtu.be');
   const { hints: urlHints, fallbackTitle } = extractUrlHints(finalUrl, hostname);
   const siteLabel = pickSiteLabel(hostname);
   const sourceKind = pickSourceKind(hostname);
   const metaDescription = trimTextBlock(extractMetaContent(html, ['description']), 800);
   const socialDescription = trimTextBlock(extractMetaContent(html, ['og:description', 'twitter:description']), 420);
-  const tiktokProfile = hostname.includes('tiktok.com') ? extractTiktokProfileData(html) : null;
-  const profileBio = hostname.includes('instagram.com')
+  const tiktokProfile = isTikTokHost ? extractTiktokProfileData(html) : null;
+  const youtubeProfile = isYouTubeHost ? extractYouTubeChannelData(html) : null;
+  const profileBio = isInstagramHost
     ? extractInstagramProfileBio(metaDescription)
-    : tiktokProfile?.profileBio || '';
-  const profileStats = hostname.includes('instagram.com')
+    : tiktokProfile?.profileBio || youtubeProfile?.profileBio || '';
+  const profileStats = isInstagramHost
     ? extractInstagramProfileStats(socialDescription || metaDescription)
-    : tiktokProfile?.profileStats || '';
+    : tiktokProfile?.profileStats || youtubeProfile?.profileStats || '';
 
   const rawTitle = trimTextBlock(
-    extractMetaContent(html, ['og:title', 'twitter:title']) ||
+    (youtubeProfile?.title || '') ||
+      extractMetaContent(html, ['og:title', 'twitter:title']) ||
       collapseWhitespace(extractTagInnerHtml(html, 'title')) ||
       pickJsonLdValue(jsonLdObjects, ['headline', 'name']),
     180,
   );
   const rawDescription = trimTextBlock(
-    (hostname.includes('instagram.com')
+    (isInstagramHost
       ? metaDescription || socialDescription
-      : socialDescription || metaDescription) ||
+      : youtubeProfile?.profileBio || youtubeProfile?.description || socialDescription || metaDescription) ||
       pickJsonLdValue(jsonLdObjects, ['description']),
     800,
   );
   const textSnippet = trimTextBlock(extractVisibleText(html), 1_400);
-  const title = isGenericTitle(rawTitle, siteLabel)
-    ? trimTextBlock(tiktokProfile?.title || fallbackTitle, 180)
-    : rawTitle;
-  const description = profileBio || tiktokProfile?.description || (isGenericDescription(rawDescription) ? '' : rawDescription);
+  const title = isYouTubeHost
+    ? trimTextBlock(youtubeProfile?.title || rawTitle || fallbackTitle, 180)
+    : isGenericTitle(rawTitle, siteLabel)
+      ? trimTextBlock(tiktokProfile?.title || youtubeProfile?.title || fallbackTitle, 180)
+      : rawTitle;
+  const description =
+    profileBio ||
+    tiktokProfile?.description ||
+    youtubeProfile?.description ||
+    (isGenericDescription(rawDescription) ? '' : rawDescription);
   const hasRealPageText = Boolean(textSnippet);
   const hasStructuredProfileData = Boolean(profileBio || profileStats || description);
   const accessNote =
