@@ -289,6 +289,38 @@ function isGenericDescription(description) {
   return GENERIC_DESCRIPTION_PATTERNS.some((pattern) => pattern.test(value));
 }
 
+function unwrapQuotedText(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  return text.replace(/^["“”'«]+/, '').replace(/["“”'»]+$/, '').trim();
+}
+
+function extractInstagramProfileBio(metaDescription) {
+  const text = String(metaDescription || '').trim();
+  if (!text) return '';
+
+  const patterns = [
+    /instagram:\s*["“]?([\s\S]+?)["”]?$/i,
+    /on instagram:\s*["“]?([\s\S]+?)["”]?$/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    const bio = unwrapQuotedText(match?.[1] || '');
+    if (bio) return trimTextBlock(bio, 600);
+  }
+
+  return '';
+}
+
+function extractInstagramProfileStats(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+
+  const match = text.match(/^(.*?)(?:\s+[–-]\s+|\s+-\s+)/);
+  return trimTextBlock(match?.[1] || '', 220);
+}
+
 function extractUrlHints(finalUrl, hostname) {
   const host = String(hostname || '').toLowerCase();
   const segments = parseUrlPathSegments(finalUrl);
@@ -412,7 +444,13 @@ function buildPreparedTextBlock(parsed) {
   if (parsed.title) {
     parts.push(`Название: ${parsed.title}`);
   }
-  if (parsed.description) {
+  if (parsed.profileBio) {
+    parts.push(`Описание профиля: ${parsed.profileBio}`);
+  }
+  if (parsed.profileStats) {
+    parts.push(`Показатели профиля: ${parsed.profileStats}`);
+  }
+  if (parsed.description && parsed.description !== parsed.profileBio) {
     parts.push(`Краткое описание: ${parsed.description}`);
   }
   if (Array.isArray(parsed.urlHints) && parsed.urlHints.length) {
@@ -475,6 +513,12 @@ async function parseResourceLink(rawUrl) {
   const { hints: urlHints, fallbackTitle } = extractUrlHints(finalUrl, hostname);
   const siteLabel = pickSiteLabel(hostname);
   const sourceKind = pickSourceKind(hostname);
+  const metaDescription = trimTextBlock(extractMetaContent(html, ['description']), 800);
+  const socialDescription = trimTextBlock(extractMetaContent(html, ['og:description', 'twitter:description']), 420);
+  const profileBio = hostname.includes('instagram.com') ? extractInstagramProfileBio(metaDescription) : '';
+  const profileStats = hostname.includes('instagram.com')
+    ? extractInstagramProfileStats(socialDescription || metaDescription)
+    : '';
 
   const rawTitle = trimTextBlock(
     extractMetaContent(html, ['og:title', 'twitter:title']) ||
@@ -483,13 +527,15 @@ async function parseResourceLink(rawUrl) {
     180,
   );
   const rawDescription = trimTextBlock(
-    extractMetaContent(html, ['og:description', 'twitter:description', 'description']) ||
+    (hostname.includes('instagram.com')
+      ? metaDescription || socialDescription
+      : socialDescription || metaDescription) ||
       pickJsonLdValue(jsonLdObjects, ['description']),
-    420,
+    800,
   );
   const textSnippet = trimTextBlock(extractVisibleText(html), 1_400);
   const title = isGenericTitle(rawTitle, siteLabel) ? trimTextBlock(fallbackTitle, 180) : rawTitle;
-  const description = isGenericDescription(rawDescription) ? '' : rawDescription;
+  const description = profileBio || (isGenericDescription(rawDescription) ? '' : rawDescription);
   const hasRealPageText = Boolean(textSnippet);
   const accessNote =
     !hasRealPageText && urlHints.length
@@ -501,6 +547,8 @@ async function parseResourceLink(rawUrl) {
     sourceKind,
     title,
     description,
+    profileBio,
+    profileStats,
     textSnippet,
     urlHints,
     accessNote,
