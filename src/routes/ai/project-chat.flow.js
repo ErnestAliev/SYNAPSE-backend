@@ -670,10 +670,25 @@ function createProjectChatFlow({ deps, helpers }) {
     };
   }
 
-  function joinNumberedList(values, fallbackText) {
+  function joinNarrativeList(values, fallbackText) {
     const items = normalizeStringList(values, { maxItems: 3, itemMaxLength: 260 });
     if (!items.length) return fallbackText;
-    return items.map((item, index) => `${index + 1}) ${item}`).join('\n');
+    if (items.length === 1) return `${items[0].replace(/[.;:!?]+$/g, '')}.`;
+    return `${items.map((item) => item.replace(/[.;:!?]+$/g, '')).join('; ')}.`;
+  }
+
+  function buildInsufficientDataStructuredAnswer(nextQuestion) {
+    return [
+      '1. Главный вывод.\nСейчас данных недостаточно, чтобы сформулировать надежный главный вывод без риска ошибки.',
+      '2. Что делать прямо сейчас.\nСоберите недостающие факты по текущей точке, целевой точке и реальным ограничениям перед выбором стратегии.',
+      '3. Что не делать сейчас.\nНе масштабируйте действия и не фиксируйте долгосрочные решения, пока ключевые гипотезы не подтверждены фактами.',
+      '4. Почему этого недостаточно для главной цели.\nБез подтвержденных фактов по узкому месту можно выбрать активность, которая создает видимость прогресса, но не двигает к цели.',
+      `5. Куда копать дальше / следующий вопрос.\n${
+        nextQuestion
+          ? `Уточняющий вопрос: ${nextQuestion}`
+          : 'Уточните: какой конкретный измеримый результат в ближайшие 2-4 недели будет считаться достижением главной цели?'
+      }`,
+    ].join('\n\n');
   }
 
   // Returns true when final_answer looks like a JSON field dump rather than human text:
@@ -701,7 +716,8 @@ function createProjectChatFlow({ deps, helpers }) {
     // The LLM is instructed to write 5 paragraphs with paragraph markers but without
     // nested sub-lists or field label leaks. If those conditions hold, the LLM text is
     // used directly — it integrates fast_levers and excluded_paths as flowing sentences.
-    if (rawFinalAnswer && !detectsFinalAnswerIssues(rawFinalAnswer)) {
+    const rawFinalAnswerStructured = countMeaningfulParagraphs(rawFinalAnswer) >= 5;
+    if (rawFinalAnswer && rawFinalAnswerStructured && !detectsFinalAnswerIssues(rawFinalAnswer)) {
       return nextQuestion
         ? rawFinalAnswer.trimEnd() + '\n\n' + `Следующий вопрос: ${nextQuestion}`
         : rawFinalAnswer;
@@ -709,19 +725,16 @@ function createProjectChatFlow({ deps, helpers }) {
 
     const hasCoreTriplet = Boolean(coreConclusion || whyNotEnough || nextGrowthContour);
     if (!hasCoreTriplet) {
-      if (rawFinalAnswer && rawFinalAnswer !== '{}' && rawFinalAnswer !== '[]') {
-        return rawFinalAnswer;
-      }
-      return 'Не удалось получить содержательный ответ от LLM (structured payload пустой). Повторите запрос.';
+      return buildInsufficientDataStructuredAnswer(nextQuestion);
     }
 
     // Fallback: assemble structured answer from reasoning_state fields.
     // Used when final_answer is absent or failed the issues check.
-    const doNow = joinNumberedList(
+    const doNow = joinNarrativeList(
       state.fast_levers,
       'Критические быстрые действия не выделены; нужно уточнить контекст исполнения.',
     );
-    const dontDo = joinNumberedList(
+    const dontDo = joinNarrativeList(
       state.excluded_paths,
       'Неподходящие шаги не выделены; высок риск распыления ресурсов.',
     );
