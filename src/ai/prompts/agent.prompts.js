@@ -1067,6 +1067,36 @@ function createAgentPrompts(deps) {
     return 'undirected';
   }
 
+  function resolveEdgeDirectionForLlm(edge, from, to) {
+    const normalizedFrom = toTrimmedString(from, 120);
+    const normalizedTo = toTrimmedString(to, 120);
+
+    if (edge.arrowLeft && !edge.arrowRight) {
+      return {
+        relationMode: 'directed',
+        direction: 'target_to_source',
+        directedFrom: normalizedTo,
+        directedTo: normalizedFrom,
+      };
+    }
+
+    if (!edge.arrowLeft && edge.arrowRight) {
+      return {
+        relationMode: 'directed',
+        direction: 'source_to_target',
+        directedFrom: normalizedFrom,
+        directedTo: normalizedTo,
+      };
+    }
+
+    return {
+      relationMode: 'equivalent',
+      direction: edge.arrowLeft && edge.arrowRight ? 'bidirectional' : 'equivalent',
+      directedFrom: '',
+      directedTo: '',
+    };
+  }
+
   function normalizeAgentHistoryForLlm(history) {
     const source = Array.isArray(history) ? history : [];
     const normalized = source
@@ -1297,6 +1327,7 @@ function createAgentPrompts(deps) {
         to,
         type: resolveEdgeTypeForLlm(edge),
         label: toTrimmedString(edge.label, 120),
+        ...resolveEdgeDirectionForLlm(edge, from, to),
       };
       const dedupKey = `${relation.from}|${relation.to}|${relation.type}|${relation.label}`;
       if (llmEdgeDedup.has(dedupKey)) {

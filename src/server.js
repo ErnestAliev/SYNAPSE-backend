@@ -1555,6 +1555,33 @@ function summarizeEntityForAgent(entity) {
 }
 
 function buildProjectConnections(canvasData, entitiesById) {
+  function resolveConnectionDirection(edge, from, to) {
+    if (edge.arrowLeft && !edge.arrowRight) {
+      return {
+        relationMode: 'directed',
+        direction: 'target_to_source',
+        directedFrom: to,
+        directedTo: from,
+      };
+    }
+
+    if (!edge.arrowLeft && edge.arrowRight) {
+      return {
+        relationMode: 'directed',
+        direction: 'source_to_target',
+        directedFrom: from,
+        directedTo: to,
+      };
+    }
+
+    return {
+      relationMode: 'equivalent',
+      direction: edge.arrowLeft && edge.arrowRight ? 'bidirectional' : 'equivalent',
+      directedFrom: '',
+      directedTo: '',
+    };
+  }
+
   const nodeEntityByNodeId = new Map();
   for (const node of canvasData.nodes) {
     if (!node.id || !node.entityId) continue;
@@ -1573,14 +1600,18 @@ function buildProjectConnections(canvasData, entitiesById) {
       if (!sourceEntityId || !targetEntityId) return null;
       if (!entityNameById.has(sourceEntityId) || !entityNameById.has(targetEntityId)) return null;
 
+      const from = entityNameById.get(sourceEntityId) || sourceEntityId;
+      const to = entityNameById.get(targetEntityId) || targetEntityId;
+
       return compactObject({
-        from: entityNameById.get(sourceEntityId) || sourceEntityId,
-        to: entityNameById.get(targetEntityId) || targetEntityId,
+        from,
+        to,
         label: toTrimmedString(edge.label, 80),
         color: toTrimmedString(edge.color, 32),
+        ...resolveConnectionDirection(edge, from, to),
         arrows: {
-          left: Boolean(edge.arrowLeft),
-          right: Boolean(edge.arrowRight),
+          source: Boolean(edge.arrowLeft),
+          target: Boolean(edge.arrowRight),
         },
       });
     })

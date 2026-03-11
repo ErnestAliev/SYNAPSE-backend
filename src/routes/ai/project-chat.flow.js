@@ -556,10 +556,14 @@ function createProjectChatFlow({ deps, helpers }) {
       .map((edge) => {
         const row = toProfile(edge);
         return {
-          source: toTrimmedString(row.source, 120),
-          target: toTrimmedString(row.target, 120),
+          source: toTrimmedString(row.source || row.from, 120),
+          target: toTrimmedString(row.target || row.to, 120),
           type: toTrimmedString(row.type, 64),
           label: toTrimmedString(row.label, 160),
+          relationMode: toTrimmedString(row.relationMode, 32),
+          direction: toTrimmedString(row.direction, 64),
+          directedFrom: toTrimmedString(row.directedFrom, 120),
+          directedTo: toTrimmedString(row.directedTo, 120),
         };
       });
     const compactHistory = (Array.isArray(payloadContext.history) ? payloadContext.history : [])
