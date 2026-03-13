@@ -1619,20 +1619,28 @@ function buildProjectConnections(canvasData, entitiesById) {
     nodeEntityByNodeId.set(node.id, node.entityId);
   }
 
-  const entityNameById = new Map();
+  const anchorNameById = new Map();
   for (const entity of entitiesById) {
-    entityNameById.set(String(entity._id), toTrimmedString(entity.name, 120) || '(без названия)');
+    anchorNameById.set(String(entity._id), toTrimmedString(entity.name, 120) || '(без названия)');
+  }
+
+  for (const node of canvasData.nodes) {
+    const entityId = nodeEntityByNodeId.get(node.id);
+    const name = entityId ? anchorNameById.get(entityId) : '';
+    if (!name) continue;
+    anchorNameById.set(node.id, name);
+  }
+
+  for (const group of Array.isArray(canvasData.groups) ? canvasData.groups : []) {
+    if (!group?.id) continue;
+    anchorNameById.set(group.id, toTrimmedString(group.name, 120) || 'Группа');
   }
 
   return canvasData.edges
     .map((edge) => {
-      const sourceEntityId = nodeEntityByNodeId.get(edge.source);
-      const targetEntityId = nodeEntityByNodeId.get(edge.target);
-      if (!sourceEntityId || !targetEntityId) return null;
-      if (!entityNameById.has(sourceEntityId) || !entityNameById.has(targetEntityId)) return null;
-
-      const from = entityNameById.get(sourceEntityId) || sourceEntityId;
-      const to = entityNameById.get(targetEntityId) || targetEntityId;
+      const from = anchorNameById.get(edge.source);
+      const to = anchorNameById.get(edge.target);
+      if (!from || !to) return null;
 
       return compactObject({
         from,
