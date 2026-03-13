@@ -1737,7 +1737,7 @@ async function resolveAgentScopeContext(ownerId, rawScope) {
       owner_id: ownerId,
       type: 'project',
     })
-      .select({ _id: 1, name: 1, canvas_data: 1 })
+      .select({ _id: 1, name: 1, canvas_data: 1, ai_metadata: 1 })
       .lean();
 
     if (!project) {
@@ -1815,6 +1815,7 @@ async function resolveAgentScopeContext(ownerId, rawScope) {
       projectId: String(project._id),
       projectName: toTrimmedString(project.name, 140) || 'Без названия',
       totalEntities: sourceEntities.length,
+      projectMetadata: toProfile(project.ai_metadata),
       entities: orderedEntities,
       sourceEntities,
       sourceNodes: canvasData.nodes,

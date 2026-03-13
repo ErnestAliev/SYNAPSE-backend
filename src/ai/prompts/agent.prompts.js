@@ -998,6 +998,26 @@ function createAgentPrompts(deps) {
 
   function buildAgentContextData({ scopeContext, history, attachments }) {
     const cleanedEntities = cleanContextData(scopeContext.entities);
+    const projectMetadata = toProfile(scopeContext.projectMetadata);
+    const projectFieldValues = {};
+    for (const [key, rawValue] of Object.entries(projectMetadata)) {
+      if (!Array.isArray(rawValue)) continue;
+      const values = rawValue
+        .map((item) => toTrimmedString(item, 120))
+        .filter(Boolean)
+        .slice(0, 24);
+      if (!values.length) continue;
+      projectFieldValues[key] = values;
+    }
+    const projectContext =
+      scopeContext.scopeType === 'project'
+        ? {
+            description: toTrimmedString(projectMetadata.description, 3000),
+            contextStatus: toTrimmedString(projectMetadata.project_context_status, 32),
+            builtAt: toTrimmedString(projectMetadata.project_context_built_at, 80),
+            fields: projectFieldValues,
+          }
+        : null;
 
     return {
       scope: {
@@ -1009,6 +1029,7 @@ function createAgentPrompts(deps) {
         totalEntities: scopeContext.totalEntities,
         contextLimit: AI_CONTEXT_ENTITY_LIMIT,
       },
+      ...(projectContext ? { projectContext } : {}),
       entities: cleanedEntities,
       connections: scopeContext.connections,
       attachments,
@@ -1465,6 +1486,7 @@ function createAgentPrompts(deps) {
     const stateSnapshot = toProfile(payloadContext?.stateSnapshot);
     const graphContext = {
       scope: toProfile(payloadContext?.scope),
+      projectContext: toProfile(payloadContext?.projectContext),
       entities: Array.isArray(payloadContext?.entities) ? payloadContext.entities : [],
       connections: Array.isArray(payloadContext?.connections) ? payloadContext.connections : [],
       attachments: Array.isArray(payloadContext?.attachments) ? payloadContext.attachments : [],

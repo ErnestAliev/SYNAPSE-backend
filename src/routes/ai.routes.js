@@ -194,6 +194,31 @@ function createAiRouter(deps) {
       },
     },
   });
+  const PROJECT_CONTEXT_BUILD_OUTPUT_SCHEMA = Object.freeze({
+    type: 'json_schema',
+    name: 'ProjectContextBuild',
+    strict: true,
+    schema: {
+      type: 'object',
+      required: ['status', 'description', 'summary', 'changeReason', 'missing', 'fields'],
+      additionalProperties: false,
+      properties: {
+        status: { type: 'string', enum: ['ready', 'need_clarification'] },
+        description: { type: 'string' },
+        summary: { type: 'string' },
+        changeReason: { type: 'string' },
+        missing: { type: 'array', items: { type: 'string' } },
+        fields: {
+          type: 'object',
+          required: PROJECT_CHAT_FIELD_KEYS,
+          additionalProperties: false,
+          properties: Object.fromEntries(
+            PROJECT_CHAT_FIELD_KEYS.map((fieldKey) => [fieldKey, { type: 'array', items: { type: 'string' } }]),
+          ),
+        },
+      },
+    },
+  });
 
   const IMPORTANCE_VALUE_MAP = Object.freeze({
     низкая: 'Низкая',
@@ -418,6 +443,153 @@ function createAiRouter(deps) {
     return str.slice(0, itemMaxLength);
   }
 
+  function normalizeProjectContextDescription(rawValue, fallbackValue = '') {
+    const primary = toTrimmedString(rawValue, 3000);
+    if (primary) return primary;
+    return toTrimmedString(fallbackValue, 3000);
+  }
+
+  function collectProjectAggregatedEntityFields(sourceEntities) {
+    const aggregatedEntityFields = {};
+    const scopeEntities = Array.isArray(sourceEntities) ? sourceEntities : [];
+
+    for (const fieldKey of PROJECT_CHAT_FIELD_KEYS) {
+      const config = PROJECT_CHAT_FIELD_CONFIGS[fieldKey];
+      const dedup = new Set();
+      const values = [];
+      for (const entity of scopeEntities) {
+        const meta = toProfile(entity.ai_metadata);
+        const fieldValues = Array.isArray(meta[fieldKey]) ? meta[fieldKey] : [];
+        for (const val of fieldValues) {
+          const normalized = normalizeProjectEnrichmentFieldValue(fieldKey, val, config.itemMaxLength);
+          if (!normalized) continue;
+          const key = normalized.toLowerCase();
+          if (dedup.has(key)) continue;
+          dedup.add(key);
+          values.push(normalized);
+          if (values.length >= config.maxItems) break;
+        }
+        if (values.length >= config.maxItems) break;
+      }
+      aggregatedEntityFields[fieldKey] = values;
+    }
+
+    return aggregatedEntityFields;
+  }
+
+  function normalizeProjectContextFields(rawFields) {
+    const fields = toProfile(rawFields);
+    const normalized = {};
+    for (const fieldKey of PROJECT_CHAT_FIELD_KEYS) {
+      const config = PROJECT_CHAT_FIELD_CONFIGS[fieldKey];
+      const source = Array.isArray(fields[fieldKey]) ? fields[fieldKey] : [];
+      const dedup = new Set();
+      const values = [];
+      for (const rawValue of source) {
+        const value = normalizeProjectEnrichmentFieldValue(fieldKey, rawValue, config.itemMaxLength);
+        if (!value) continue;
+        const key = value.toLowerCase();
+        if (dedup.has(key)) continue;
+        dedup.add(key);
+        values.push(value);
+        if (values.length >= config.maxItems) break;
+      }
+      normalized[fieldKey] = values;
+    }
+    return normalized;
+  }
+
+  function normalizeProjectContextMissing(rawValues) {
+    const source = Array.isArray(rawValues) ? rawValues : [];
+    const dedup = new Set();
+    const values = [];
+    for (const item of source) {
+      const value = toTrimmedString(item, 180);
+      if (!value) continue;
+      const key = value.toLowerCase();
+      if (dedup.has(key)) continue;
+      dedup.add(key);
+      values.push(value);
+      if (values.length >= 8) break;
+    }
+    return values;
+  }
+
+  function buildProjectContextCanvasSignature(canvasData) {
+    const canvas = toProfile(canvasData);
+    const nodes = (Array.isArray(canvas.nodes) ? canvas.nodes : [])
+      .map((node) => {
+        const row = toProfile(node);
+        const id = toTrimmedString(row.id, 120);
+        const entityId = toTrimmedString(row.entityId, 120);
+        if (!id || !entityId) return null;
+        return {
+          id,
+          entityId,
+          x: Number.isFinite(Number(row.x)) ? Number(row.x) : 0,
+          y: Number.isFinite(Number(row.y)) ? Number(row.y) : 0,
+          scale: Number.isFinite(Number(row.scale)) ? Number(row.scale) : 1,
+        };
+      })
+      .filter(Boolean)
+      .sort((left, right) => String(left.id).localeCompare(String(right.id)));
+    const edges = (Array.isArray(canvas.edges) ? canvas.edges : [])
+      .map((edge) => {
+        const row = toProfile(edge);
+        const source = toTrimmedString(row.source, 120);
+        const target = toTrimmedString(row.target, 120);
+        if (!source || !target) return null;
+        return {
+          id: toTrimmedString(row.id, 120),
+          source,
+          target,
+          label: toTrimmedString(row.label, 120),
+          color: toTrimmedString(row.color, 32),
+          arrowLeft: row.arrowLeft === true,
+          arrowRight: row.arrowRight === true,
+        };
+      })
+      .filter(Boolean)
+      .sort((left, right) => {
+        const leftKey = `${left.id}|${left.source}|${left.target}|${left.label}`;
+        const rightKey = `${right.id}|${right.source}|${right.target}|${right.label}`;
+        return leftKey.localeCompare(rightKey);
+      });
+    const groups = (Array.isArray(canvas.groups) ? canvas.groups : [])
+      .map((group) => {
+        const row = toProfile(group);
+        const id = toTrimmedString(row.id, 120);
+        if (!id) return null;
+        const nodeIds = (Array.isArray(row.nodeIds) ? row.nodeIds : [])
+          .map((nodeId) => toTrimmedString(nodeId, 120))
+          .filter(Boolean)
+          .sort((left, right) => left.localeCompare(right));
+        if (nodeIds.length < 2) return null;
+        return {
+          id,
+          nodeIds,
+        };
+      })
+      .filter(Boolean)
+      .sort((left, right) => String(left.id).localeCompare(String(right.id)));
+
+    return { nodes, edges, groups };
+  }
+
+  function hashProjectContextCanvasSignature(signature) {
+    const text = JSON.stringify(signature);
+    let hash = 2166136261;
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return `ctx-${(hash >>> 0).toString(16).padStart(8, '0')}`;
+  }
+
+  function buildProjectContextSourceHash(canvasData) {
+    return hashProjectContextCanvasSignature(buildProjectContextCanvasSignature(canvasData));
+  }
+
   async function runProjectChatAutoEnrichment({
     ownerId,
     scopeContext,
@@ -539,6 +711,156 @@ function createAiRouter(deps) {
       entity: freshProject.toObject(),
     });
   }
+
+  router.post('/project-context/build', requireAuth, async (req, res, next) => {
+    try {
+      const ownerId = requireOwnerId(req);
+      const projectId = toTrimmedString(req.body?.projectId, 80);
+      if (!projectId) {
+        return res.status(400).json({ message: 'projectId is required' });
+      }
+
+      const project = await Entity.findOne({ _id: projectId, owner_id: ownerId });
+      if (!project || project.type !== 'project') {
+        return res.status(404).json({ message: 'Project not found' });
+      }
+
+      const initialMeta = toProfile(project.ai_metadata);
+      const sourceHash = buildProjectContextSourceHash(project.canvas_data);
+      const buildingMeta = {
+        ...initialMeta,
+        project_context_status: 'building',
+        project_context_error: '',
+      };
+      project.ai_metadata = buildingMeta;
+      await project.save();
+      broadcastEntityEvent(ownerId, 'entity.updated', {
+        entity: project.toObject(),
+      });
+
+      const scopeContext = await resolveAgentScopeContext(ownerId, {
+        type: 'project',
+        projectId,
+      });
+      const llmContextResult = llmContextTools.buildAgentLlmContext({
+        scopeContext,
+        history: [],
+        attachments: [],
+        message: 'Собери контекст проекта по текущему dashboard snapshot.',
+      });
+      const contextData = llmContextResult.contextData;
+      const sourceEntities = Array.isArray(scopeContext.sourceEntities) ? scopeContext.sourceEntities : scopeContext.entities;
+      const currentProjectFields = {};
+      for (const fieldKey of PROJECT_CHAT_FIELD_KEYS) {
+        currentProjectFields[fieldKey] = Array.isArray(initialMeta[fieldKey]) ? initialMeta[fieldKey] : [];
+      }
+      const aggregatedEntityFields = collectProjectAggregatedEntityFields(sourceEntities);
+
+      const systemPrompt = aiPrompts.buildProjectContextBuildSystemPrompt();
+      const userPrompt = aiPrompts.buildProjectContextBuildUserPrompt({
+        contextData,
+        currentProjectDescription: initialMeta.description,
+        currentProjectFields,
+        aggregatedEntityFields,
+        sourceHash,
+      });
+
+      const buildModel = toTrimmedString(OPENAI_PROJECT_MODEL, 120) || 'gpt-5';
+      const aiResponse = await withAiTrace({
+        label: 'project-context.build',
+        ownerId,
+        model: buildModel,
+        projectId,
+        promptLengths: { system: systemPrompt.length, user: userPrompt.length },
+        includeDebug: false,
+      }, () => aiProvider.requestOpenAiAgentReply({
+        systemPrompt,
+        userPrompt,
+        model: buildModel,
+        temperature: 0.1,
+        maxOutputTokens: 2600,
+        allowEmptyResponse: false,
+        timeoutMs: 90_000,
+        reasoningEffort: 'medium',
+        verbosity: 'low',
+        jsonSchema: PROJECT_CONTEXT_BUILD_OUTPUT_SCHEMA,
+      }));
+
+      const parsed = extractJsonObjectFromText(aiResponse.reply);
+      if (!parsed || parsed.status !== 'ready') {
+        throw Object.assign(new Error('Failed to parse project context build result'), { status: 502 });
+      }
+
+      const payload = toProfile(parsed);
+      const normalizedFields = normalizeProjectContextFields(payload.fields);
+      const nextDescription = normalizeProjectContextDescription(payload.description, payload.summary);
+      const missing = normalizeProjectContextMissing(payload.missing);
+
+      const freshProject = await Entity.findOne({ _id: projectId, owner_id: ownerId });
+      if (!freshProject || freshProject.type !== 'project') {
+        return res.status(404).json({ message: 'Project not found' });
+      }
+
+      const freshMeta = toProfile(freshProject.ai_metadata);
+      const nextVersion = Math.max(0, Number(freshMeta.project_context_version) || 0) + 1;
+      freshProject.ai_metadata = {
+        ...freshMeta,
+        ...normalizedFields,
+        description: nextDescription,
+        project_context_status: 'fresh',
+        project_context_source_hash: sourceHash,
+        project_context_built_at: new Date().toISOString(),
+        project_context_version: nextVersion,
+        project_context_error: '',
+        project_context_summary: toTrimmedString(payload.summary, 600),
+        project_context_change_reason: toTrimmedString(payload.changeReason, 400),
+        project_context_missing: missing,
+        project_context_entity_count: Array.isArray(contextData?.entities) ? contextData.entities.length : 0,
+        project_context_connection_count: Array.isArray(contextData?.connections) ? contextData.connections.length : 0,
+        project_context_group_count: Array.isArray(contextData?.groups) ? contextData.groups.length : 0,
+      };
+      await freshProject.save();
+      broadcastEntityEvent(ownerId, 'entity.updated', {
+        entity: freshProject.toObject(),
+      });
+
+      return res.status(200).json({
+        status: 'ready',
+        sourceHash,
+        entity: freshProject.toObject(),
+      });
+    } catch (error) {
+      const ownerId = (() => {
+        try {
+          return requireOwnerId(req);
+        } catch {
+          return '';
+        }
+      })();
+      const projectId = toTrimmedString(req.body?.projectId, 80);
+      if (ownerId && projectId) {
+        try {
+          const failedProject = await Entity.findOne({ _id: projectId, owner_id: ownerId });
+          if (failedProject && failedProject.type === 'project') {
+            const failedMeta = toProfile(failedProject.ai_metadata);
+            failedProject.ai_metadata = {
+              ...failedMeta,
+              project_context_status: 'failed',
+              project_context_error: toTrimmedString(error?.message, 240) || 'build_failed',
+            };
+            await failedProject.save();
+            broadcastEntityEvent(ownerId, 'entity.updated', {
+              entity: failedProject.toObject(),
+            });
+          }
+        } catch {
+          // Ignore failure-status persistence errors.
+        }
+      }
+
+      return next(error);
+    }
+  });
 
   const scopeContextService = createScopeContextService({
     toTrimmedString,

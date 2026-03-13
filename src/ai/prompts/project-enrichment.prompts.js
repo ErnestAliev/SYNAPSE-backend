@@ -112,9 +112,99 @@ function createProjectEnrichmentPrompts(deps) {
     return ['Контекст обогащения проекта (JSON):', JSON.stringify(payload, null, 2)].join('\n');
   }
 
+  function buildProjectContextBuildSystemPrompt() {
+    return [
+      'Ты Synapse12 Project Context Builder.',
+      'Работай только по входному JSON-контексту без внешних фактов и догадок.',
+      'Задача: собрать краткий рабочий контекст проекта по dashboard snapshot.',
+      'Нужно вернуть короткое описание проекта и заполнить структурированные поля проекта.',
+      'Если данных по полю нет, верни пустой массив.',
+      'Не выдумывай факты, роли, метрики и ссылки.',
+      'Учитывай группы как агрегированные узлы, если они есть во входных данных.',
+      'Описание должно быть кратким, плотным по смыслу, без воды, до 900 символов.',
+      `Разрешенные keys в fields: ${PROJECT_CHAT_ENRICHMENT_FIELDS.join(', ')}.`,
+      'links: только валидные URL.',
+      'importance: только [Низкая, Средняя, Высокая], массив из 0..1 элементов.',
+      'tasks: только конкретные действия/обязательства, если они явно следуют из контекста.',
+      'ignoredNoise: только то, что точно не относится к проекту.',
+      'Верни СТРОГО JSON без markdown.',
+      'Формат:',
+      '{',
+      '  "status": "ready | need_clarification",',
+      '  "description": "string",',
+      '  "summary": "string",',
+      '  "changeReason": "string",',
+      '  "missing": [],',
+      '  "fields": {',
+      '    "tags": [],',
+      '    "markers": [],',
+      '    "roles": [],',
+      '    "skills": [],',
+      '    "risks": [],',
+      '    "priority": [],',
+      '    "status": [],',
+      '    "tasks": [],',
+      '    "metrics": [],',
+      '    "owners": [],',
+      '    "participants": [],',
+      '    "resources": [],',
+      '    "outcomes": [],',
+      '    "industry": [],',
+      '    "departments": [],',
+      '    "stage": [],',
+      '    "date": [],',
+      '    "location": [],',
+      '    "phones": [],',
+      '    "links": [],',
+      '    "importance": [],',
+      '    "ignoredNoise": []',
+      '  }',
+      '}',
+    ].join('\n');
+  }
+
+  function buildProjectContextBuildUserPrompt({
+    contextData,
+    currentProjectDescription,
+    currentProjectFields,
+    aggregatedEntityFields,
+    sourceHash,
+  }) {
+    const compactEntities = (Array.isArray(contextData?.entities) ? contextData.entities : [])
+      .slice(0, 180)
+      .map((entity) => {
+        const row = toProfile(entity);
+        return {
+          id: toTrimmedString(row.id || row._id, 80),
+          type: toTrimmedString(row.type, 24),
+          name: toTrimmedString(row.name, 120),
+          description: toTrimmedString(row.description || toProfile(row.ai_metadata).description, 2400),
+        };
+      });
+
+    const payload = {
+      scope: toProfile(contextData?.scope),
+      project: {
+        currentDescription: toTrimmedString(currentProjectDescription, 3000),
+        currentFields: toProfile(currentProjectFields),
+        sourceHash: toTrimmedString(sourceHash, 120),
+      },
+      graph: {
+        entities: compactEntities,
+        connections: Array.isArray(contextData?.connections) ? contextData.connections : [],
+        groups: Array.isArray(contextData?.groups) ? contextData.groups : [],
+      },
+      aggregatedEntityFields: toProfile(aggregatedEntityFields),
+    };
+
+    return ['Контекст сборки проекта (JSON):', JSON.stringify(payload, null, 2)].join('\n');
+  }
+
   return {
     buildProjectEnrichmentSystemPrompt,
     buildProjectEnrichmentUserPrompt,
+    buildProjectContextBuildSystemPrompt,
+    buildProjectContextBuildUserPrompt,
   };
 }
 

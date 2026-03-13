@@ -22,6 +22,8 @@ function createAiPrompts(deps) {
     buildAgentUserPrompt: agentPrompts.buildAgentUserPrompt,
     buildProjectEnrichmentSystemPrompt: projectEnrichmentPrompts.buildProjectEnrichmentSystemPrompt,
     buildProjectEnrichmentUserPrompt: projectEnrichmentPrompts.buildProjectEnrichmentUserPrompt,
+    buildProjectContextBuildSystemPrompt: projectEnrichmentPrompts.buildProjectContextBuildSystemPrompt,
+    buildProjectContextBuildUserPrompt: projectEnrichmentPrompts.buildProjectContextBuildUserPrompt,
     buildEntityAnalyzerSystemPrompt: entityProtectedPrompts.buildEntityAnalyzerSystemPrompt,
     buildEntityAnalyzerUserPrompt: entityProtectedPrompts.buildEntityAnalyzerUserPrompt,
     buildEntityAnalysisReplyText: entityProtectedPrompts.buildEntityAnalysisReplyText,
