@@ -515,6 +515,84 @@ function createAiRouter(deps) {
     return values;
   }
 
+  function mergeProjectContextFieldLists(fieldKey, ...lists) {
+    const config = PROJECT_CHAT_FIELD_CONFIGS[fieldKey];
+    const dedup = new Set();
+    const values = [];
+    for (const list of lists) {
+      const source = Array.isArray(list) ? list : [];
+      for (const item of source) {
+        const value = normalizeProjectEnrichmentFieldValue(fieldKey, item, config.itemMaxLength);
+        if (!value) continue;
+        const key = value.toLowerCase();
+        if (dedup.has(key)) continue;
+        dedup.add(key);
+        values.push(value);
+        if (values.length >= config.maxItems) {
+          return values;
+        }
+      }
+    }
+    return values;
+  }
+
+  function buildProjectContextFallbackDescription({
+    scopeContext,
+    aggregatedEntityFields,
+    currentDescription,
+  }) {
+    const existingDescription = normalizeProjectContextDescription(currentDescription);
+    if (existingDescription) return existingDescription;
+
+    const projectName = toTrimmedString(scopeContext?.projectName, 160) || 'Проект';
+    const groups = Array.isArray(scopeContext?.groups) ? scopeContext.groups : [];
+    const entities = Array.isArray(scopeContext?.entities) ? scopeContext.entities : [];
+    const locations = Array.isArray(aggregatedEntityFields?.location) ? aggregatedEntityFields.location.slice(0, 3) : [];
+    const owners = Array.isArray(aggregatedEntityFields?.owners) ? aggregatedEntityFields.owners.slice(0, 3) : [];
+    const members = entities
+      .slice(0, 4)
+      .map((entity) => toTrimmedString(entity?.name, 80))
+      .filter(Boolean);
+
+    const parts = [
+      `${projectName} включает ${entities.length} сущн.`,
+      groups.length ? `Групп: ${groups.length}.` : '',
+      members.length ? `Ключевые объекты: ${members.join(', ')}.` : '',
+      owners.length ? `Ответственные: ${owners.join(', ')}.` : '',
+      locations.length ? `Локации: ${locations.join(', ')}.` : '',
+    ].filter(Boolean);
+
+    return toTrimmedString(parts.join(' '), 900);
+  }
+
+  function buildProjectContextFallbackResult({
+    scopeContext,
+    currentProjectFields,
+    aggregatedEntityFields,
+    currentDescription,
+  }) {
+    const fields = {};
+    for (const fieldKey of PROJECT_CHAT_FIELD_KEYS) {
+      fields[fieldKey] = mergeProjectContextFieldLists(
+        fieldKey,
+        currentProjectFields[fieldKey],
+        aggregatedEntityFields[fieldKey],
+      );
+    }
+
+    return {
+      description: buildProjectContextFallbackDescription({
+        scopeContext,
+        aggregatedEntityFields,
+        currentDescription,
+      }),
+      summary: 'Контекст собран в упрощенном режиме без полного LLM-анализа.',
+      changeReason: 'fallback_after_timeout',
+      missing: [],
+      fields,
+    };
+  }
+
   function buildProjectContextCanvasSignature(canvasData) {
     const canvas = toProfile(canvasData);
     const nodes = (Array.isArray(canvas.nodes) ? canvas.nodes : [])
@@ -749,6 +827,12 @@ function createAiRouter(deps) {
         message: 'Собери контекст проекта по текущему dashboard snapshot.',
       });
       const contextData = llmContextResult.contextData;
+      const reducedContextData = {
+        ...toProfile(contextData),
+        entities: (Array.isArray(contextData?.entities) ? contextData.entities : []).slice(0, 80),
+        connections: (Array.isArray(contextData?.connections) ? contextData.connections : []).slice(0, 120),
+        groups: (Array.isArray(contextData?.groups) ? contextData.groups : []).slice(0, 40),
+      };
       const sourceEntities = Array.isArray(scopeContext.sourceEntities) ? scopeContext.sourceEntities : scopeContext.entities;
       const currentProjectFields = {};
       for (const fieldKey of PROJECT_CHAT_FIELD_KEYS) {
@@ -758,40 +842,52 @@ function createAiRouter(deps) {
 
       const systemPrompt = aiPrompts.buildProjectContextBuildSystemPrompt();
       const userPrompt = aiPrompts.buildProjectContextBuildUserPrompt({
-        contextData,
+        contextData: reducedContextData,
         currentProjectDescription: initialMeta.description,
         currentProjectFields,
         aggregatedEntityFields,
         sourceHash,
       });
 
-      const buildModel = toTrimmedString(OPENAI_PROJECT_MODEL, 120) || 'gpt-5';
-      const aiResponse = await withAiTrace({
-        label: 'project-context.build',
-        ownerId,
-        model: buildModel,
-        projectId,
-        promptLengths: { system: systemPrompt.length, user: userPrompt.length },
-        includeDebug: false,
-      }, () => aiProvider.requestOpenAiAgentReply({
-        systemPrompt,
-        userPrompt,
-        model: buildModel,
-        temperature: 0.1,
-        maxOutputTokens: 2600,
-        allowEmptyResponse: false,
-        timeoutMs: 90_000,
-        reasoningEffort: 'medium',
-        verbosity: 'low',
-        jsonSchema: PROJECT_CONTEXT_BUILD_OUTPUT_SCHEMA,
-      }));
+      const buildModel = toTrimmedString(OPENAI_MODEL, 120) || toTrimmedString(OPENAI_PROJECT_MODEL, 120) || 'gpt-5';
+      let payload = null;
+      try {
+        const aiResponse = await withAiTrace({
+          label: 'project-context.build',
+          ownerId,
+          model: buildModel,
+          projectId,
+          promptLengths: { system: systemPrompt.length, user: userPrompt.length },
+          includeDebug: false,
+        }, () => aiProvider.requestOpenAiAgentReply({
+          systemPrompt,
+          userPrompt,
+          model: buildModel,
+          temperature: 0.1,
+          maxOutputTokens: 1400,
+          allowEmptyResponse: false,
+          timeoutMs: 65_000,
+          reasoningEffort: 'low',
+          verbosity: 'low',
+          jsonSchema: PROJECT_CONTEXT_BUILD_OUTPUT_SCHEMA,
+          singleRequest: true,
+        }));
 
-      const parsed = extractJsonObjectFromText(aiResponse.reply);
-      if (!parsed || parsed.status !== 'ready') {
-        throw Object.assign(new Error('Failed to parse project context build result'), { status: 502 });
+        const parsed = extractJsonObjectFromText(aiResponse.reply);
+        if (!parsed || parsed.status !== 'ready') {
+          throw Object.assign(new Error('Failed to parse project context build result'), { status: 502 });
+        }
+        payload = toProfile(parsed);
+      } catch (error) {
+        payload = buildProjectContextFallbackResult({
+          scopeContext,
+          currentProjectFields,
+          aggregatedEntityFields,
+          currentDescription: initialMeta.description,
+        });
+        payload._fallbackError = toTrimmedString(error?.message, 240);
       }
 
-      const payload = toProfile(parsed);
       const normalizedFields = normalizeProjectContextFields(payload.fields);
       const nextDescription = normalizeProjectContextDescription(payload.description, payload.summary);
       const missing = normalizeProjectContextMissing(payload.missing);
@@ -815,6 +911,8 @@ function createAiRouter(deps) {
         project_context_summary: toTrimmedString(payload.summary, 600),
         project_context_change_reason: toTrimmedString(payload.changeReason, 400),
         project_context_missing: missing,
+        project_context_build_mode: payload._fallbackError ? 'fallback' : 'llm',
+        project_context_last_llm_error: toTrimmedString(payload._fallbackError, 240),
         project_context_entity_count: Array.isArray(contextData?.entities) ? contextData.entities.length : 0,
         project_context_connection_count: Array.isArray(contextData?.connections) ? contextData.connections.length : 0,
         project_context_group_count: Array.isArray(contextData?.groups) ? contextData.groups.length : 0,
