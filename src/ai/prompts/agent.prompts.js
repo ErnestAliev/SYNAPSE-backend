@@ -1365,6 +1365,7 @@ function createAgentPrompts(deps) {
       },
       entities: llmNodes,
       connections: llmEdges,
+      groups: Array.isArray(scope.groups) ? scope.groups : [],
       attachments: attachmentContext.llmAttachments,
       history: historyContext.llmHistory,
       stateSnapshot,
@@ -1391,6 +1392,7 @@ function createAgentPrompts(deps) {
       preview: {
         entities: llmNodes.slice(0, 8),
         relations: llmEdges.slice(0, 12),
+        groups: (Array.isArray(scope.groups) ? scope.groups : []).slice(0, 8),
         history: historyContext.llmHistory.slice(-3),
         stateSnapshot,
       },

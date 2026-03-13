@@ -566,6 +566,20 @@ function createProjectChatFlow({ deps, helpers }) {
           directedTo: toTrimmedString(row.directedTo, 120),
         };
       });
+    const compactGroups = (Array.isArray(payloadContext.groups) ? payloadContext.groups : [])
+      .slice(0, 80)
+      .map((group) => {
+        const row = toProfile(group);
+        return {
+          id: toTrimmedString(row.id, 120),
+          name: toTrimmedString(row.name, 160),
+          color: toTrimmedString(row.color, 24),
+          members: (Array.isArray(row.members) ? row.members : [])
+            .map((member) => toTrimmedString(member, 160))
+            .filter(Boolean)
+            .slice(0, 24),
+        };
+      });
     const compactHistory = (Array.isArray(payloadContext.history) ? payloadContext.history : [])
       .slice(-10)
       .map((historyItem) => {
@@ -590,6 +604,7 @@ function createProjectChatFlow({ deps, helpers }) {
       stateSnapshot: toProfile(payloadContext.stateSnapshot),
       entities: compactEntities,
       connections: compactConnections,
+      groups: compactGroups,
       history: compactHistory,
       attachments: compactAttachments,
       currentUserMessage: toTrimmedString(message, 2400),

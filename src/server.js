@@ -476,6 +476,7 @@ function normalizeProjectCanvasData(canvasData) {
   const raw = canvasData && typeof canvasData === 'object' ? canvasData : {};
   const rawNodes = Array.isArray(raw.nodes) ? raw.nodes : [];
   const rawEdges = Array.isArray(raw.edges) ? raw.edges : [];
+  const rawGroups = Array.isArray(raw.groups) ? raw.groups : [];
   const rawViewport = raw.viewport && typeof raw.viewport === 'object' ? raw.viewport : null;
   const rawBackground = typeof raw.background === 'string' ? raw.background.trim() : '';
 
@@ -514,6 +515,35 @@ function normalizeProjectCanvasData(canvasData) {
     return [{ id, source, target, label, color, arrowLeft, arrowRight }];
   });
 
+  const nodeIdSet = new Set(nodes.map((node) => node.id));
+  const groups = rawGroups.flatMap((group) => {
+    if (!group || typeof group !== 'object') return [];
+
+    const id = typeof group.id === 'string' ? group.id : '';
+    const name = typeof group.name === 'string' ? group.name.trim().slice(0, 120) : '';
+    const color = typeof group.color === 'string' && group.color.trim() ? group.color.trim().slice(0, 24) : undefined;
+    const nodeIds = Array.isArray(group.nodeIds)
+      ? Array.from(
+        new Set(
+          group.nodeIds
+            .map((nodeId) => (typeof nodeId === 'string' ? nodeId : ''))
+            .filter((nodeId) => nodeId && nodeIdSet.has(nodeId)),
+        ),
+      )
+      : [];
+
+    if (!id || nodeIds.length < 2) {
+      return [];
+    }
+
+    return [{
+      id,
+      name: name || 'Группа',
+      nodeIds,
+      ...(color ? { color } : {}),
+    }];
+  });
+
   const viewport =
     rawViewport &&
     typeof rawViewport.x === 'number' &&
@@ -541,6 +571,7 @@ function normalizeProjectCanvasData(canvasData) {
   return {
     nodes,
     edges,
+    groups,
     ...(viewport ? { viewport } : {}),
     ...(rawBackground ? { background: rawBackground } : {}),
   };
@@ -1619,6 +1650,39 @@ function buildProjectConnections(canvasData, entitiesById) {
     .slice(0, 180);
 }
 
+function buildProjectGroups(canvasData, entitiesById) {
+  const entityById = new Map(
+    (Array.isArray(entitiesById) ? entitiesById : []).map((entity) => [String(entity?._id), entity]),
+  );
+  const entityNameByNodeId = new Map();
+
+  for (const node of canvasData.nodes) {
+    if (!node?.id || !node?.entityId) continue;
+    const entity = entityById.get(node.entityId);
+    if (!entity) continue;
+    entityNameByNodeId.set(node.id, toTrimmedString(entity.name, 120) || '(без названия)');
+  }
+
+  return (Array.isArray(canvasData.groups) ? canvasData.groups : [])
+    .map((group) => {
+      const members = group.nodeIds
+        .map((nodeId) => entityNameByNodeId.get(nodeId))
+        .filter(Boolean)
+        .slice(0, 24);
+
+      if (members.length < 2) return null;
+
+      return compactObject({
+        id: toTrimmedString(group.id, 120),
+        name: toTrimmedString(group.name, 120) || 'Группа',
+        color: toTrimmedString(group.color, 24),
+        members,
+      });
+    })
+    .filter(Boolean)
+    .slice(0, 80);
+}
+
 async function resolveAgentScopeContext(ownerId, rawScope) {
   const scope = toProfile(rawScope);
   const scopeType = toTrimmedString(scope.type, 24).toLowerCase();
@@ -1648,7 +1712,9 @@ async function resolveAgentScopeContext(ownerId, rawScope) {
       sourceEntities: entities,
       sourceNodes: [],
       sourceEdges: [],
+      sourceGroups: [],
       connections: [],
+      groups: [],
     };
   }
 
@@ -1732,6 +1798,7 @@ async function resolveAgentScopeContext(ownerId, rawScope) {
       });
 
     const connections = buildProjectConnections(canvasData, orderedEntities);
+    const groups = buildProjectGroups(canvasData, orderedEntities);
 
     return {
       scopeType: 'project',
@@ -1744,7 +1811,9 @@ async function resolveAgentScopeContext(ownerId, rawScope) {
       sourceEntities,
       sourceNodes: canvasData.nodes,
       sourceEdges: canvasData.edges,
+      sourceGroups: canvasData.groups,
       connections,
+      groups,
     };
   }
 
