@@ -256,6 +256,17 @@ function buildEntityTypeSpecificSections(entityType) {
     return buildPersonSections(config);
   }
 
+  if (entityType === 'shape') {
+    return [
+      'РАСШИФРОВКА ТИПА SHAPE:',
+      '- Под shape понимай не геометрическую фигуру, а структурный элемент, контекстный слой, смысловой контейнер или вспомогательный узел.',
+      '- Shape часто используется для вынесения дополнительного контекста из сущностей, событий и проектов, чтобы не перегружать их основные карточки.',
+      '- Если shape подключен связями к другим сущностям, оценивай его как носитель контекста и структуры, а не как декоративный объект.',
+      '',
+      ...buildEntitySpecificSections(entityType, config),
+    ];
+  }
+
   return buildEntitySpecificSections(entityType, config);
 }
 
