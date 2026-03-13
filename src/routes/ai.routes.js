@@ -550,6 +550,91 @@ function createAiRouter(deps) {
     };
   }
 
+  function splitNarrativeSentences(rawValue, maxItems = 3, maxLength = 220) {
+    const text = toTrimmedString(rawValue, 2000)
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!text) return [];
+
+    return text
+      .split(/(?<=[.!?])\s+|;\s+/)
+      .map((part) => toTrimmedString(part, maxLength))
+      .filter(Boolean)
+      .slice(0, maxItems);
+  }
+
+  function trimSentenceEnding(value) {
+    return toTrimmedString(value, 240).replace(/[.!\s]+$/g, '').trim();
+  }
+
+  function buildEntityFocusSnippet(card) {
+    const row = toProfile(card);
+    const name = toTrimmedString(row.name, 120);
+    if (!name) return '';
+
+    const roles = Array.isArray(row.roles) ? row.roles.map((item) => toTrimmedString(item, 72)).filter(Boolean) : [];
+    const statuses = Array.isArray(row.status) ? row.status.map((item) => toTrimmedString(item, 72)).filter(Boolean) : [];
+    const metrics = Array.isArray(row.metrics) ? row.metrics.map((item) => toTrimmedString(item, 96)).filter(Boolean) : [];
+    const descriptionSentences = splitNarrativeSentences(row.description, 2, 200);
+    const focus = descriptionSentences[0] || '';
+
+    if (focus) {
+      return `${name} — ${trimSentenceEnding(focus)}.`;
+    }
+
+    const fragments = [];
+    if (roles.length) fragments.push(roles.slice(0, 2).join(', '));
+    if (statuses.length) fragments.push(`статус: ${statuses.slice(0, 2).join(', ')}`);
+    if (metrics.length) fragments.push(`метрика: ${metrics[0]}`);
+    if (!fragments.length) return name;
+    return `${name} — ${fragments.join('; ')}.`;
+  }
+
+  function buildAuthorOpening(author) {
+    const row = toProfile(author);
+    const name = toTrimmedString(row.name, 120);
+    const roles = Array.isArray(row.roles) ? row.roles.map((item) => toTrimmedString(item, 72)).filter(Boolean) : [];
+    const sentences = splitNarrativeSentences(row.description, 2, 220);
+    const roleText = roles.length ? `, ${roles.slice(0, 2).join(', ')}` : '';
+    const opening = name
+      ? `В центре проекта находится ${name}${roleText}.`
+      : 'В центре проекта находится автор и его операционный контур.';
+
+    if (!sentences.length) return opening;
+    return `${opening} ${trimSentenceEnding(sentences[0])}.`;
+  }
+
+  function buildNarrativeRingSentence(label, cards) {
+    const items = (Array.isArray(cards) ? cards : [])
+      .map((card) => buildEntityFocusSnippet(card))
+      .filter(Boolean)
+      .slice(0, 3);
+    if (!items.length) return '';
+    return `${label}: ${items.join(' ')}`;
+  }
+
+  function buildMetricsAndStateSentence({ aggregatedEntityFields }) {
+    const metrics = Array.isArray(aggregatedEntityFields?.metrics) ? aggregatedEntityFields.metrics.slice(0, 2) : [];
+    const statuses = Array.isArray(aggregatedEntityFields?.status) ? aggregatedEntityFields.status.slice(0, 3) : [];
+    const tasks = Array.isArray(aggregatedEntityFields?.tasks) ? aggregatedEntityFields.tasks.slice(0, 2) : [];
+    const fragments = [];
+    if (metrics.length) fragments.push(`Целевой контур: ${metrics.join(', ')}`);
+    if (statuses.length) fragments.push(`текущие статусы: ${statuses.join(', ')}`);
+    if (tasks.length) fragments.push(`рабочие задачи: ${tasks.join(', ')}`);
+    if (!fragments.length) return '';
+    return `${fragments.join('; ')}.`;
+  }
+
+  function buildConstraintsSentence({ aggregatedEntityFields, owners, locations }) {
+    const risks = Array.isArray(aggregatedEntityFields?.risks) ? aggregatedEntityFields.risks.slice(0, 3) : [];
+    const fragments = [];
+    if (owners.length) fragments.push(`Ответственность закреплена за ${owners.join(', ')}`);
+    if (locations.length) fragments.push(`география проекта: ${locations.join(', ')}`);
+    if (risks.length) fragments.push(`ключевые ограничения: ${risks.join(', ')}`);
+    if (!fragments.length) return '';
+    return `${fragments.join('; ')}.`;
+  }
+
   function buildProjectNarrativeContext({ sourceEntities, connections }) {
     const entities = Array.isArray(sourceEntities) ? sourceEntities : [];
     const authorEntity = pickProjectAuthorEntity(entities);
@@ -631,52 +716,28 @@ function createAiRouter(deps) {
     const groups = Array.isArray(scopeContext?.groups) ? scopeContext.groups : [];
     const entities = Array.isArray(scopeContext?.entities) ? scopeContext.entities : [];
     const authorCard = toProfile(author);
-    const authorName = toTrimmedString(authorCard.name, 120);
-    const authorDescription = toTrimmedString(authorCard.description, 220);
-    const authorRoles = Array.isArray(authorCard.roles) ? authorCard.roles.slice(0, 2) : [];
     const innerRing = Array.isArray(toProfile(narrativeRings).inner) ? toProfile(narrativeRings).inner : [];
     const outerRing = Array.isArray(toProfile(narrativeRings).outer) ? toProfile(narrativeRings).outer : [];
     const locations = Array.isArray(aggregatedEntityFields?.location) ? aggregatedEntityFields.location.slice(0, 3) : [];
     const owners = Array.isArray(aggregatedEntityFields?.owners) ? aggregatedEntityFields.owners.slice(0, 3) : [];
-    const metrics = Array.isArray(aggregatedEntityFields?.metrics) ? aggregatedEntityFields.metrics.slice(0, 2) : [];
-    const risks = Array.isArray(aggregatedEntityFields?.risks) ? aggregatedEntityFields.risks.slice(0, 2) : [];
-    const statuses = Array.isArray(aggregatedEntityFields?.status) ? aggregatedEntityFields.status.slice(0, 3) : [];
-    const members = innerRing
-      .slice(0, 4)
-      .map((entity) => toTrimmedString(toProfile(entity).name, 80))
-      .filter(Boolean);
-    const outerMembers = outerRing
-      .slice(0, 4)
-      .map((entity) => toTrimmedString(toProfile(entity).name, 80))
-      .filter(Boolean);
-    const entitySummary = (Array.isArray(sourceEntities) ? sourceEntities : [])
-      .map((entity) => {
-        const name = toTrimmedString(entity?.name, 80);
-        const description = toTrimmedString(toProfile(entity?.ai_metadata).description, 220);
-        if (!name || !description) return '';
-        return `${name}: ${description}`;
-      })
-      .filter(Boolean)
-      .slice(0, 2);
+    const authorSentence = buildAuthorOpening(authorCard);
+    const innerSentence = buildNarrativeRingSentence('Ближайший рабочий круг', innerRing);
+    const outerSentence = buildNarrativeRingSentence(
+      groups.length ? `Следующий слой проектного контура (${groups.length} групп)` : 'Следующий слой проектного контура',
+      outerRing,
+    );
+    const metricsSentence = buildMetricsAndStateSentence({ aggregatedEntityFields });
+    const constraintsSentence = buildConstraintsSentence({ aggregatedEntityFields, owners, locations });
+    const coverageSentence = entities.length
+      ? `Сейчас на дашборде собрано ${entities.length} сущностей, из которых строится единый контур проекта «${projectName}».`
+      : '';
 
     const parts = [
-      authorName
-        ? `В центре проекта «${projectName}» находится ${authorName}${authorRoles.length ? `, ${authorRoles.join(', ')}` : ''}.`
-        : `Проект «${projectName}» собран вокруг центрального рабочего контура.`,
-      authorDescription ? `${authorDescription}.` : '',
-      members.length
-        ? `${authorName || 'Он'} напрямую связан с контуром: ${members.join(', ')}.`
-        : entities.length ? `На дашборде сейчас собрано ${entities.length} сущностей.` : '',
-      outerMembers.length
-        ? `Следующим слоем идут объекты и направления: ${outerMembers.join(', ')}.`
-        : groups.length ? `В проекте уже выделено ${groups.length} групп(ы) объектов.` : '',
-      metrics.length || statuses.length
-        ? `Движение проекта задают ${metrics.length ? `метрики ${metrics.join(', ')}` : 'текущие рабочие статусы'}${statuses.length ? `, при этом уже видны статусы: ${statuses.join(', ')}` : ''}.`
-        : '',
-      risks.length || owners.length || locations.length
-        ? `${owners.length ? `Ответственность закреплена за ${owners.join(', ')}` : 'Контур ответственности уже просматривается'}${locations.length ? `; география проекта: ${locations.join(', ')}` : ''}${risks.length ? `; главные ограничения: ${risks.join(', ')}` : ''}.`
-        : '',
-      entitySummary.length ? `По описаниям сущностей это выражается так: ${entitySummary.join(' ')}` : '',
+      authorSentence,
+      innerSentence || coverageSentence,
+      outerSentence,
+      metricsSentence,
+      constraintsSentence,
     ].filter(Boolean);
 
     return toTrimmedString(parts.join(' '), 900);
