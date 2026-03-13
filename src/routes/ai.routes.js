@@ -200,21 +200,110 @@ function createAiRouter(deps) {
     strict: true,
     schema: {
       type: 'object',
-      required: ['status', 'description', 'summary', 'changeReason', 'missing', 'fields'],
+      required: ['status', 'summary', 'changeReason', 'missing', 'analysisMap'],
       additionalProperties: false,
       properties: {
         status: { type: 'string', enum: ['ready', 'need_clarification'] },
-        description: { type: 'string' },
         summary: { type: 'string' },
         changeReason: { type: 'string' },
         missing: { type: 'array', items: { type: 'string' } },
-        fields: {
+        analysisMap: {
           type: 'object',
-          required: PROJECT_CHAT_FIELD_KEYS,
+          required: ['project_name', 'author_context', 'entities', 'connections', 'project_synthesis'],
           additionalProperties: false,
-          properties: Object.fromEntries(
-            PROJECT_CHAT_FIELD_KEYS.map((fieldKey) => [fieldKey, { type: 'array', items: { type: 'string' } }]),
-          ),
+          properties: {
+            project_name: { type: 'string' },
+            author_context: {
+              type: 'object',
+              required: ['entity_id', 'name', 'role_in_project', 'why_matters'],
+              additionalProperties: false,
+              properties: {
+                entity_id: { type: 'string' },
+                name: { type: 'string' },
+                role_in_project: { type: 'string' },
+                why_matters: { type: 'string' },
+              },
+            },
+            entities: {
+              type: 'array',
+              items: {
+                type: 'object',
+                required: [
+                  'entity_id',
+                  'name',
+                  'type',
+                  'role_in_project',
+                  'summary',
+                  'strengths',
+                  'weaknesses',
+                  'opportunities',
+                  'risks',
+                  'importance',
+                  'why_now',
+                  'relation_to_author',
+                  'relation_to_goal',
+                  'stage',
+                  'evidence',
+                ],
+                additionalProperties: false,
+                properties: {
+                  entity_id: { type: 'string' },
+                  name: { type: 'string' },
+                  type: { type: 'string' },
+                  role_in_project: { type: 'string' },
+                  summary: { type: 'string' },
+                  strengths: { type: 'array', items: { type: 'string' } },
+                  weaknesses: { type: 'array', items: { type: 'string' } },
+                  opportunities: { type: 'array', items: { type: 'string' } },
+                  risks: { type: 'array', items: { type: 'string' } },
+                  importance: { type: 'integer', minimum: 0, maximum: 100 },
+                  why_now: { type: 'string' },
+                  relation_to_author: { type: 'string' },
+                  relation_to_goal: { type: 'string' },
+                  stage: { type: 'string' },
+                  evidence: { type: 'array', items: { type: 'string' } },
+                },
+              },
+            },
+            connections: {
+              type: 'array',
+              items: {
+                type: 'object',
+                required: ['from', 'to', 'label', 'meaning', 'impact', 'strength'],
+                additionalProperties: false,
+                properties: {
+                  from: { type: 'string' },
+                  to: { type: 'string' },
+                  label: { type: 'string' },
+                  meaning: { type: 'string' },
+                  impact: { type: 'string', enum: ['positive', 'negative', 'neutral'] },
+                  strength: { type: 'integer', minimum: 0, maximum: 100 },
+                },
+              },
+            },
+            project_synthesis: {
+              type: 'object',
+              required: [
+                'main_goal',
+                'current_engine',
+                'main_bottleneck',
+                'hidden_leverage',
+                'critical_constraint',
+                'next_focus',
+                'confidence',
+              ],
+              additionalProperties: false,
+              properties: {
+                main_goal: { type: 'string' },
+                current_engine: { type: 'string' },
+                main_bottleneck: { type: 'string' },
+                hidden_leverage: { type: 'string' },
+                critical_constraint: { type: 'string' },
+                next_focus: { type: 'string' },
+                confidence: { type: 'integer', minimum: 0, maximum: 100 },
+              },
+            },
+          },
         },
       },
     },
@@ -515,6 +604,566 @@ function createAiRouter(deps) {
     return values;
   }
 
+  function clampProjectScore(rawValue, fallbackValue = 0) {
+    const numeric = Number(rawValue);
+    if (!Number.isFinite(numeric)) {
+      return Math.max(0, Math.min(100, Math.round(Number(fallbackValue) || 0)));
+    }
+    return Math.max(0, Math.min(100, Math.round(numeric)));
+  }
+
+  function normalizeProjectAnalysisList(rawValues, { maxItems = 4, maxLength = 120 } = {}) {
+    const source = Array.isArray(rawValues)
+      ? rawValues
+      : typeof rawValues === 'string'
+        ? [rawValues]
+        : [];
+    const dedup = new Set();
+    const values = [];
+    for (const item of source) {
+      const value = toTrimmedString(item, maxLength)
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!value) continue;
+      const key = value.toLowerCase();
+      if (dedup.has(key)) continue;
+      dedup.add(key);
+      values.push(value);
+      if (values.length >= maxItems) break;
+    }
+    return values;
+  }
+
+  function normalizeProjectAnalysisEvidence(rawValues) {
+    return normalizeProjectAnalysisList(rawValues, { maxItems: 5, maxLength: 140 });
+  }
+
+  function firstProjectAnalysisValue(rawValue, maxLength = 220) {
+    return normalizeProjectAnalysisList(rawValue, { maxItems: 1, maxLength })[0] || '';
+  }
+
+  function getProjectEntityFieldList(entity, fieldKey, maxItems = 4, maxLength = 120) {
+    const meta = toProfile(entity?.ai_metadata);
+    return normalizeProjectAnalysisList(meta[fieldKey], { maxItems, maxLength });
+  }
+
+  function buildEntityDescriptionSentences(entity, maxItems = 3, maxLength = 180) {
+    const description = toTrimmedString(toProfile(entity?.ai_metadata).description, 2200)
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!description) return [];
+    return description
+      .split(/(?<=[.!?])\s+|;\s+/)
+      .map((part) => toTrimmedString(part, maxLength))
+      .filter(Boolean)
+      .slice(0, maxItems);
+  }
+
+  function hasProjectNegativeSignal(value) {
+    return /проблем|риск|убыт|не готов|требует|низк|долг|просроч|ручн|налог|юрид|канализ|ремонт|не вед/.test(
+      toTrimmedString(value, 180).toLowerCase(),
+    );
+  }
+
+  function hasProjectOpportunitySignal(value) {
+    return /рост|масштаб|цель|план|увелич|сдан|аренд|прибыл|поток|автомат|возмож/.test(
+      toTrimmedString(value, 180).toLowerCase(),
+    );
+  }
+
+  function pickProjectEntityEvidence(entity) {
+    const descriptionSentences = buildEntityDescriptionSentences(entity, 2, 140)
+      .map((item) => `desc: ${item}`);
+    const status = getProjectEntityFieldList(entity, 'status', 2, 96).map((item) => `status: ${item}`);
+    const metrics = getProjectEntityFieldList(entity, 'metrics', 2, 120).map((item) => `metric: ${item}`);
+    const risks = getProjectEntityFieldList(entity, 'risks', 2, 120).map((item) => `risk: ${item}`);
+    const roles = getProjectEntityFieldList(entity, 'roles', 2, 96).map((item) => `role: ${item}`);
+    return normalizeProjectAnalysisEvidence([
+      ...descriptionSentences,
+      ...status,
+      ...metrics,
+      ...risks,
+      ...roles,
+    ]);
+  }
+
+  function deriveProjectEntityRole(entity, authorEntity, relationLabels = []) {
+    const row = toProfile(entity);
+    const meta = toProfile(row.ai_metadata);
+    const roles = getProjectEntityFieldList(entity, 'roles', 2, 96);
+    const name = toTrimmedString(row.name, 120);
+    if (row.is_me === true || row.is_mine === true) {
+      return 'Авторский управленческий контур проекта';
+    }
+    if (roles.length) return roles.join(', ');
+    const relationHint = normalizeProjectAnalysisList(relationLabels, { maxItems: 1, maxLength: 96 })[0];
+    if (relationHint) {
+      return `${name || 'Сущность'} участвует в проекте как ${relationHint}`;
+    }
+    const type = toTrimmedString(row.type, 24);
+    if (type === 'goal' || type === 'result') return 'Целевой ориентир проекта';
+    if (type === 'task') return 'Операционный шаг проекта';
+    if (type === 'person') return authorEntity ? 'Человек в рабочем контуре автора' : 'Человек в рабочем контуре проекта';
+    if (type === 'company') return 'Организационный или юридический контур проекта';
+    if (type === 'resource') return 'Ресурсная база проекта';
+    return toTrimmedString(meta.description, 96) ? 'Рабочий узел проекта' : 'Сущность проекта';
+  }
+
+  function deriveProjectEntityStrengths(entity) {
+    const metrics = getProjectEntityFieldList(entity, 'metrics', 2, 120);
+    const outcomes = getProjectEntityFieldList(entity, 'outcomes', 2, 120);
+    const resources = getProjectEntityFieldList(entity, 'resources', 2, 120);
+    const statuses = getProjectEntityFieldList(entity, 'status', 2, 96).filter((item) => !hasProjectNegativeSignal(item));
+    const description = buildEntityDescriptionSentences(entity, 2, 140).filter((item) => hasProjectOpportunitySignal(item));
+    const values = [
+      ...metrics,
+      ...outcomes,
+      ...resources,
+      ...statuses,
+      ...description,
+    ];
+    return normalizeProjectAnalysisList(values, { maxItems: 4, maxLength: 120 });
+  }
+
+  function deriveProjectEntityWeaknesses(entity) {
+    const statuses = getProjectEntityFieldList(entity, 'status', 4, 120).filter((item) => hasProjectNegativeSignal(item));
+    const description = buildEntityDescriptionSentences(entity, 2, 140).filter((item) => hasProjectNegativeSignal(item));
+    return normalizeProjectAnalysisList([...statuses, ...description], { maxItems: 4, maxLength: 120 });
+  }
+
+  function deriveProjectEntityOpportunities(entity) {
+    const outcomes = getProjectEntityFieldList(entity, 'outcomes', 2, 120);
+    const metrics = getProjectEntityFieldList(entity, 'metrics', 2, 120);
+    const description = buildEntityDescriptionSentences(entity, 2, 140).filter((item) => hasProjectOpportunitySignal(item));
+    return normalizeProjectAnalysisList([...outcomes, ...metrics, ...description], { maxItems: 4, maxLength: 120 });
+  }
+
+  function deriveProjectEntityRisks(entity) {
+    const risks = getProjectEntityFieldList(entity, 'risks', 4, 120);
+    const weaknesses = deriveProjectEntityWeaknesses(entity);
+    return normalizeProjectAnalysisList([...risks, ...weaknesses], { maxItems: 4, maxLength: 120 });
+  }
+
+  function deriveProjectEntityStage(entity) {
+    return (
+      firstProjectAnalysisValue(toProfile(entity?.ai_metadata).stage, 96)
+      || firstProjectAnalysisValue(toProfile(entity?.ai_metadata).status, 96)
+      || ''
+    );
+  }
+
+  function deriveProjectEntitySummary(entity, fallbackRole = '') {
+    const descriptionSentence = buildEntityDescriptionSentences(entity, 1, 180)[0];
+    if (descriptionSentence) return descriptionSentence;
+    const name = toTrimmedString(entity?.name, 120);
+    const stage = deriveProjectEntityStage(entity);
+    if (fallbackRole && stage) return `${name} — ${fallbackRole}; стадия: ${stage}`;
+    if (fallbackRole) return `${name} — ${fallbackRole}`;
+    if (stage) return `${name} — стадия: ${stage}`;
+    return name;
+  }
+
+  function deriveProjectEntityWhyNow(entity, { opportunities = [], weaknesses = [], risks = [] } = {}) {
+    if (weaknesses.length) {
+      return `Требует внимания сейчас, потому что ${weaknesses[0].replace(/[.]+$/g, '')}.`;
+    }
+    if (risks.length) {
+      return `Актуальна сейчас из-за риска: ${risks[0].replace(/[.]+$/g, '')}.`;
+    }
+    if (opportunities.length) {
+      return `Важна сейчас как ближайшая точка роста: ${opportunities[0].replace(/[.]+$/g, '')}.`;
+    }
+    const type = toTrimmedString(entity?.type, 24);
+    if (type === 'goal' || type === 'result') {
+      return 'Задает целевой горизонт и критерий результата для всего проекта.';
+    }
+    return 'Поддерживает текущий рабочий контур проекта и влияет на следующие решения.';
+  }
+
+  function buildProjectConnectionIndex(connections) {
+    const list = Array.isArray(connections) ? connections : [];
+    const byEntityId = new Map();
+    const pairLabels = new Map();
+    for (const rawConnection of list) {
+      const connection = toProfile(rawConnection);
+      const from = toTrimmedString(connection.from, 120);
+      const to = toTrimmedString(connection.to, 120);
+      const label = toTrimmedString(connection.label, 120) || toTrimmedString(connection.type, 80);
+      if (!from || !to) continue;
+      byEntityId.set(from, (byEntityId.get(from) || 0) + 1);
+      byEntityId.set(to, (byEntityId.get(to) || 0) + 1);
+      const leftKey = `${from}|${to}`;
+      const rightKey = `${to}|${from}`;
+      if (label) {
+        pairLabels.set(leftKey, [...(pairLabels.get(leftKey) || []), label]);
+        pairLabels.set(rightKey, [...(pairLabels.get(rightKey) || []), label]);
+      }
+    }
+    return { byEntityId, pairLabels };
+  }
+
+  function buildProjectEntityImportance(entity, connectionCount = 0) {
+    const row = toProfile(entity);
+    let score = 35;
+    if (row.is_me === true) score += 35;
+    else if (row.is_mine === true) score += 20;
+    const type = toTrimmedString(row.type, 24);
+    if (type === 'goal' || type === 'result') score += 20;
+    if (type === 'project') score += 12;
+    if (type === 'company' || type === 'person') score += 10;
+    score += Math.min(20, connectionCount * 5);
+    if (deriveProjectEntityWeaknesses(entity).length) score += 8;
+    if (deriveProjectEntityOpportunities(entity).length) score += 6;
+    return clampProjectScore(score, 50);
+  }
+
+  function deriveProjectEntityGoalRelation(entity, goalEntityIds) {
+    const type = toTrimmedString(entity?.type, 24);
+    if (type === 'goal' || type === 'result') return 'Формирует цель проекта';
+    if (goalEntityIds.has(toTrimmedString(entity?._id || entity?.id, 120))) return 'Напрямую связан с целевым контуром';
+    const metrics = getProjectEntityFieldList(entity, 'metrics', 1, 120);
+    if (metrics.length) return `Поддерживает цель через метрику: ${metrics[0]}`;
+    const outcomes = getProjectEntityFieldList(entity, 'outcomes', 1, 120);
+    if (outcomes.length) return `Поддерживает цель через результат: ${outcomes[0]}`;
+    return 'Косвенно влияет на достижение цели проекта';
+  }
+
+  function deriveProjectEntityAuthorRelation(entity, authorEntity, pairLabels) {
+    const row = toProfile(entity);
+    if (!authorEntity) return '';
+    if (row._id === authorEntity._id || row.id === authorEntity.id || row.is_me === true || row.is_mine === true) {
+      return 'Это и есть личный контур автора';
+    }
+    const entityId = toTrimmedString(row._id || row.id, 120);
+    const authorId = toTrimmedString(authorEntity._id || authorEntity.id, 120);
+    const relationLabels = normalizeProjectAnalysisList(pairLabels.get(`${authorId}|${entityId}`) || [], {
+      maxItems: 2,
+      maxLength: 96,
+    });
+    if (relationLabels.length) {
+      return `Прямая связь с автором через ${relationLabels.join(', ')}`;
+    }
+    return 'Относится к внешнему рабочему слою проекта';
+  }
+
+  function deriveProjectConnectionImpact(connection) {
+    const label = `${toTrimmedString(connection?.label, 120)} ${toTrimmedString(connection?.type, 80)}`.toLowerCase();
+    if (/риск|проблем|блок|долг|конфликт|зависим/.test(label)) return 'negative';
+    if (/админ|управ|владел|аренд|цель|метрик|ресурс|контур|актив/.test(label)) return 'positive';
+    return 'neutral';
+  }
+
+  function buildProjectConnectionStrength(connection, entitiesById) {
+    const from = toTrimmedString(connection?.from, 120);
+    const to = toTrimmedString(connection?.to, 120);
+    const label = toTrimmedString(connection?.label, 120);
+    const leftImportance = clampProjectScore(entitiesById.get(from)?.importance, 40);
+    const rightImportance = clampProjectScore(entitiesById.get(to)?.importance, 40);
+    let score = 40 + Math.round((leftImportance + rightImportance) / 10);
+    if (label) score += 10;
+    return clampProjectScore(score, 55);
+  }
+
+  function buildProjectAnalysisMapFallback({
+    scopeContext,
+    sourceEntities,
+    connections,
+  }) {
+    const entities = Array.isArray(sourceEntities) ? sourceEntities : [];
+    const authorEntity = pickProjectAuthorEntity(entities);
+    const { byEntityId, pairLabels } = buildProjectConnectionIndex(connections);
+    const goalEntityIds = new Set(
+      entities
+        .filter((entity) => ['goal', 'result'].includes(toTrimmedString(entity?.type, 24)))
+        .map((entity) => toTrimmedString(entity?._id || entity?.id, 120))
+        .filter(Boolean),
+    );
+
+    const entityMap = entities
+      .map((entity) => {
+        const row = toProfile(entity);
+        const entityId = toTrimmedString(row._id || row.id, 120);
+        const name = toTrimmedString(row.name, 120);
+        if (!entityId || !name) return null;
+        const relationLabels = normalizeProjectAnalysisList(pairLabels.get(`${entityId}|${toTrimmedString(authorEntity?._id || authorEntity?.id, 120)}`) || [], {
+          maxItems: 2,
+          maxLength: 96,
+        });
+        const roleInProject = deriveProjectEntityRole(entity, authorEntity, relationLabels);
+        const strengths = deriveProjectEntityStrengths(entity);
+        const weaknesses = deriveProjectEntityWeaknesses(entity);
+        const opportunities = deriveProjectEntityOpportunities(entity);
+        const risks = deriveProjectEntityRisks(entity);
+        const stage = deriveProjectEntityStage(entity);
+        const importance = buildProjectEntityImportance(entity, byEntityId.get(entityId) || 0);
+        return {
+          entity_id: entityId,
+          name,
+          type: toTrimmedString(row.type, 24),
+          role_in_project: roleInProject,
+          summary: deriveProjectEntitySummary(entity, roleInProject),
+          strengths,
+          weaknesses,
+          opportunities,
+          risks,
+          importance,
+          why_now: deriveProjectEntityWhyNow(entity, { opportunities, weaknesses, risks }),
+          relation_to_author: deriveProjectEntityAuthorRelation(entity, authorEntity, pairLabels),
+          relation_to_goal: deriveProjectEntityGoalRelation(entity, goalEntityIds),
+          stage,
+          evidence: pickProjectEntityEvidence(entity),
+        };
+      })
+      .filter(Boolean)
+      .sort((left, right) => right.importance - left.importance);
+
+    const entitiesById = new Map(entityMap.map((item) => [item.entity_id, item]));
+    const normalizedConnections = (Array.isArray(connections) ? connections : [])
+      .map((rawConnection) => {
+        const connection = toProfile(rawConnection);
+        const from = toTrimmedString(connection.from, 120);
+        const to = toTrimmedString(connection.to, 120);
+        if (!from || !to || !entitiesById.has(from) || !entitiesById.has(to)) return null;
+        const label = toTrimmedString(connection.label, 120) || toTrimmedString(connection.type, 80);
+        const fromName = entitiesById.get(from)?.name || from;
+        const toName = entitiesById.get(to)?.name || to;
+        return {
+          from,
+          to,
+          label,
+          meaning: label
+            ? `${fromName} связан с ${toName} через "${label}".`
+            : `${fromName} связан с ${toName}.`,
+          impact: deriveProjectConnectionImpact(connection),
+          strength: buildProjectConnectionStrength(connection, entitiesById),
+        };
+      })
+      .filter(Boolean)
+      .slice(0, 160);
+
+    const topEntities = entityMap.slice(0, 4);
+    const topPositiveEntity = entityMap.find((item) => item.strengths.length || item.opportunities.length) || entityMap[0] || null;
+    const topRiskEntity = entityMap.find((item) => item.weaknesses.length || item.risks.length) || entityMap[0] || null;
+    const hiddenLeverageEntity = [...entityMap]
+      .sort((left, right) => {
+        const leftSignal = left.opportunities.length * 20 - left.weaknesses.length * 5 - left.risks.length * 5;
+        const rightSignal = right.opportunities.length * 20 - right.weaknesses.length * 5 - right.risks.length * 5;
+        return rightSignal - leftSignal;
+      })
+      .find((item) => item && item.entity_id !== topPositiveEntity?.entity_id)
+      || topPositiveEntity
+      || null;
+
+    const authorContext = authorEntity
+      ? {
+          entity_id: toTrimmedString(authorEntity._id || authorEntity.id, 120),
+          name: toTrimmedString(authorEntity.name, 120),
+          role_in_project: deriveProjectEntityRole(authorEntity, authorEntity),
+          why_matters: deriveProjectEntityWhyNow(authorEntity, {
+            opportunities: deriveProjectEntityOpportunities(authorEntity),
+            weaknesses: deriveProjectEntityWeaknesses(authorEntity),
+            risks: deriveProjectEntityRisks(authorEntity),
+          }),
+        }
+      : {
+          entity_id: '',
+          name: '',
+          role_in_project: '',
+          why_matters: '',
+        };
+
+    const goalEntity = entityMap.find((item) => item.type === 'goal' || item.type === 'result') || null;
+    const evidenceCount = entityMap.reduce((sum, item) => sum + item.evidence.length, 0);
+
+    return {
+      project_name: toTrimmedString(scopeContext?.projectName, 160) || 'Проект',
+      author_context: authorContext,
+      entities: entityMap,
+      connections: normalizedConnections,
+      project_synthesis: {
+        main_goal:
+          goalEntity?.summary
+          || firstProjectAnalysisValue(toProfile(topPositiveEntity).relation_to_goal, 220)
+          || 'Цель проекта требует уточнения.',
+        current_engine: topEntities.length
+          ? `Текущий двигатель проекта держится на ${topEntities.slice(0, 3).map((item) => item.name).join(', ')}.`
+          : 'Текущий двигатель проекта не выявлен.',
+        main_bottleneck:
+          topRiskEntity?.weaknesses[0]
+          || topRiskEntity?.risks[0]
+          || 'Главное ограничение пока не выделено.',
+        hidden_leverage:
+          hiddenLeverageEntity?.opportunities[0]
+          || hiddenLeverageEntity?.strengths[0]
+          || 'Скрытое leverage пока не выделено.',
+        critical_constraint:
+          topRiskEntity?.risks[0]
+          || topRiskEntity?.weaknesses[0]
+          || 'Критическое ограничение пока не выделено.',
+        next_focus:
+          topRiskEntity
+            ? `Сфокусироваться на ${topRiskEntity.name}: ${topRiskEntity.why_now}`
+            : 'Собрать более полную карту проекта и уточнить главный bottleneck.',
+        confidence: clampProjectScore(35 + entityMap.length * 3 + normalizedConnections.length * 2 + evidenceCount * 2, 62),
+      },
+    };
+  }
+
+  function normalizeProjectAnalysisEntity(rawValue, fallbackValue = {}) {
+    const raw = toProfile(rawValue);
+    const fallback = toProfile(fallbackValue);
+    return {
+      entity_id: toTrimmedString(raw.entity_id, 120) || toTrimmedString(fallback.entity_id, 120),
+      name: toTrimmedString(raw.name, 120) || toTrimmedString(fallback.name, 120),
+      type: toTrimmedString(raw.type, 24) || toTrimmedString(fallback.type, 24) || 'shape',
+      role_in_project: toTrimmedString(raw.role_in_project, 180) || toTrimmedString(fallback.role_in_project, 180),
+      summary: toTrimmedString(raw.summary, 260) || toTrimmedString(fallback.summary, 260),
+      strengths: normalizeProjectAnalysisList(raw.strengths, { maxItems: 4, maxLength: 120 }).length
+        ? normalizeProjectAnalysisList(raw.strengths, { maxItems: 4, maxLength: 120 })
+        : normalizeProjectAnalysisList(fallback.strengths, { maxItems: 4, maxLength: 120 }),
+      weaknesses: normalizeProjectAnalysisList(raw.weaknesses, { maxItems: 4, maxLength: 120 }).length
+        ? normalizeProjectAnalysisList(raw.weaknesses, { maxItems: 4, maxLength: 120 })
+        : normalizeProjectAnalysisList(fallback.weaknesses, { maxItems: 4, maxLength: 120 }),
+      opportunities: normalizeProjectAnalysisList(raw.opportunities, { maxItems: 4, maxLength: 120 }).length
+        ? normalizeProjectAnalysisList(raw.opportunities, { maxItems: 4, maxLength: 120 })
+        : normalizeProjectAnalysisList(fallback.opportunities, { maxItems: 4, maxLength: 120 }),
+      risks: normalizeProjectAnalysisList(raw.risks, { maxItems: 4, maxLength: 120 }).length
+        ? normalizeProjectAnalysisList(raw.risks, { maxItems: 4, maxLength: 120 })
+        : normalizeProjectAnalysisList(fallback.risks, { maxItems: 4, maxLength: 120 }),
+      importance: clampProjectScore(raw.importance, fallback.importance),
+      why_now: toTrimmedString(raw.why_now, 240) || toTrimmedString(fallback.why_now, 240),
+      relation_to_author: toTrimmedString(raw.relation_to_author, 220) || toTrimmedString(fallback.relation_to_author, 220),
+      relation_to_goal: toTrimmedString(raw.relation_to_goal, 220) || toTrimmedString(fallback.relation_to_goal, 220),
+      stage: toTrimmedString(raw.stage, 96) || toTrimmedString(fallback.stage, 96),
+      evidence: normalizeProjectAnalysisEvidence(raw.evidence).length
+        ? normalizeProjectAnalysisEvidence(raw.evidence)
+        : normalizeProjectAnalysisEvidence(fallback.evidence),
+    };
+  }
+
+  function normalizeProjectAnalysisConnection(rawValue, fallbackValue = {}) {
+    const raw = toProfile(rawValue);
+    const fallback = toProfile(fallbackValue);
+    const impact = toTrimmedString(raw.impact, 24);
+    const normalizedImpact = ['positive', 'negative', 'neutral'].includes(impact) ? impact : toTrimmedString(fallback.impact, 24) || 'neutral';
+    return {
+      from: toTrimmedString(raw.from, 120) || toTrimmedString(fallback.from, 120),
+      to: toTrimmedString(raw.to, 120) || toTrimmedString(fallback.to, 120),
+      label: toTrimmedString(raw.label, 120) || toTrimmedString(fallback.label, 120),
+      meaning: toTrimmedString(raw.meaning, 240) || toTrimmedString(fallback.meaning, 240),
+      impact: normalizedImpact,
+      strength: clampProjectScore(raw.strength, fallback.strength),
+    };
+  }
+
+  function normalizeProjectAnalysisMap(rawValue, fallbackValue = {}) {
+    const raw = toProfile(rawValue);
+    const fallback = toProfile(fallbackValue);
+    const fallbackEntities = Array.isArray(fallback.entities) ? fallback.entities : [];
+    const fallbackConnections = Array.isArray(fallback.connections) ? fallback.connections : [];
+    const rawEntityById = new Map(
+      (Array.isArray(raw.entities) ? raw.entities : [])
+        .map((item) => [toTrimmedString(toProfile(item).entity_id, 120), item])
+        .filter(([entityId]) => Boolean(entityId)),
+    );
+    const rawConnectionByKey = new Map(
+      (Array.isArray(raw.connections) ? raw.connections : [])
+        .map((item) => {
+          const row = toProfile(item);
+          const from = toTrimmedString(row.from, 120);
+          const to = toTrimmedString(row.to, 120);
+          const label = toTrimmedString(row.label, 120);
+          return [`${from}|${to}|${label}`, item];
+        })
+        .filter(([key]) => !key.startsWith('||')),
+    );
+
+    const normalizedEntities = fallbackEntities
+      .map((fallbackEntity) => {
+        const fallbackProfile = toProfile(fallbackEntity);
+        return normalizeProjectAnalysisEntity(
+          rawEntityById.get(toTrimmedString(fallbackProfile.entity_id, 120)),
+          fallbackEntity,
+        );
+      })
+      .filter((item) => item.entity_id && item.name);
+
+    const normalizedConnections = fallbackConnections
+      .map((fallbackConnection) => {
+        const fallbackProfile = toProfile(fallbackConnection);
+        const key = [
+          toTrimmedString(fallbackProfile.from, 120),
+          toTrimmedString(fallbackProfile.to, 120),
+          toTrimmedString(fallbackProfile.label, 120),
+        ].join('|');
+        return normalizeProjectAnalysisConnection(rawConnectionByKey.get(key), fallbackConnection);
+      })
+      .filter((item) => item.from && item.to);
+
+    const rawSynthesis = toProfile(raw.project_synthesis);
+    const fallbackSynthesis = toProfile(fallback.project_synthesis);
+
+    return {
+      project_name: toTrimmedString(raw.project_name, 160) || toTrimmedString(fallback.project_name, 160) || 'Проект',
+      author_context: {
+        entity_id: toTrimmedString(toProfile(raw.author_context).entity_id, 120) || toTrimmedString(toProfile(fallback.author_context).entity_id, 120),
+        name: toTrimmedString(toProfile(raw.author_context).name, 120) || toTrimmedString(toProfile(fallback.author_context).name, 120),
+        role_in_project: toTrimmedString(toProfile(raw.author_context).role_in_project, 180) || toTrimmedString(toProfile(fallback.author_context).role_in_project, 180),
+        why_matters: toTrimmedString(toProfile(raw.author_context).why_matters, 240) || toTrimmedString(toProfile(fallback.author_context).why_matters, 240),
+      },
+      entities: normalizedEntities,
+      connections: normalizedConnections,
+      project_synthesis: {
+        main_goal: toTrimmedString(rawSynthesis.main_goal, 240) || toTrimmedString(fallbackSynthesis.main_goal, 240),
+        current_engine: toTrimmedString(rawSynthesis.current_engine, 240) || toTrimmedString(fallbackSynthesis.current_engine, 240),
+        main_bottleneck: toTrimmedString(rawSynthesis.main_bottleneck, 240) || toTrimmedString(fallbackSynthesis.main_bottleneck, 240),
+        hidden_leverage: toTrimmedString(rawSynthesis.hidden_leverage, 240) || toTrimmedString(fallbackSynthesis.hidden_leverage, 240),
+        critical_constraint: toTrimmedString(rawSynthesis.critical_constraint, 240) || toTrimmedString(fallbackSynthesis.critical_constraint, 240),
+        next_focus: toTrimmedString(rawSynthesis.next_focus, 240) || toTrimmedString(fallbackSynthesis.next_focus, 240),
+        confidence: clampProjectScore(rawSynthesis.confidence, fallbackSynthesis.confidence),
+      },
+    };
+  }
+
+  function compileProjectDescriptionFromAnalysisMap(analysisMap) {
+    const map = toProfile(analysisMap);
+    const author = toProfile(map.author_context);
+    const entities = Array.isArray(map.entities) ? map.entities : [];
+    const synthesis = toProfile(map.project_synthesis);
+    const topEntities = entities.slice(0, 4).map((entity) => toProfile(entity));
+    const topBase = topEntities
+      .map((entity) => {
+        const name = toTrimmedString(entity.name, 120);
+        const summary = toTrimmedString(entity.summary, 180);
+        if (!name) return '';
+        return summary ? `${name}: ${summary}` : name;
+      })
+      .filter(Boolean)
+      .join('; ');
+    const topStrengths = topEntities
+      .flatMap((entity) => normalizeProjectAnalysisList(entity.strengths, { maxItems: 2, maxLength: 110 }))
+      .slice(0, 4)
+      .join('; ');
+
+    const sections = [
+      ['Название проекта', toTrimmedString(map.project_name, 180) || 'Проект'],
+      ['Авторский контур', [toTrimmedString(author.name, 120), toTrimmedString(author.role_in_project, 180), toTrimmedString(author.why_matters, 240)].filter(Boolean).join('. ')],
+      ['Главная цель', toTrimmedString(synthesis.main_goal, 240)],
+      ['Текущая база проекта', topBase],
+      ['Сильные стороны контура', topStrengths],
+      ['Ограничения и bottlenecks', [toTrimmedString(synthesis.main_bottleneck, 240), toTrimmedString(synthesis.critical_constraint, 240)].filter(Boolean).join('. ')],
+      ['Скрытая возможность', toTrimmedString(synthesis.hidden_leverage, 240)],
+      ['Ближайший фокус', toTrimmedString(synthesis.next_focus, 240)],
+    ].filter(([, value]) => Boolean(toTrimmedString(value, 2000)));
+
+    return toTrimmedString(
+      sections
+        .map(([label, value]) => `${label}:\n${value}`)
+        .join('\n\n'),
+      3000,
+    );
+  }
+
   function pickProjectAuthorEntity(sourceEntities) {
     const entities = Array.isArray(sourceEntities) ? sourceEntities : [];
     const authorByMe = entities.find((entity) => entity?.is_me === true);
@@ -635,6 +1284,123 @@ function createAiRouter(deps) {
     return `${fragments.join('; ')}.`;
   }
 
+  function buildGoalSentence({ sourceEntities, aggregatedEntityFields }) {
+    const goalCards = (Array.isArray(sourceEntities) ? sourceEntities : [])
+      .filter((entity) => entity?.type === 'goal' || entity?.type === 'result')
+      .map((entity) => buildProjectEntityNarrativeCard(entity))
+      .filter(Boolean)
+      .slice(0, 2);
+    const goalSnippets = goalCards
+      .map((card) => trimSentenceEnding(toProfile(card).description))
+      .filter(Boolean);
+    if (goalSnippets.length) {
+      return `Цель проекта: ${goalSnippets.join(' ')}.`;
+    }
+
+    const metrics = Array.isArray(aggregatedEntityFields?.metrics) ? aggregatedEntityFields.metrics.slice(0, 2) : [];
+    const outcomes = Array.isArray(aggregatedEntityFields?.outcomes) ? aggregatedEntityFields.outcomes.slice(0, 2) : [];
+    if (metrics.length || outcomes.length) {
+      const fragments = [];
+      if (metrics.length) fragments.push(`метрики ${metrics.join(', ')}`);
+      if (outcomes.length) fragments.push(`ожидаемые результаты ${outcomes.join(', ')}`);
+      return `Цель проекта задают ${fragments.join(' и ')}.`;
+    }
+
+    return '';
+  }
+
+  function deriveProjectBottleneckThemes({ sourceEntities, aggregatedEntityFields }) {
+    const sourceTexts = [
+      ...(Array.isArray(aggregatedEntityFields?.risks) ? aggregatedEntityFields.risks : []),
+      ...(Array.isArray(aggregatedEntityFields?.status) ? aggregatedEntityFields.status : []),
+      ...(Array.isArray(aggregatedEntityFields?.tasks) ? aggregatedEntityFields.tasks : []),
+      ...(Array.isArray(sourceEntities) ? sourceEntities.map((entity) => toProfile(entity?.ai_metadata).description) : []),
+    ]
+      .map((value) => toTrimmedString(value, 240).toLowerCase())
+      .filter(Boolean);
+
+    const themes = [];
+    const hasAny = (patterns) => patterns.some((pattern) => sourceTexts.some((text) => pattern.test(text)));
+
+    if (hasAny([/ручн/, /вовлечен/, /процесс/, /систем/, /автомат/])) {
+      themes.push('операционная воспроизводимость');
+    }
+    if (hasAny([/ремонт/, /цоколь/, /канализ/, /отоплен/, /ктп/, /генератор/, /инженер/])) {
+      themes.push('инженерный контур и доведение проблемных объектов');
+    }
+    if (hasAny([/документ/, /правопреем/, /юрид/, /договор/])) {
+      themes.push('документы и юридическая чистота');
+    }
+    if (hasAny([/налог/, /коэффициент/, /нагрузк/])) {
+      themes.push('налоговая устойчивость');
+    }
+
+    return themes.slice(0, 4);
+  }
+
+  function buildProjectPhaseSentence({ sourceEntities, aggregatedEntityFields }) {
+    const themes = deriveProjectBottleneckThemes({ sourceEntities, aggregatedEntityFields });
+    if (themes.length) {
+      return `По смыслу проект сейчас находится не в фазе чистого масштабирования, а в фазе перехода от ручного управления текущими активами к системе, где ключевой bottleneck — ${themes.join(', ')}.`;
+    }
+
+    const statuses = Array.isArray(aggregatedEntityFields?.status) ? aggregatedEntityFields.status.slice(0, 3) : [];
+    if (statuses.length) {
+      return `Сейчас проект находится в фазе стабилизации текущих объектов и управленческого контура; это видно по статусам: ${statuses.join(', ')}.`;
+    }
+
+    return '';
+  }
+
+  function buildAssetBaseSentence({ narrativeRings, scopeContext }) {
+    const innerRing = Array.isArray(toProfile(narrativeRings).inner) ? toProfile(narrativeRings).inner : [];
+    const outerRing = Array.isArray(toProfile(narrativeRings).outer) ? toProfile(narrativeRings).outer : [];
+    const cards = [...innerRing, ...outerRing]
+      .map((card) => toProfile(card))
+      .filter((card) => !card.isAuthor)
+      .slice(0, 4);
+    const snippets = cards
+      .map((card) => buildEntityFocusSnippet(card))
+      .filter(Boolean);
+    if (snippets.length) {
+      return `Текущая база проекта выглядит так: ${snippets.join(' ')}`;
+    }
+
+    const totalEntities = Math.max(0, Number(scopeContext?.totalEntities) || 0);
+    if (totalEntities > 0) {
+      return `Сейчас проект опирается на ${totalEntities} сущностей, связанных в единый операционный контур.`;
+    }
+
+    return '';
+  }
+
+  function synthesizeProjectContextNarrative({
+    scopeContext,
+    sourceEntities,
+    aggregatedEntityFields,
+    author,
+    narrativeRings,
+  }) {
+    const projectName = toTrimmedString(scopeContext?.projectName, 160) || 'Проект';
+    const authorSentence = buildAuthorOpening(author);
+    const goalSentence = buildGoalSentence({ sourceEntities, aggregatedEntityFields });
+    const assetSentence = buildAssetBaseSentence({ narrativeRings, scopeContext });
+    const phaseSentence = buildProjectPhaseSentence({ sourceEntities, aggregatedEntityFields });
+    const owners = Array.isArray(aggregatedEntityFields?.owners) ? aggregatedEntityFields.owners.slice(0, 3) : [];
+    const locations = Array.isArray(aggregatedEntityFields?.location) ? aggregatedEntityFields.location.slice(0, 3) : [];
+    const constraintsSentence = buildConstraintsSentence({ aggregatedEntityFields, owners, locations });
+
+    const sentences = [
+      authorSentence || `Проект «${projectName}» собран вокруг центрального управленческого контура.`,
+      goalSentence,
+      assetSentence,
+      phaseSentence,
+      constraintsSentence,
+    ].filter(Boolean);
+
+    return toTrimmedString(sentences.join(' '), 900);
+  }
+
   function buildProjectNarrativeContext({ sourceEntities, connections }) {
     const entities = Array.isArray(sourceEntities) ? sourceEntities : [];
     const authorEntity = pickProjectAuthorEntity(entities);
@@ -653,22 +1419,22 @@ function createAiRouter(deps) {
       };
     }
 
-    const authorName = authorCard.name.toLowerCase();
+    const authorId = toTrimmedString(authorCard.id, 120);
     const connectionNames = new Set();
     for (const rawConnection of Array.isArray(connections) ? connections : []) {
       const connection = toProfile(rawConnection);
       const from = toTrimmedString(connection.from, 120);
       const to = toTrimmedString(connection.to, 120);
       if (!from || !to) continue;
-      if (from.toLowerCase() === authorName) connectionNames.add(to.toLowerCase());
-      if (to.toLowerCase() === authorName) connectionNames.add(from.toLowerCase());
+      if (from === authorId) connectionNames.add(to);
+      if (to === authorId) connectionNames.add(from);
     }
 
     const inner = [];
     const outer = [];
     for (const item of cards) {
-      if (!item.card || item.card.name.toLowerCase() === authorName) continue;
-      if (connectionNames.has(item.card.name.toLowerCase())) {
+      if (!item.card || toTrimmedString(item.card.id, 120) === authorId) continue;
+      if (connectionNames.has(toTrimmedString(item.card.id, 120))) {
         inner.push(item.card);
       } else {
         outer.push(item.card);
@@ -712,64 +1478,33 @@ function createAiRouter(deps) {
     author,
     narrativeRings,
   }) {
-    const projectName = toTrimmedString(scopeContext?.projectName, 160) || 'Проект';
-    const groups = Array.isArray(scopeContext?.groups) ? scopeContext.groups : [];
-    const entities = Array.isArray(scopeContext?.entities) ? scopeContext.entities : [];
-    const authorCard = toProfile(author);
-    const innerRing = Array.isArray(toProfile(narrativeRings).inner) ? toProfile(narrativeRings).inner : [];
-    const outerRing = Array.isArray(toProfile(narrativeRings).outer) ? toProfile(narrativeRings).outer : [];
-    const locations = Array.isArray(aggregatedEntityFields?.location) ? aggregatedEntityFields.location.slice(0, 3) : [];
-    const owners = Array.isArray(aggregatedEntityFields?.owners) ? aggregatedEntityFields.owners.slice(0, 3) : [];
-    const authorSentence = buildAuthorOpening(authorCard);
-    const innerSentence = buildNarrativeRingSentence('Ближайший рабочий круг', innerRing);
-    const outerSentence = buildNarrativeRingSentence(
-      groups.length ? `Следующий слой проектного контура (${groups.length} групп)` : 'Следующий слой проектного контура',
-      outerRing,
-    );
-    const metricsSentence = buildMetricsAndStateSentence({ aggregatedEntityFields });
-    const constraintsSentence = buildConstraintsSentence({ aggregatedEntityFields, owners, locations });
-    const coverageSentence = entities.length
-      ? `Сейчас на дашборде собрано ${entities.length} сущностей, из которых строится единый контур проекта «${projectName}».`
-      : '';
-
-    const parts = [
-      authorSentence,
-      innerSentence || coverageSentence,
-      outerSentence,
-      metricsSentence,
-      constraintsSentence,
-    ].filter(Boolean);
-
-    return toTrimmedString(parts.join(' '), 900);
+    return synthesizeProjectContextNarrative({
+      scopeContext,
+      sourceEntities,
+      aggregatedEntityFields,
+      author,
+      narrativeRings,
+    });
   }
 
   function buildProjectContextFallbackResult({
     scopeContext,
     aggregatedEntityFields,
     sourceEntities,
-    author,
-    narrativeRings,
+    connections,
   }) {
-    const fields = {};
-    for (const fieldKey of PROJECT_CHAT_FIELD_KEYS) {
-      fields[fieldKey] = mergeProjectContextFieldLists(
-        fieldKey,
-        aggregatedEntityFields[fieldKey],
-      );
-    }
+    const analysisMap = buildProjectAnalysisMapFallback({
+      scopeContext,
+      sourceEntities,
+      connections,
+      aggregatedEntityFields,
+    });
 
     return {
-      description: buildProjectContextFallbackDescription({
-        scopeContext,
-        aggregatedEntityFields,
-        sourceEntities,
-        author,
-        narrativeRings,
-      }),
+      analysisMap,
       summary: 'Контекст собран в упрощенном режиме без полного LLM-анализа.',
       changeReason: 'fallback_after_timeout',
       missing: [],
-      fields,
     };
   }
 
@@ -1000,6 +1735,7 @@ function createAiRouter(deps) {
         type: 'project',
         projectId,
       });
+      const sourceEntities = Array.isArray(scopeContext.sourceEntities) ? scopeContext.sourceEntities : scopeContext.entities;
       const llmContextResult = llmContextTools.buildAgentLlmContext({
         scopeContext,
         history: [],
@@ -1009,11 +1745,31 @@ function createAiRouter(deps) {
       const contextData = llmContextResult.contextData;
       const reducedContextData = {
         ...toProfile(contextData),
-        entities: (Array.isArray(contextData?.entities) ? contextData.entities : []).slice(0, 80),
+        entities: (Array.isArray(sourceEntities) ? sourceEntities : [])
+          .slice(0, 80)
+          .map((entity) => {
+            const row = toProfile(entity);
+            const meta = toProfile(row.ai_metadata);
+            return {
+              id: toTrimmedString(row._id || row.id, 120),
+              type: toTrimmedString(row.type, 24),
+              name: toTrimmedString(row.name, 120),
+              description: toTrimmedString(meta.description, 2400),
+              is_me: row.is_me === true,
+              is_mine: row.is_mine === true,
+              roles: Array.isArray(meta.roles) ? meta.roles.slice(0, 4) : [],
+              status: Array.isArray(meta.status) ? meta.status.slice(0, 4) : [],
+              metrics: Array.isArray(meta.metrics) ? meta.metrics.slice(0, 3) : [],
+              risks: Array.isArray(meta.risks) ? meta.risks.slice(0, 3) : [],
+              resources: Array.isArray(meta.resources) ? meta.resources.slice(0, 3) : [],
+              outcomes: Array.isArray(meta.outcomes) ? meta.outcomes.slice(0, 3) : [],
+              location: Array.isArray(meta.location) ? meta.location.slice(0, 3) : [],
+              stage: Array.isArray(meta.stage) ? meta.stage.slice(0, 2) : [],
+            };
+          }),
         connections: (Array.isArray(contextData?.connections) ? contextData.connections : []).slice(0, 120),
         groups: (Array.isArray(contextData?.groups) ? contextData.groups : []).slice(0, 40),
       };
-      const sourceEntities = Array.isArray(scopeContext.sourceEntities) ? scopeContext.sourceEntities : scopeContext.entities;
       const aggregatedEntityFields = collectProjectAggregatedEntityFields(sourceEntities);
       const narrativeContext = buildProjectNarrativeContext({
         sourceEntities,
@@ -1063,14 +1819,20 @@ function createAiRouter(deps) {
           scopeContext,
           aggregatedEntityFields,
           sourceEntities,
-          author: narrativeContext.author,
-          narrativeRings: narrativeContext.narrativeRings,
+          connections: contextData?.connections,
         });
         payload._fallbackError = toTrimmedString(error?.message, 240);
       }
 
-      const normalizedFields = normalizeProjectContextFields(payload.fields);
-      const nextDescription = normalizeProjectContextDescription(payload.description, payload.summary);
+      const fallbackAnalysisMap = buildProjectAnalysisMapFallback({
+        scopeContext,
+        sourceEntities,
+        connections: contextData?.connections,
+      });
+      const normalizedAnalysisMap = normalizeProjectAnalysisMap(payload.analysisMap, fallbackAnalysisMap);
+      const nextDescription =
+        compileProjectDescriptionFromAnalysisMap(normalizedAnalysisMap)
+        || normalizeProjectContextDescription(payload.description, payload.summary);
       const missing = normalizeProjectContextMissing(payload.missing);
 
       const freshProject = await Entity.findOne({ _id: projectId, owner_id: ownerId });
@@ -1082,8 +1844,9 @@ function createAiRouter(deps) {
       const nextVersion = Math.max(0, Number(freshMeta.project_context_version) || 0) + 1;
       freshProject.ai_metadata = {
         ...freshMeta,
-        ...normalizedFields,
         description: nextDescription,
+        project_context_compiled_description: nextDescription,
+        project_analysis_map: normalizedAnalysisMap,
         project_context_status: 'fresh',
         project_context_source_hash: sourceHash,
         project_context_built_at: new Date().toISOString(),

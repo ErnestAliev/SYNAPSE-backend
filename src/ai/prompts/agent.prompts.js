@@ -999,23 +999,19 @@ function createAgentPrompts(deps) {
   function buildAgentContextData({ scopeContext, history, attachments }) {
     const cleanedEntities = cleanContextData(scopeContext.entities);
     const projectMetadata = toProfile(scopeContext.projectMetadata);
-    const projectFieldValues = {};
-    for (const [key, rawValue] of Object.entries(projectMetadata)) {
-      if (!Array.isArray(rawValue)) continue;
-      const values = rawValue
-        .map((item) => toTrimmedString(item, 120))
-        .filter(Boolean)
-        .slice(0, 24);
-      if (!values.length) continue;
-      projectFieldValues[key] = values;
-    }
+    const projectAnalysisMap = toProfile(projectMetadata.project_analysis_map);
     const projectContext =
       scopeContext.scopeType === 'project'
         ? {
-            description: toTrimmedString(projectMetadata.description, 3000),
+            description: toTrimmedString(
+              projectMetadata.project_context_compiled_description || projectMetadata.description,
+              4000,
+            ),
             contextStatus: toTrimmedString(projectMetadata.project_context_status, 32),
             builtAt: toTrimmedString(projectMetadata.project_context_built_at, 80),
-            fields: projectFieldValues,
+            buildMode: toTrimmedString(projectMetadata.project_context_build_mode, 24),
+            summary: toTrimmedString(projectMetadata.project_context_summary, 600),
+            analysisMap: projectAnalysisMap,
           }
         : null;
 
@@ -1048,6 +1044,25 @@ function createAgentPrompts(deps) {
       type: toTrimmedString(row.type, 24) || 'shape',
       name: toTrimmedString(row.name, 160) || '(без названия)',
       description: toTrimmedString(metadata.description || row.description, 2400),
+      is_me: row.is_me === true,
+      is_mine: row.is_mine === true,
+    };
+  }
+
+  function buildAuthorHint(llmNodes) {
+    const nodes = Array.isArray(llmNodes) ? llmNodes : [];
+    const authorNode = nodes.find((node) => node?.is_me === true)
+      || nodes.find((node) => node?.is_mine === true)
+      || null;
+    if (!authorNode) return null;
+
+    return {
+      id: toTrimmedString(authorNode.id, 120),
+      type: toTrimmedString(authorNode.type, 24),
+      name: toTrimmedString(authorNode.name, 160),
+      description: toTrimmedString(authorNode.description, 360),
+      is_me: authorNode.is_me === true,
+      is_mine: authorNode.is_mine === true,
     };
   }
 
@@ -1254,6 +1269,7 @@ function createAgentPrompts(deps) {
         name: node.name,
         description: toTrimmedString(node.description, 280),
       }));
+    const authorHint = buildAuthorHint(llmNodes);
 
     return {
       stage: sourceHistory.length > 1 ? 'follow_up' : 'initial',
@@ -1261,6 +1277,7 @@ function createAgentPrompts(deps) {
       latestUserSignals: extractUserSignals(latestUserRequestFull),
       recentUserTurns: llmHistory.slice(-3).map((item) => item.text),
       latestAssistantQuestion: extractLatestAssistantQuestion(sourceHistory),
+      author: authorHint,
       goals: goalHints,
       graphStats: {
         entities: Array.isArray(llmNodes) ? llmNodes.length : 0,
@@ -1276,6 +1293,7 @@ function createAgentPrompts(deps) {
 
   function buildAgentLlmContextData({ scopeContext, history, attachments, message }) {
     const scope = toProfile(scopeContext);
+    const projectMetadata = toProfile(scope.projectMetadata);
     const rawEntities = Array.isArray(scope.sourceEntities)
       ? scope.sourceEntities
       : Array.isArray(scope.entities)
@@ -1384,6 +1402,21 @@ function createAgentPrompts(deps) {
         totalEntities: llmNodes.length,
         contextLimit: AI_CONTEXT_ENTITY_LIMIT,
       },
+      ...(scope.scopeType === 'project'
+        ? {
+            projectContext: {
+              description: toTrimmedString(
+                projectMetadata.project_context_compiled_description || projectMetadata.description,
+                4000,
+              ),
+              contextStatus: toTrimmedString(projectMetadata.project_context_status, 32),
+              builtAt: toTrimmedString(projectMetadata.project_context_built_at, 80),
+              buildMode: toTrimmedString(projectMetadata.project_context_build_mode, 24),
+              summary: toTrimmedString(projectMetadata.project_context_summary, 600),
+              analysisMap: toProfile(projectMetadata.project_analysis_map),
+            },
+          }
+        : {}),
       entities: llmNodes,
       connections: llmEdges,
       groups: Array.isArray(scope.groups) ? scope.groups : [],
@@ -1467,7 +1500,12 @@ function createAgentPrompts(deps) {
       scopeDescription,
       'Жесткое правило: используй ТОЛЬКО данные из переданного контекста.',
       projectExtractionHint,
+      'Если в contextData.entities есть флаги is_me / is_mine или в stateSnapshot есть author, считай это личным контуром пользователя.',
+      'Важно: личный контур автора — это не единственный центр анализа, а система координат для понимания, от чьего имени ставятся цели, задаются вопросы и принимаются решения.',
+      'Используй автора как опорную точку для интерпретации целей, ресурсов, ограничений и личной роли в проекте, но не зацикливайся только на нём.',
+      'Обязательно проверяй, нет ли вне прямого авторского контура скрытых недооцененных активов, узлов, возможностей или ограничений, которые сильнее влияют на результат проекта.',
       'Критично: при конфликте между старым контекстом и новыми фактами пользователя приоритет у САМЫХ СВЕЖИХ user-сообщений.',
+      'Если в projectContext.analysisMap есть аналитическая карта проекта, используй её как основной слой понимания проекта: сущности, связи, synthesis и bottlenecks.',
       'Не повторяй дословно предыдущие ответы ассистента: каждый ход должен обновлять оценку по новым данным.',
       STRICT_FORMATTING_RULES,
     ].join('\n');
@@ -1512,6 +1550,9 @@ function createAgentPrompts(deps) {
       '',
       'Response Contract:',
       '- Сначала молча разберись в смысле вопроса, проверь релевантные связи и ограничения в переданном контексте.',
+      '- Если есть projectContext.analysisMap, сначала опирайся на него, а полный граф используй только как уточняющий слой.',
+      '- Если в stateSnapshot.author есть author или у сущностей есть is_me/is_mine, используй это как ориентир: вопрос задан из личного контура автора проекта.',
+      '- Но не своди анализ только к автору: проверь внешний контур проекта на скрытые возможности, bottlenecks и недооцененные узлы.',
       '- При конфликте с устаревшими данными используй приоритет новых фактов пользователя.',
       '- По умолчанию верни короткий прямой ответ одним абзацем без показа внутреннего анализа.',
       '- Развернутое объяснение давай только если пользователь явно запросил обоснование.',
