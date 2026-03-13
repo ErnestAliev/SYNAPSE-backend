@@ -539,27 +539,40 @@ function createAiRouter(deps) {
   function buildProjectContextFallbackDescription({
     scopeContext,
     aggregatedEntityFields,
-    currentDescription,
+    sourceEntities,
   }) {
-    const existingDescription = normalizeProjectContextDescription(currentDescription);
-    if (existingDescription) return existingDescription;
-
     const projectName = toTrimmedString(scopeContext?.projectName, 160) || 'Проект';
     const groups = Array.isArray(scopeContext?.groups) ? scopeContext.groups : [];
     const entities = Array.isArray(scopeContext?.entities) ? scopeContext.entities : [];
     const locations = Array.isArray(aggregatedEntityFields?.location) ? aggregatedEntityFields.location.slice(0, 3) : [];
     const owners = Array.isArray(aggregatedEntityFields?.owners) ? aggregatedEntityFields.owners.slice(0, 3) : [];
+    const metrics = Array.isArray(aggregatedEntityFields?.metrics) ? aggregatedEntityFields.metrics.slice(0, 2) : [];
+    const risks = Array.isArray(aggregatedEntityFields?.risks) ? aggregatedEntityFields.risks.slice(0, 2) : [];
+    const statuses = Array.isArray(aggregatedEntityFields?.status) ? aggregatedEntityFields.status.slice(0, 3) : [];
     const members = entities
-      .slice(0, 4)
+      .slice(0, 5)
       .map((entity) => toTrimmedString(entity?.name, 80))
       .filter(Boolean);
+    const entitySummary = (Array.isArray(sourceEntities) ? sourceEntities : [])
+      .map((entity) => {
+        const name = toTrimmedString(entity?.name, 80);
+        const description = toTrimmedString(toProfile(entity?.ai_metadata).description, 220);
+        if (!name || !description) return '';
+        return `${name}: ${description}`;
+      })
+      .filter(Boolean)
+      .slice(0, 3);
 
     const parts = [
-      `${projectName} включает ${entities.length} сущн.`,
-      groups.length ? `Групп: ${groups.length}.` : '',
-      members.length ? `Ключевые объекты: ${members.join(', ')}.` : '',
+      `${projectName} охватывает ${entities.length} сущностей на дашборде.`,
+      groups.length ? `Внутри уже выделено ${groups.length} групп(ы) объектов.` : '',
+      members.length ? `Ключевые сущности: ${members.join(', ')}.` : '',
       owners.length ? `Ответственные: ${owners.join(', ')}.` : '',
       locations.length ? `Локации: ${locations.join(', ')}.` : '',
+      metrics.length ? `Целевые метрики: ${metrics.join(', ')}.` : '',
+      statuses.length ? `Текущие статусы: ${statuses.join(', ')}.` : '',
+      risks.length ? `Риски: ${risks.join(', ')}.` : '',
+      entitySummary.length ? `По описаниям сущностей: ${entitySummary.join(' ')}` : '',
     ].filter(Boolean);
 
     return toTrimmedString(parts.join(' '), 900);
@@ -567,15 +580,13 @@ function createAiRouter(deps) {
 
   function buildProjectContextFallbackResult({
     scopeContext,
-    currentProjectFields,
     aggregatedEntityFields,
-    currentDescription,
+    sourceEntities,
   }) {
     const fields = {};
     for (const fieldKey of PROJECT_CHAT_FIELD_KEYS) {
       fields[fieldKey] = mergeProjectContextFieldLists(
         fieldKey,
-        currentProjectFields[fieldKey],
         aggregatedEntityFields[fieldKey],
       );
     }
@@ -584,7 +595,7 @@ function createAiRouter(deps) {
       description: buildProjectContextFallbackDescription({
         scopeContext,
         aggregatedEntityFields,
-        currentDescription,
+        sourceEntities,
       }),
       summary: 'Контекст собран в упрощенном режиме без полного LLM-анализа.',
       changeReason: 'fallback_after_timeout',
@@ -834,17 +845,11 @@ function createAiRouter(deps) {
         groups: (Array.isArray(contextData?.groups) ? contextData.groups : []).slice(0, 40),
       };
       const sourceEntities = Array.isArray(scopeContext.sourceEntities) ? scopeContext.sourceEntities : scopeContext.entities;
-      const currentProjectFields = {};
-      for (const fieldKey of PROJECT_CHAT_FIELD_KEYS) {
-        currentProjectFields[fieldKey] = Array.isArray(initialMeta[fieldKey]) ? initialMeta[fieldKey] : [];
-      }
       const aggregatedEntityFields = collectProjectAggregatedEntityFields(sourceEntities);
 
       const systemPrompt = aiPrompts.buildProjectContextBuildSystemPrompt();
       const userPrompt = aiPrompts.buildProjectContextBuildUserPrompt({
         contextData: reducedContextData,
-        currentProjectDescription: initialMeta.description,
-        currentProjectFields,
         aggregatedEntityFields,
         sourceHash,
       });
@@ -881,9 +886,8 @@ function createAiRouter(deps) {
       } catch (error) {
         payload = buildProjectContextFallbackResult({
           scopeContext,
-          currentProjectFields,
           aggregatedEntityFields,
-          currentDescription: initialMeta.description,
+          sourceEntities,
         });
         payload._fallbackError = toTrimmedString(error?.message, 240);
       }

@@ -117,11 +117,13 @@ function createProjectEnrichmentPrompts(deps) {
       'Ты Synapse12 Project Context Builder.',
       'Работай только по входному JSON-контексту без внешних фактов и догадок.',
       'Задача: собрать краткий рабочий контекст проекта по dashboard snapshot.',
+      'Источник истины для этой задачи: только description сущностей, разрешенные структурированные поля сущностей и связи/группы графа.',
+      'Нельзя использовать историю чатов сущностей, text_input, voice_input, documents, description_history и любые сырые диалоги.',
       'Нужно вернуть короткое описание проекта и заполнить структурированные поля проекта.',
       'Если данных по полю нет, верни пустой массив.',
       'Не выдумывай факты, роли, метрики и ссылки.',
       'Учитывай группы как агрегированные узлы, если они есть во входных данных.',
-      'Описание должно быть кратким, плотным по смыслу, без воды, до 900 символов.',
+      'Описание должно быть содержательным: что это за проект, какие ключевые объекты/контуры в него входят, кто отвечает, какие цели/риски/статусы уже видны. До 900 символов.',
       `Разрешенные keys в fields: ${PROJECT_CHAT_ENRICHMENT_FIELDS.join(', ')}.`,
       'links: только валидные URL.',
       'importance: только [Низкая, Средняя, Высокая], массив из 0..1 элементов.',
@@ -165,8 +167,6 @@ function createProjectEnrichmentPrompts(deps) {
 
   function buildProjectContextBuildUserPrompt({
     contextData,
-    currentProjectDescription,
-    currentProjectFields,
     aggregatedEntityFields,
     sourceHash,
   }) {
@@ -184,11 +184,7 @@ function createProjectEnrichmentPrompts(deps) {
 
     const payload = {
       scope: toProfile(contextData?.scope),
-      project: {
-        currentDescription: toTrimmedString(currentProjectDescription, 3000),
-        currentFields: toProfile(currentProjectFields),
-        sourceHash: toTrimmedString(sourceHash, 120),
-      },
+      sourceHash: toTrimmedString(sourceHash, 120),
       graph: {
         entities: compactEntities,
         connections: Array.isArray(contextData?.connections) ? contextData.connections : [],
