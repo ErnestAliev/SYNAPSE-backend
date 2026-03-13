@@ -1,10 +1,28 @@
 const { PERSON_ENTITY_RUBRIC } = require('../rubrics/person.rubric');
+const { COMPANY_ENTITY_RUBRIC } = require('../rubrics/company.rubric');
+const { GOAL_ENTITY_RUBRIC } = require('../rubrics/goal.rubric');
+const { RESULT_ENTITY_RUBRIC } = require('../rubrics/result.rubric');
 const { PERSON_GOLD_EXAMPLES } = require('../examples/person.examples');
+const { COMPANY_GOLD_EXAMPLES } = require('../examples/company.examples');
+const { GOAL_GOLD_EXAMPLES } = require('../examples/goal.examples');
+const { RESULT_GOLD_EXAMPLES } = require('../examples/result.examples');
 
 const ENTITY_PROMPT_CONFIGS = Object.freeze({
   person: Object.freeze({
     rubric: PERSON_ENTITY_RUBRIC,
     examples: PERSON_GOLD_EXAMPLES,
+  }),
+  company: Object.freeze({
+    rubric: COMPANY_ENTITY_RUBRIC,
+    examples: COMPANY_GOLD_EXAMPLES,
+  }),
+  goal: Object.freeze({
+    rubric: GOAL_ENTITY_RUBRIC,
+    examples: GOAL_GOLD_EXAMPLES,
+  }),
+  result: Object.freeze({
+    rubric: RESULT_ENTITY_RUBRIC,
+    examples: RESULT_GOLD_EXAMPLES,
   }),
 });
 
@@ -154,6 +172,48 @@ function buildPersonSections(config) {
   return lines;
 }
 
+function buildEntitySpecificSections(entityType, config) {
+  const rubric = config?.rubric;
+  const examples = Array.isArray(config?.examples) ? config.examples : [];
+  const title = String(entityType || '').toUpperCase();
+  const importanceRules = rubric?.importanceModel?.rules || [];
+  const importanceSignals = rubric?.importanceModel?.hardSignalsHigh || [];
+  const descriptionStrategy = rubric?.descriptionStrategy || [];
+  const fieldRules = rubric?.fieldRules || [];
+  const hardMistakes = rubric?.hardMistakes || [];
+
+  const lines = [
+    `ДОПОЛНИТЕЛЬНЫЕ ПРАВИЛА ДЛЯ ${title}:`,
+    `Анализируй ${entityType} не формально, а через его реальную ценность для системы.`,
+    '',
+    ...formatBulletSection('КАК ПИСАТЬ DESCRIPTION:', descriptionStrategy),
+    ...formatBulletSection(`КАК ОПРЕДЕЛЯТЬ IMPORTANCE ДЛЯ ${title}:`, importanceRules),
+    ...formatBulletSection('СИГНАЛЫ, ПРИ КОТОРЫХ IMPORTANCE НЕ ДОЛЖНА БЫТЬ НИЖЕ "ВЫСОКАЯ":', importanceSignals),
+    ...formatBulletSection(`ПРАВИЛА ДЛЯ ПОЛЕЙ ${title}:`, fieldRules),
+    ...formatBulletSection(`КРИТИЧЕСКИЕ ОШИБКИ ДЛЯ ${title}:`, hardMistakes),
+  ];
+
+  if (examples.length) {
+    lines.push(`ЭТАЛОННЫЕ МИНИ-ПРИМЕРЫ ДЛЯ ${title}:`);
+    for (const example of examples) {
+      if (!example || typeof example !== 'object') continue;
+      lines.push(`- Вход: ${example.input}`);
+      lines.push(`  Выход: description="${example.output.description}"`);
+      lines.push(`  importance="${example.output.importance}"`);
+      if (Array.isArray(example.output.roles)) lines.push(`  roles=${JSON.stringify(example.output.roles)}`);
+      if (Array.isArray(example.output.skills)) lines.push(`  skills=${JSON.stringify(example.output.skills)}`);
+      if (Array.isArray(example.output.tags)) lines.push(`  tags=${JSON.stringify(example.output.tags)}`);
+      if (Array.isArray(example.output.industry)) lines.push(`  industry=${JSON.stringify(example.output.industry)}`);
+      if (Array.isArray(example.output.priority)) lines.push(`  priority=${JSON.stringify(example.output.priority)}`);
+      if (Array.isArray(example.output.metrics)) lines.push(`  metrics=${JSON.stringify(example.output.metrics)}`);
+      if (Array.isArray(example.output.outcomes)) lines.push(`  outcomes=${JSON.stringify(example.output.outcomes)}`);
+    }
+    lines.push('');
+  }
+
+  return lines;
+}
+
 function buildEntityTypeSpecificSections(entityType) {
   const config = ENTITY_PROMPT_CONFIGS[entityType];
   if (!config) return [];
@@ -162,7 +222,7 @@ function buildEntityTypeSpecificSections(entityType) {
     return buildPersonSections(config);
   }
 
-  return [];
+  return buildEntitySpecificSections(entityType, config);
 }
 
 function buildSuggestedNameSection(entityType) {
