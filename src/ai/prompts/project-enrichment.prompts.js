@@ -123,6 +123,10 @@ function createProjectEnrichmentPrompts(deps) {
       'Если данных по полю нет, верни пустой массив.',
       'Не выдумывай факты, роли, метрики и ссылки.',
       'Учитывай группы как агрегированные узлы, если они есть во входных данных.',
+      'Строй описание как тезисное повествование, а не как набор слов или перечисление тегов.',
+      'Если во входе указан author, начинай с него как с центра контекста: кто это, чем он занимается в проекте, что находится в его ближайшем рабочем круге, какие объекты/люди/контуры вокруг него, к каким целям это ведет и какие ограничения уже видны.',
+      'Двигайся по спирали: автор -> ближайшие сущности и связи -> проектный контур -> цели/метрики -> риски/статусы.',
+      'Связывай тезисы причинно-следственно: кто управляет чем, зачем это делается, что уже происходит, что ограничивает движение.',
       'Описание должно быть содержательным: что это за проект, какие ключевые объекты/контуры в него входят, кто отвечает, какие цели/риски/статусы уже видны. До 900 символов.',
       `Разрешенные keys в fields: ${PROJECT_CHAT_ENRICHMENT_FIELDS.join(', ')}.`,
       'links: только валидные URL.',
@@ -168,6 +172,8 @@ function createProjectEnrichmentPrompts(deps) {
   function buildProjectContextBuildUserPrompt({
     contextData,
     aggregatedEntityFields,
+    author,
+    narrativeRings,
     sourceHash,
   }) {
     const compactEntities = (Array.isArray(contextData?.entities) ? contextData.entities : [])
@@ -185,6 +191,8 @@ function createProjectEnrichmentPrompts(deps) {
     const payload = {
       scope: toProfile(contextData?.scope),
       sourceHash: toTrimmedString(sourceHash, 120),
+      author: toProfile(author),
+      narrativeRings: toProfile(narrativeRings),
       graph: {
         entities: compactEntities,
         connections: Array.isArray(contextData?.connections) ? contextData.connections : [],

@@ -515,6 +515,90 @@ function createAiRouter(deps) {
     return values;
   }
 
+  function pickProjectAuthorEntity(sourceEntities) {
+    const entities = Array.isArray(sourceEntities) ? sourceEntities : [];
+    const authorByMe = entities.find((entity) => entity?.is_me === true);
+    if (authorByMe) return authorByMe;
+    const authorByMine = entities.find((entity) => entity?.is_mine === true);
+    if (authorByMine) return authorByMine;
+    return entities.find((entity) => entity?.type === 'person') || entities[0] || null;
+  }
+
+  function buildProjectEntityNarrativeCard(entity) {
+    const row = toProfile(entity);
+    const meta = toProfile(row.ai_metadata);
+    const name = toTrimmedString(row.name, 120);
+    if (!name) return null;
+    const pickList = (fieldKey, maxItems = 3, maxLen = 72) => {
+      return (Array.isArray(meta[fieldKey]) ? meta[fieldKey] : [])
+        .map((item) => toTrimmedString(item, maxLen))
+        .filter(Boolean)
+        .slice(0, maxItems);
+    };
+
+    return {
+      id: toTrimmedString(row._id, 120),
+      name,
+      type: toTrimmedString(row.type, 24),
+      isAuthor: row.is_me === true || row.is_mine === true,
+      description: toTrimmedString(meta.description, 320),
+      roles: pickList('roles'),
+      status: pickList('status'),
+      metrics: pickList('metrics', 2, 96),
+      risks: pickList('risks', 2, 96),
+      locations: pickList('location', 2, 80),
+    };
+  }
+
+  function buildProjectNarrativeContext({ sourceEntities, connections }) {
+    const entities = Array.isArray(sourceEntities) ? sourceEntities : [];
+    const authorEntity = pickProjectAuthorEntity(entities);
+    const cards = entities
+      .map((entity) => ({ entity, card: buildProjectEntityNarrativeCard(entity) }))
+      .filter((item) => Boolean(item.card));
+
+    const authorCard = authorEntity ? buildProjectEntityNarrativeCard(authorEntity) : null;
+    if (!authorCard) {
+      return {
+        author: null,
+        narrativeRings: {
+          inner: cards.slice(0, 4).map((item) => item.card),
+          outer: cards.slice(4, 8).map((item) => item.card),
+        },
+      };
+    }
+
+    const authorName = authorCard.name.toLowerCase();
+    const connectionNames = new Set();
+    for (const rawConnection of Array.isArray(connections) ? connections : []) {
+      const connection = toProfile(rawConnection);
+      const from = toTrimmedString(connection.from, 120);
+      const to = toTrimmedString(connection.to, 120);
+      if (!from || !to) continue;
+      if (from.toLowerCase() === authorName) connectionNames.add(to.toLowerCase());
+      if (to.toLowerCase() === authorName) connectionNames.add(from.toLowerCase());
+    }
+
+    const inner = [];
+    const outer = [];
+    for (const item of cards) {
+      if (!item.card || item.card.name.toLowerCase() === authorName) continue;
+      if (connectionNames.has(item.card.name.toLowerCase())) {
+        inner.push(item.card);
+      } else {
+        outer.push(item.card);
+      }
+    }
+
+    return {
+      author: authorCard,
+      narrativeRings: {
+        inner: inner.slice(0, 5),
+        outer: outer.slice(0, 6),
+      },
+    };
+  }
+
   function mergeProjectContextFieldLists(fieldKey, ...lists) {
     const config = PROJECT_CHAT_FIELD_CONFIGS[fieldKey];
     const dedup = new Set();
@@ -540,18 +624,30 @@ function createAiRouter(deps) {
     scopeContext,
     aggregatedEntityFields,
     sourceEntities,
+    author,
+    narrativeRings,
   }) {
     const projectName = toTrimmedString(scopeContext?.projectName, 160) || 'Проект';
     const groups = Array.isArray(scopeContext?.groups) ? scopeContext.groups : [];
     const entities = Array.isArray(scopeContext?.entities) ? scopeContext.entities : [];
+    const authorCard = toProfile(author);
+    const authorName = toTrimmedString(authorCard.name, 120);
+    const authorDescription = toTrimmedString(authorCard.description, 220);
+    const authorRoles = Array.isArray(authorCard.roles) ? authorCard.roles.slice(0, 2) : [];
+    const innerRing = Array.isArray(toProfile(narrativeRings).inner) ? toProfile(narrativeRings).inner : [];
+    const outerRing = Array.isArray(toProfile(narrativeRings).outer) ? toProfile(narrativeRings).outer : [];
     const locations = Array.isArray(aggregatedEntityFields?.location) ? aggregatedEntityFields.location.slice(0, 3) : [];
     const owners = Array.isArray(aggregatedEntityFields?.owners) ? aggregatedEntityFields.owners.slice(0, 3) : [];
     const metrics = Array.isArray(aggregatedEntityFields?.metrics) ? aggregatedEntityFields.metrics.slice(0, 2) : [];
     const risks = Array.isArray(aggregatedEntityFields?.risks) ? aggregatedEntityFields.risks.slice(0, 2) : [];
     const statuses = Array.isArray(aggregatedEntityFields?.status) ? aggregatedEntityFields.status.slice(0, 3) : [];
-    const members = entities
-      .slice(0, 5)
-      .map((entity) => toTrimmedString(entity?.name, 80))
+    const members = innerRing
+      .slice(0, 4)
+      .map((entity) => toTrimmedString(toProfile(entity).name, 80))
+      .filter(Boolean);
+    const outerMembers = outerRing
+      .slice(0, 4)
+      .map((entity) => toTrimmedString(toProfile(entity).name, 80))
       .filter(Boolean);
     const entitySummary = (Array.isArray(sourceEntities) ? sourceEntities : [])
       .map((entity) => {
@@ -561,18 +657,26 @@ function createAiRouter(deps) {
         return `${name}: ${description}`;
       })
       .filter(Boolean)
-      .slice(0, 3);
+      .slice(0, 2);
 
     const parts = [
-      `${projectName} охватывает ${entities.length} сущностей на дашборде.`,
-      groups.length ? `Внутри уже выделено ${groups.length} групп(ы) объектов.` : '',
-      members.length ? `Ключевые сущности: ${members.join(', ')}.` : '',
-      owners.length ? `Ответственные: ${owners.join(', ')}.` : '',
-      locations.length ? `Локации: ${locations.join(', ')}.` : '',
-      metrics.length ? `Целевые метрики: ${metrics.join(', ')}.` : '',
-      statuses.length ? `Текущие статусы: ${statuses.join(', ')}.` : '',
-      risks.length ? `Риски: ${risks.join(', ')}.` : '',
-      entitySummary.length ? `По описаниям сущностей: ${entitySummary.join(' ')}` : '',
+      authorName
+        ? `В центре проекта «${projectName}» находится ${authorName}${authorRoles.length ? `, ${authorRoles.join(', ')}` : ''}.`
+        : `Проект «${projectName}» собран вокруг центрального рабочего контура.`,
+      authorDescription ? `${authorDescription}.` : '',
+      members.length
+        ? `${authorName || 'Он'} напрямую связан с контуром: ${members.join(', ')}.`
+        : entities.length ? `На дашборде сейчас собрано ${entities.length} сущностей.` : '',
+      outerMembers.length
+        ? `Следующим слоем идут объекты и направления: ${outerMembers.join(', ')}.`
+        : groups.length ? `В проекте уже выделено ${groups.length} групп(ы) объектов.` : '',
+      metrics.length || statuses.length
+        ? `Движение проекта задают ${metrics.length ? `метрики ${metrics.join(', ')}` : 'текущие рабочие статусы'}${statuses.length ? `, при этом уже видны статусы: ${statuses.join(', ')}` : ''}.`
+        : '',
+      risks.length || owners.length || locations.length
+        ? `${owners.length ? `Ответственность закреплена за ${owners.join(', ')}` : 'Контур ответственности уже просматривается'}${locations.length ? `; география проекта: ${locations.join(', ')}` : ''}${risks.length ? `; главные ограничения: ${risks.join(', ')}` : ''}.`
+        : '',
+      entitySummary.length ? `По описаниям сущностей это выражается так: ${entitySummary.join(' ')}` : '',
     ].filter(Boolean);
 
     return toTrimmedString(parts.join(' '), 900);
@@ -582,6 +686,8 @@ function createAiRouter(deps) {
     scopeContext,
     aggregatedEntityFields,
     sourceEntities,
+    author,
+    narrativeRings,
   }) {
     const fields = {};
     for (const fieldKey of PROJECT_CHAT_FIELD_KEYS) {
@@ -596,6 +702,8 @@ function createAiRouter(deps) {
         scopeContext,
         aggregatedEntityFields,
         sourceEntities,
+        author,
+        narrativeRings,
       }),
       summary: 'Контекст собран в упрощенном режиме без полного LLM-анализа.',
       changeReason: 'fallback_after_timeout',
@@ -846,11 +954,17 @@ function createAiRouter(deps) {
       };
       const sourceEntities = Array.isArray(scopeContext.sourceEntities) ? scopeContext.sourceEntities : scopeContext.entities;
       const aggregatedEntityFields = collectProjectAggregatedEntityFields(sourceEntities);
+      const narrativeContext = buildProjectNarrativeContext({
+        sourceEntities,
+        connections: reducedContextData.connections,
+      });
 
       const systemPrompt = aiPrompts.buildProjectContextBuildSystemPrompt();
       const userPrompt = aiPrompts.buildProjectContextBuildUserPrompt({
         contextData: reducedContextData,
         aggregatedEntityFields,
+        author: narrativeContext.author,
+        narrativeRings: narrativeContext.narrativeRings,
         sourceHash,
       });
 
@@ -888,6 +1002,8 @@ function createAiRouter(deps) {
           scopeContext,
           aggregatedEntityFields,
           sourceEntities,
+          author: narrativeContext.author,
+          narrativeRings: narrativeContext.narrativeRings,
         });
         payload._fallbackError = toTrimmedString(error?.message, 240);
       }
