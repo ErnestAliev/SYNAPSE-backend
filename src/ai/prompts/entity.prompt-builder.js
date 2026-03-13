@@ -2,10 +2,22 @@ const { PERSON_ENTITY_RUBRIC } = require('../rubrics/person.rubric');
 const { COMPANY_ENTITY_RUBRIC } = require('../rubrics/company.rubric');
 const { GOAL_ENTITY_RUBRIC } = require('../rubrics/goal.rubric');
 const { RESULT_ENTITY_RUBRIC } = require('../rubrics/result.rubric');
+const { RESOURCE_ENTITY_RUBRIC } = require('../rubrics/resource.rubric');
+const { TASK_ENTITY_RUBRIC } = require('../rubrics/task.rubric');
+const { EVENT_ENTITY_RUBRIC } = require('../rubrics/event.rubric');
+const { CONNECTION_ENTITY_RUBRIC } = require('../rubrics/connection.rubric');
+const { PROJECT_ENTITY_RUBRIC } = require('../rubrics/project.rubric');
+const { SHAPE_ENTITY_RUBRIC } = require('../rubrics/shape.rubric');
 const { PERSON_GOLD_EXAMPLES } = require('../examples/person.examples');
 const { COMPANY_GOLD_EXAMPLES } = require('../examples/company.examples');
 const { GOAL_GOLD_EXAMPLES } = require('../examples/goal.examples');
 const { RESULT_GOLD_EXAMPLES } = require('../examples/result.examples');
+const { RESOURCE_GOLD_EXAMPLES } = require('../examples/resource.examples');
+const { TASK_GOLD_EXAMPLES } = require('../examples/task.examples');
+const { EVENT_GOLD_EXAMPLES } = require('../examples/event.examples');
+const { CONNECTION_GOLD_EXAMPLES } = require('../examples/connection.examples');
+const { PROJECT_GOLD_EXAMPLES } = require('../examples/project.examples');
+const { SHAPE_GOLD_EXAMPLES } = require('../examples/shape.examples');
 
 const ENTITY_PROMPT_CONFIGS = Object.freeze({
   person: Object.freeze({
@@ -23,6 +35,30 @@ const ENTITY_PROMPT_CONFIGS = Object.freeze({
   result: Object.freeze({
     rubric: RESULT_ENTITY_RUBRIC,
     examples: RESULT_GOLD_EXAMPLES,
+  }),
+  resource: Object.freeze({
+    rubric: RESOURCE_ENTITY_RUBRIC,
+    examples: RESOURCE_GOLD_EXAMPLES,
+  }),
+  task: Object.freeze({
+    rubric: TASK_ENTITY_RUBRIC,
+    examples: TASK_GOLD_EXAMPLES,
+  }),
+  event: Object.freeze({
+    rubric: EVENT_ENTITY_RUBRIC,
+    examples: EVENT_GOLD_EXAMPLES,
+  }),
+  connection: Object.freeze({
+    rubric: CONNECTION_ENTITY_RUBRIC,
+    examples: CONNECTION_GOLD_EXAMPLES,
+  }),
+  project: Object.freeze({
+    rubric: PROJECT_ENTITY_RUBRIC,
+    examples: PROJECT_GOLD_EXAMPLES,
+  }),
+  shape: Object.freeze({
+    rubric: SHAPE_ENTITY_RUBRIC,
+    examples: SHAPE_GOLD_EXAMPLES,
   }),
 });
 
@@ -200,13 +236,11 @@ function buildEntitySpecificSections(entityType, config) {
       lines.push(`- Вход: ${example.input}`);
       lines.push(`  Выход: description="${example.output.description}"`);
       lines.push(`  importance="${example.output.importance}"`);
-      if (Array.isArray(example.output.roles)) lines.push(`  roles=${JSON.stringify(example.output.roles)}`);
-      if (Array.isArray(example.output.skills)) lines.push(`  skills=${JSON.stringify(example.output.skills)}`);
-      if (Array.isArray(example.output.tags)) lines.push(`  tags=${JSON.stringify(example.output.tags)}`);
-      if (Array.isArray(example.output.industry)) lines.push(`  industry=${JSON.stringify(example.output.industry)}`);
-      if (Array.isArray(example.output.priority)) lines.push(`  priority=${JSON.stringify(example.output.priority)}`);
-      if (Array.isArray(example.output.metrics)) lines.push(`  metrics=${JSON.stringify(example.output.metrics)}`);
-      if (Array.isArray(example.output.outcomes)) lines.push(`  outcomes=${JSON.stringify(example.output.outcomes)}`);
+      const exampleFields = Object.entries(example.output)
+        .filter(([key, value]) => !['description', 'importance'].includes(key) && Array.isArray(value));
+      for (const [key, value] of exampleFields) {
+        lines.push(`  ${key}=${JSON.stringify(value)}`);
+      }
     }
     lines.push('');
   }
