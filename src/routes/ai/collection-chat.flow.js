@@ -87,8 +87,8 @@ function createCollectionChatFlow({ deps, helpers }) {
       : '';
 
     const deepModel =
-      toTrimmedString(OPENAI_DEEP_MODEL, 120) ||
       toTrimmedString(OPENAI_PROJECT_MODEL, 120) ||
+      toTrimmedString(OPENAI_MODEL, 120) ||
       'gpt-5';
     const requestPreviewBeforeRoleInjection = hasQuestion && typeof aiProvider.previewOpenAiAgentRequest === 'function'
       ? aiProvider.previewOpenAiAgentRequest({
@@ -244,8 +244,8 @@ function createCollectionChatFlow({ deps, helpers }) {
     });
     const detectedRole = resolveCompatibleDetectedRole(roleSelection, normalizedRoleHint);
     const deepModel =
-      toTrimmedString(OPENAI_DEEP_MODEL, 120) ||
       toTrimmedString(OPENAI_PROJECT_MODEL, 120) ||
+      toTrimmedString(OPENAI_MODEL, 120) ||
       'gpt-5';
 
     const systemPrompt = aiPrompts.buildAgentSystemPrompt(contextData);
