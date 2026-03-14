@@ -209,59 +209,47 @@ function createAiRouter(deps) {
         missing: { type: 'array', items: { type: 'string' } },
         analysisMap: {
           type: 'object',
-          required: ['project_name', 'author_context', 'entities', 'connections', 'project_synthesis'],
+          required: ['project_name', 'author_entity_id', 'entities', 'connections', 'project_synthesis'],
           additionalProperties: false,
           properties: {
             project_name: { type: 'string' },
-            author_context: {
-              type: 'object',
-              required: ['entity_id', 'name', 'role_in_project', 'why_matters'],
-              additionalProperties: false,
-              properties: {
-                entity_id: { type: 'string' },
-                name: { type: 'string' },
-                role_in_project: { type: 'string' },
-                why_matters: { type: 'string' },
-              },
-            },
+            author_entity_id: { type: 'string' },
             entities: {
               type: 'array',
               items: {
                 type: 'object',
                 required: [
                   'entity_id',
-                  'name',
                   'type',
-                  'role_in_project',
+                  'name',
                   'summary',
                   'strengths',
                   'weaknesses',
                   'opportunities',
                   'risks',
-                  'importance',
-                  'why_now',
-                  'relation_to_author',
-                  'relation_to_goal',
-                  'stage',
-                  'evidence',
+                  'goal_relevance',
+                  'confidence',
+                  'internal_score',
+                  'final_score',
+                  'score_reason',
+                  'background',
                 ],
                 additionalProperties: false,
                 properties: {
                   entity_id: { type: 'string' },
-                  name: { type: 'string' },
                   type: { type: 'string' },
-                  role_in_project: { type: 'string' },
+                  name: { type: 'string' },
                   summary: { type: 'string' },
                   strengths: { type: 'array', items: { type: 'string' } },
                   weaknesses: { type: 'array', items: { type: 'string' } },
                   opportunities: { type: 'array', items: { type: 'string' } },
                   risks: { type: 'array', items: { type: 'string' } },
-                  importance: { type: 'integer', minimum: 0, maximum: 100 },
-                  why_now: { type: 'string' },
-                  relation_to_author: { type: 'string' },
-                  relation_to_goal: { type: 'string' },
-                  stage: { type: 'string' },
-                  evidence: { type: 'array', items: { type: 'string' } },
+                  goal_relevance: { type: 'integer', minimum: 0, maximum: 100 },
+                  confidence: { type: 'integer', minimum: 0, maximum: 100 },
+                  internal_score: { type: 'integer', minimum: 0, maximum: 100 },
+                  final_score: { type: 'integer', minimum: 0, maximum: 100 },
+                  score_reason: { type: 'string' },
+                  background: { type: 'boolean' },
                 },
               },
             },
@@ -269,15 +257,18 @@ function createAiRouter(deps) {
               type: 'array',
               items: {
                 type: 'object',
-                required: ['from', 'to', 'label', 'meaning', 'impact', 'strength'],
+                required: ['from', 'to', 'label', 'meaning', 'polarity', 'strength', 'goal_relevance', 'final_score', 'score_reason'],
                 additionalProperties: false,
                 properties: {
                   from: { type: 'string' },
                   to: { type: 'string' },
                   label: { type: 'string' },
                   meaning: { type: 'string' },
-                  impact: { type: 'string', enum: ['positive', 'negative', 'neutral'] },
+                  polarity: { type: 'string', enum: ['positive', 'negative', 'neutral'] },
                   strength: { type: 'integer', minimum: 0, maximum: 100 },
+                  goal_relevance: { type: 'integer', minimum: 0, maximum: 100 },
+                  final_score: { type: 'integer', minimum: -100, maximum: 100 },
+                  score_reason: { type: 'string' },
                 },
               },
             },
@@ -285,20 +276,20 @@ function createAiRouter(deps) {
               type: 'object',
               required: [
                 'main_goal',
-                'current_engine',
-                'main_bottleneck',
-                'hidden_leverage',
-                'critical_constraint',
+                'top_drivers',
+                'top_constraints',
+                'weak_background_entities',
+                'missing_elements',
                 'next_focus',
                 'confidence',
               ],
               additionalProperties: false,
               properties: {
                 main_goal: { type: 'string' },
-                current_engine: { type: 'string' },
-                main_bottleneck: { type: 'string' },
-                hidden_leverage: { type: 'string' },
-                critical_constraint: { type: 'string' },
+                top_drivers: { type: 'array', items: { type: 'string' } },
+                top_constraints: { type: 'array', items: { type: 'string' } },
+                weak_background_entities: { type: 'array', items: { type: 'string' } },
+                missing_elements: { type: 'array', items: { type: 'string' } },
                 next_focus: { type: 'string' },
                 confidence: { type: 'integer', minimum: 0, maximum: 100 },
               },
@@ -884,147 +875,109 @@ function createAiRouter(deps) {
     return clampProjectScore(score, 55);
   }
 
+  function buildProjectDegradedSummary(entity, maxLength = 160) {
+    const sentence = buildEntityDescriptionSentences(entity, 1, maxLength)[0];
+    return sentence || toTrimmedString(entity?.name, maxLength);
+  }
+
+  function computeEntityFinalScore(internalScore, goalRelevance, confidence) {
+    const normalized = (clampProjectScore(internalScore) / 100)
+      * (clampProjectScore(goalRelevance) / 100)
+      * (clampProjectScore(confidence) / 100);
+    return clampProjectScore(Math.round(normalized * 100));
+  }
+
+  function getConnectionPolarityModifier(polarity) {
+    if (polarity === 'positive') return 1;
+    if (polarity === 'negative') return -1;
+    return 0.3;
+  }
+
+  function computeConnectionFinalScore(strength, goalRelevance, polarity) {
+    const normalized = (clampProjectScore(strength) / 100)
+      * (clampProjectScore(goalRelevance) / 100)
+      * getConnectionPolarityModifier(polarity);
+    return Math.max(-100, Math.min(100, Math.round(normalized * 100)));
+  }
+
+  function normalizeProjectEntityShortList(rawValues, maxItems = 4, maxLength = 120) {
+    return normalizeProjectAnalysisList(rawValues, { maxItems, maxLength });
+  }
+
+  function resolveProjectAuthorEntityId(sourceEntities) {
+    const authorEntity = pickProjectAuthorEntity(sourceEntities);
+    return normalizeProjectEntityId(authorEntity?._id || authorEntity?.id, 120);
+  }
+
   function buildProjectAnalysisMapFallback({
     scopeContext,
     sourceEntities,
     connections,
   }) {
-    const entities = Array.isArray(sourceEntities) ? sourceEntities : [];
-    const authorEntity = pickProjectAuthorEntity(entities);
-    const { byEntityId, pairLabels } = buildProjectConnectionIndex(connections);
-    const goalEntityIds = new Set(
-      entities
-        .filter((entity) => ['goal', 'result'].includes(toTrimmedString(entity?.type, 24)))
-        .map((entity) => normalizeProjectEntityId(entity?._id || entity?.id, 120))
-        .filter(Boolean),
-    );
-
-    const entityMap = entities
+    const entities = (Array.isArray(sourceEntities) ? sourceEntities : [])
       .map((entity) => {
         const row = toProfile(entity);
         const entityId = normalizeProjectEntityId(row._id || row.id, 120);
         const name = toTrimmedString(row.name, 120);
         if (!entityId || !name) return null;
-        const relationLabels = normalizeProjectAnalysisList(pairLabels.get(`${entityId}|${normalizeProjectEntityId(authorEntity?._id || authorEntity?.id, 120)}`) || [], {
-          maxItems: 2,
-          maxLength: 96,
-        });
-        const roleInProject = deriveProjectEntityRole(entity, authorEntity, relationLabels);
-        const strengths = deriveProjectEntityStrengths(entity);
-        const weaknesses = deriveProjectEntityWeaknesses(entity);
-        const opportunities = deriveProjectEntityOpportunities(entity);
-        const risks = deriveProjectEntityRisks(entity);
-        const stage = deriveProjectEntityStage(entity);
-        const importance = buildProjectEntityImportance(entity, byEntityId.get(entityId) || 0);
+        const summary = buildProjectDegradedSummary(entity, 160);
         return {
           entity_id: entityId,
+          type: toTrimmedString(row.type, 24) || 'shape',
           name,
-          type: toTrimmedString(row.type, 24),
-          role_in_project: roleInProject,
-          summary: deriveProjectEntitySummary(entity, roleInProject),
-          strengths,
-          weaknesses,
-          opportunities,
-          risks,
-          importance,
-          why_now: deriveProjectEntityWhyNow(entity, { opportunities, weaknesses, risks }),
-          relation_to_author: deriveProjectEntityAuthorRelation(entity, authorEntity, pairLabels),
-          relation_to_goal: deriveProjectEntityGoalRelation(entity, goalEntityIds),
-          stage,
-          evidence: pickProjectEntityEvidence(entity),
+          summary,
+          strengths: [],
+          weaknesses: [],
+          opportunities: [],
+          risks: [],
+          goal_relevance: 0,
+          confidence: summary ? 10 : 0,
+          internal_score: 0,
+          final_score: 0,
+          score_reason: 'LLM build failed; only raw snapshot preserved.',
+          background: true,
         };
       })
-      .filter(Boolean)
-      .sort((left, right) => right.importance - left.importance);
+      .filter(Boolean);
 
-    const entitiesById = new Map(entityMap.map((item) => [item.entity_id, item]));
-    const normalizedConnections = (Array.isArray(connections) ? connections : [])
+    const entityIds = new Set(entities.map((entity) => entity.entity_id));
+    const degradedConnections = (Array.isArray(connections) ? connections : [])
       .map((rawConnection) => {
         const connection = toProfile(rawConnection);
-        const from = toTrimmedString(connection.from, 120);
-        const to = toTrimmedString(connection.to, 120);
-        if (!from || !to || !entitiesById.has(from) || !entitiesById.has(to)) return null;
-        const label = toTrimmedString(connection.label, 120) || toTrimmedString(connection.type, 80);
-        const fromName = entitiesById.get(from)?.name || from;
-        const toName = entitiesById.get(to)?.name || to;
+        const from = toTrimmedString(connection.from || connection.source, 120);
+        const to = toTrimmedString(connection.to || connection.target, 120);
+        if (!from || !to || !entityIds.has(from) || !entityIds.has(to)) return null;
         return {
           from,
           to,
-          label,
-          meaning: label
-            ? `${fromName} связан с ${toName} через "${label}".`
-            : `${fromName} связан с ${toName}.`,
-          impact: deriveProjectConnectionImpact(connection),
-          strength: buildProjectConnectionStrength(connection, entitiesById),
+          label: toTrimmedString(connection.label, 120),
+          meaning: toTrimmedString(
+            connection.description || connection.meaning || connection.semanticMeaning || connection.summary || connection.label,
+            240,
+          ),
+          polarity: 'neutral',
+          strength: 0,
+          goal_relevance: 0,
+          final_score: 0,
+          score_reason: 'LLM build failed; connection not evaluated.',
         };
       })
       .filter(Boolean)
       .slice(0, 160);
 
-    const topEntities = entityMap.slice(0, 4);
-    const topPositiveEntity = entityMap.find((item) => item.strengths.length || item.opportunities.length) || entityMap[0] || null;
-    const topRiskEntity = entityMap.find((item) => item.weaknesses.length || item.risks.length) || entityMap[0] || null;
-    const hiddenLeverageEntity = [...entityMap]
-      .sort((left, right) => {
-        const leftSignal = left.opportunities.length * 20 - left.weaknesses.length * 5 - left.risks.length * 5;
-        const rightSignal = right.opportunities.length * 20 - right.weaknesses.length * 5 - right.risks.length * 5;
-        return rightSignal - leftSignal;
-      })
-      .find((item) => item && item.entity_id !== topPositiveEntity?.entity_id)
-      || topPositiveEntity
-      || null;
-
-    const authorContext = authorEntity
-      ? {
-          entity_id: normalizeProjectEntityId(authorEntity._id || authorEntity.id, 120),
-          name: toTrimmedString(authorEntity.name, 120),
-          role_in_project: deriveProjectEntityRole(authorEntity, authorEntity),
-          why_matters: deriveProjectEntityWhyNow(authorEntity, {
-            opportunities: deriveProjectEntityOpportunities(authorEntity),
-            weaknesses: deriveProjectEntityWeaknesses(authorEntity),
-            risks: deriveProjectEntityRisks(authorEntity),
-          }),
-        }
-      : {
-          entity_id: '',
-          name: '',
-          role_in_project: '',
-          why_matters: '',
-        };
-
-    const goalEntity = entityMap.find((item) => item.type === 'goal' || item.type === 'result') || null;
-    const evidenceCount = entityMap.reduce((sum, item) => sum + item.evidence.length, 0);
-
     return {
       project_name: toTrimmedString(scopeContext?.projectName, 160) || 'Проект',
-      author_context: authorContext,
-      entities: entityMap,
-      connections: normalizedConnections,
+      author_entity_id: resolveProjectAuthorEntityId(sourceEntities),
+      entities,
+      connections: degradedConnections,
       project_synthesis: {
-        main_goal:
-          goalEntity?.summary
-          || firstProjectAnalysisValue(toProfile(topPositiveEntity).relation_to_goal, 220)
-          || 'Цель проекта требует уточнения.',
-        current_engine: topEntities.length
-          ? `Текущий двигатель проекта держится на ${topEntities.slice(0, 3).map((item) => item.name).join(', ')}.`
-          : 'Текущий двигатель проекта не выявлен.',
-        main_bottleneck:
-          topRiskEntity?.weaknesses[0]
-          || topRiskEntity?.risks[0]
-          || 'Главное ограничение пока не выделено.',
-        hidden_leverage:
-          hiddenLeverageEntity?.opportunities[0]
-          || hiddenLeverageEntity?.strengths[0]
-          || 'Скрытое leverage пока не выделено.',
-        critical_constraint:
-          topRiskEntity?.risks[0]
-          || topRiskEntity?.weaknesses[0]
-          || 'Критическое ограничение пока не выделено.',
-        next_focus:
-          topRiskEntity
-            ? `Сфокусироваться на ${topRiskEntity.name}: ${topRiskEntity.why_now}`
-            : 'Собрать более полную карту проекта и уточнить главный bottleneck.',
-        confidence: clampProjectScore(35 + entityMap.length * 3 + normalizedConnections.length * 2 + evidenceCount * 2, 62),
+        main_goal: '',
+        top_drivers: [],
+        top_constraints: [],
+        weak_background_entities: entities.map((entity) => entity.entity_id).slice(0, 12),
+        missing_elements: ['LLM build failed; synthesis unavailable.'],
+        next_focus: '',
+        confidence: 0,
       },
     };
   }
@@ -1032,47 +985,108 @@ function createAiRouter(deps) {
   function normalizeProjectAnalysisEntity(rawValue, fallbackValue = {}) {
     const raw = toProfile(rawValue);
     const fallback = toProfile(fallbackValue);
+    const type = toTrimmedString(raw.type, 24) || toTrimmedString(fallback.type, 24) || 'shape';
+    const name = toTrimmedString(raw.name, 120) || toTrimmedString(fallback.name, 120);
+    const summary = toTrimmedString(raw.summary, 220) || toTrimmedString(fallback.summary, 220);
+    const strengths = normalizeProjectEntityShortList(raw.strengths, 4, 120);
+    const weaknesses = normalizeProjectEntityShortList(raw.weaknesses, 4, 120);
+    const opportunities = normalizeProjectEntityShortList(raw.opportunities, 4, 120);
+    const risks = normalizeProjectEntityShortList(raw.risks, 4, 120);
+    const goalRelevance = clampProjectScore(raw.goal_relevance, fallback.goal_relevance);
+    const confidence = clampProjectScore(raw.confidence, fallback.confidence);
+    const internalScore = clampProjectScore(raw.internal_score, fallback.internal_score);
+    const finalScore = computeEntityFinalScore(internalScore, goalRelevance, confidence);
+    const background = raw.background === true || (raw.background !== false && finalScore <= 10);
+
     return {
-      entity_id: toTrimmedString(raw.entity_id, 120) || toTrimmedString(fallback.entity_id, 120),
-      name: toTrimmedString(raw.name, 120) || toTrimmedString(fallback.name, 120),
-      type: toTrimmedString(raw.type, 24) || toTrimmedString(fallback.type, 24) || 'shape',
-      role_in_project: toTrimmedString(raw.role_in_project, 180) || toTrimmedString(fallback.role_in_project, 180),
-      summary: toTrimmedString(raw.summary, 260) || toTrimmedString(fallback.summary, 260),
-      strengths: normalizeProjectAnalysisList(raw.strengths, { maxItems: 4, maxLength: 120 }).length
-        ? normalizeProjectAnalysisList(raw.strengths, { maxItems: 4, maxLength: 120 })
-        : normalizeProjectAnalysisList(fallback.strengths, { maxItems: 4, maxLength: 120 }),
-      weaknesses: normalizeProjectAnalysisList(raw.weaknesses, { maxItems: 4, maxLength: 120 }).length
-        ? normalizeProjectAnalysisList(raw.weaknesses, { maxItems: 4, maxLength: 120 })
-        : normalizeProjectAnalysisList(fallback.weaknesses, { maxItems: 4, maxLength: 120 }),
-      opportunities: normalizeProjectAnalysisList(raw.opportunities, { maxItems: 4, maxLength: 120 }).length
-        ? normalizeProjectAnalysisList(raw.opportunities, { maxItems: 4, maxLength: 120 })
-        : normalizeProjectAnalysisList(fallback.opportunities, { maxItems: 4, maxLength: 120 }),
-      risks: normalizeProjectAnalysisList(raw.risks, { maxItems: 4, maxLength: 120 }).length
-        ? normalizeProjectAnalysisList(raw.risks, { maxItems: 4, maxLength: 120 })
-        : normalizeProjectAnalysisList(fallback.risks, { maxItems: 4, maxLength: 120 }),
-      importance: clampProjectScore(raw.importance, fallback.importance),
-      why_now: toTrimmedString(raw.why_now, 240) || toTrimmedString(fallback.why_now, 240),
-      relation_to_author: toTrimmedString(raw.relation_to_author, 220) || toTrimmedString(fallback.relation_to_author, 220),
-      relation_to_goal: toTrimmedString(raw.relation_to_goal, 220) || toTrimmedString(fallback.relation_to_goal, 220),
-      stage: toTrimmedString(raw.stage, 96) || toTrimmedString(fallback.stage, 96),
-      evidence: normalizeProjectAnalysisEvidence(raw.evidence).length
-        ? normalizeProjectAnalysisEvidence(raw.evidence)
-        : normalizeProjectAnalysisEvidence(fallback.evidence),
+      entity_id: normalizeProjectEntityId(raw.entity_id, 120) || normalizeProjectEntityId(fallback.entity_id, 120),
+      type,
+      name,
+      summary,
+      strengths: strengths.length ? strengths : normalizeProjectEntityShortList(fallback.strengths, 4, 120),
+      weaknesses: weaknesses.length ? weaknesses : normalizeProjectEntityShortList(fallback.weaknesses, 4, 120),
+      opportunities: opportunities.length ? opportunities : normalizeProjectEntityShortList(fallback.opportunities, 4, 120),
+      risks: risks.length ? risks : normalizeProjectEntityShortList(fallback.risks, 4, 120),
+      goal_relevance: goalRelevance,
+      confidence,
+      internal_score: internalScore,
+      final_score: finalScore,
+      score_reason: toTrimmedString(raw.score_reason, 240) || toTrimmedString(fallback.score_reason, 240),
+      background,
     };
   }
 
   function normalizeProjectAnalysisConnection(rawValue, fallbackValue = {}) {
     const raw = toProfile(rawValue);
     const fallback = toProfile(fallbackValue);
-    const impact = toTrimmedString(raw.impact, 24);
-    const normalizedImpact = ['positive', 'negative', 'neutral'].includes(impact) ? impact : toTrimmedString(fallback.impact, 24) || 'neutral';
+    const polarity = ['positive', 'negative', 'neutral'].includes(toTrimmedString(raw.polarity, 24))
+      ? toTrimmedString(raw.polarity, 24)
+      : ['positive', 'negative', 'neutral'].includes(toTrimmedString(fallback.polarity, 24))
+        ? toTrimmedString(fallback.polarity, 24)
+        : 'neutral';
+    const strength = clampProjectScore(raw.strength, fallback.strength);
+    const goalRelevance = clampProjectScore(raw.goal_relevance, fallback.goal_relevance);
     return {
-      from: toTrimmedString(raw.from, 120) || toTrimmedString(fallback.from, 120),
-      to: toTrimmedString(raw.to, 120) || toTrimmedString(fallback.to, 120),
+      from: normalizeProjectEntityId(raw.from, 120) || normalizeProjectEntityId(fallback.from, 120),
+      to: normalizeProjectEntityId(raw.to, 120) || normalizeProjectEntityId(fallback.to, 120),
       label: toTrimmedString(raw.label, 120) || toTrimmedString(fallback.label, 120),
       meaning: toTrimmedString(raw.meaning, 240) || toTrimmedString(fallback.meaning, 240),
-      impact: normalizedImpact,
-      strength: clampProjectScore(raw.strength, fallback.strength),
+      polarity,
+      strength,
+      goal_relevance: goalRelevance,
+      final_score: computeConnectionFinalScore(strength, goalRelevance, polarity),
+      score_reason: toTrimmedString(raw.score_reason, 240) || toTrimmedString(fallback.score_reason, 240),
+    };
+  }
+
+  function deriveProjectSynthesisFromMap(normalizedMap, rawSynthesis = {}, fallbackSynthesis = {}) {
+    const map = toProfile(normalizedMap);
+    const entities = Array.isArray(map.entities) ? map.entities : [];
+    const raw = toProfile(rawSynthesis);
+    const fallback = toProfile(fallbackSynthesis);
+
+    const sortedDrivers = [...entities]
+      .filter((entity) => entity.background !== true && entity.final_score > 0)
+      .sort((left, right) => right.final_score - left.final_score)
+      .slice(0, 4)
+      .map((entity) => entity.entity_id);
+    const sortedConstraints = [...entities]
+      .filter((entity) => entity.weaknesses.length || entity.risks.length)
+      .sort((left, right) => {
+        const leftSignal = left.goal_relevance + left.confidence + left.risks.length * 10 + left.weaknesses.length * 8;
+        const rightSignal = right.goal_relevance + right.confidence + right.risks.length * 10 + right.weaknesses.length * 8;
+        return rightSignal - leftSignal;
+      })
+      .slice(0, 4)
+      .map((entity) => entity.entity_id);
+    const weakBackgroundEntities = [...entities]
+      .filter((entity) => entity.background === true || entity.final_score <= 10)
+      .slice(0, 8)
+      .map((entity) => entity.entity_id);
+    const goalEntity = entities.find((entity) => ['goal', 'result'].includes(entity.type));
+    const missingElements = normalizeProjectEntityShortList(raw.missing_elements, 6, 140).length
+      ? normalizeProjectEntityShortList(raw.missing_elements, 6, 140)
+      : normalizeProjectEntityShortList(fallback.missing_elements, 6, 140);
+
+    return {
+      main_goal: toTrimmedString(raw.main_goal, 240) || toTrimmedString(goalEntity?.summary, 240) || '',
+      top_drivers: normalizeProjectEntityShortList(raw.top_drivers, 6, 120).length
+        ? normalizeProjectEntityShortList(raw.top_drivers, 6, 120)
+        : sortedDrivers,
+      top_constraints: normalizeProjectEntityShortList(raw.top_constraints, 6, 120).length
+        ? normalizeProjectEntityShortList(raw.top_constraints, 6, 120)
+        : sortedConstraints,
+      weak_background_entities: normalizeProjectEntityShortList(raw.weak_background_entities, 8, 120).length
+        ? normalizeProjectEntityShortList(raw.weak_background_entities, 8, 120)
+        : weakBackgroundEntities,
+      missing_elements: missingElements,
+      next_focus: toTrimmedString(raw.next_focus, 240) || toTrimmedString(fallback.next_focus, 240),
+      confidence: clampProjectScore(
+        raw.confidence,
+        entities.length
+          ? Math.round(entities.reduce((sum, entity) => sum + entity.confidence, 0) / entities.length)
+          : fallback.confidence,
+      ),
     };
   }
 
@@ -1083,104 +1097,89 @@ function createAiRouter(deps) {
     const fallbackConnections = Array.isArray(fallback.connections) ? fallback.connections : [];
     const rawEntityById = new Map(
       (Array.isArray(raw.entities) ? raw.entities : [])
-        .map((item) => [toTrimmedString(toProfile(item).entity_id, 120), item])
+        .map((item) => [normalizeProjectEntityId(toProfile(item).entity_id, 120), item])
         .filter(([entityId]) => Boolean(entityId)),
     );
     const rawConnectionByKey = new Map(
       (Array.isArray(raw.connections) ? raw.connections : [])
         .map((item) => {
           const row = toProfile(item);
-          const from = toTrimmedString(row.from, 120);
-          const to = toTrimmedString(row.to, 120);
-          const label = toTrimmedString(row.label, 120);
-          return [`${from}|${to}|${label}`, item];
+          return [[
+            normalizeProjectEntityId(row.from, 120),
+            normalizeProjectEntityId(row.to, 120),
+            toTrimmedString(row.label, 120),
+          ].join('|'), item];
         })
         .filter(([key]) => !key.startsWith('||')),
     );
 
-    const normalizedEntities = fallbackEntities
+    const entities = fallbackEntities
       .map((fallbackEntity) => {
-        const fallbackProfile = toProfile(fallbackEntity);
-        return normalizeProjectAnalysisEntity(
-          rawEntityById.get(normalizeProjectEntityId(fallbackProfile.entity_id, 120)),
-          fallbackEntity,
-        );
+        const entityId = normalizeProjectEntityId(toProfile(fallbackEntity).entity_id, 120);
+        return normalizeProjectAnalysisEntity(rawEntityById.get(entityId), fallbackEntity);
       })
-      .filter((item) => item.entity_id && item.name);
+      .filter((entity) => entity.entity_id && entity.name);
 
-    const normalizedConnections = fallbackConnections
+    const connections = fallbackConnections
       .map((fallbackConnection) => {
-        const fallbackProfile = toProfile(fallbackConnection);
+        const row = toProfile(fallbackConnection);
         const key = [
-          toTrimmedString(fallbackProfile.from, 120),
-          toTrimmedString(fallbackProfile.to, 120),
-          toTrimmedString(fallbackProfile.label, 120),
+          normalizeProjectEntityId(row.from, 120),
+          normalizeProjectEntityId(row.to, 120),
+          toTrimmedString(row.label, 120),
         ].join('|');
         return normalizeProjectAnalysisConnection(rawConnectionByKey.get(key), fallbackConnection);
       })
-      .filter((item) => item.from && item.to);
+      .filter((connection) => connection.from && connection.to);
 
-    const rawSynthesis = toProfile(raw.project_synthesis);
-    const fallbackSynthesis = toProfile(fallback.project_synthesis);
-
-    return {
+    const normalizedMap = {
       project_name: toTrimmedString(raw.project_name, 160) || toTrimmedString(fallback.project_name, 160) || 'Проект',
-      author_context: {
-        entity_id: normalizeProjectEntityId(toProfile(raw.author_context).entity_id, 120) || normalizeProjectEntityId(toProfile(fallback.author_context).entity_id, 120),
-        name: toTrimmedString(toProfile(raw.author_context).name, 120) || toTrimmedString(toProfile(fallback.author_context).name, 120),
-        role_in_project: toTrimmedString(toProfile(raw.author_context).role_in_project, 180) || toTrimmedString(toProfile(fallback.author_context).role_in_project, 180),
-        why_matters: toTrimmedString(toProfile(raw.author_context).why_matters, 240) || toTrimmedString(toProfile(fallback.author_context).why_matters, 240),
-      },
-      entities: normalizedEntities,
-      connections: normalizedConnections,
+      author_entity_id: normalizeProjectEntityId(raw.author_entity_id, 120) || normalizeProjectEntityId(fallback.author_entity_id, 120),
+      entities,
+      connections,
       project_synthesis: {
-        main_goal: toTrimmedString(rawSynthesis.main_goal, 240) || toTrimmedString(fallbackSynthesis.main_goal, 240),
-        current_engine: toTrimmedString(rawSynthesis.current_engine, 240) || toTrimmedString(fallbackSynthesis.current_engine, 240),
-        main_bottleneck: toTrimmedString(rawSynthesis.main_bottleneck, 240) || toTrimmedString(fallbackSynthesis.main_bottleneck, 240),
-        hidden_leverage: toTrimmedString(rawSynthesis.hidden_leverage, 240) || toTrimmedString(fallbackSynthesis.hidden_leverage, 240),
-        critical_constraint: toTrimmedString(rawSynthesis.critical_constraint, 240) || toTrimmedString(fallbackSynthesis.critical_constraint, 240),
-        next_focus: toTrimmedString(rawSynthesis.next_focus, 240) || toTrimmedString(fallbackSynthesis.next_focus, 240),
-        confidence: clampProjectScore(rawSynthesis.confidence, fallbackSynthesis.confidence),
+        main_goal: '',
+        top_drivers: [],
+        top_constraints: [],
+        weak_background_entities: [],
+        missing_elements: [],
+        next_focus: '',
+        confidence: 0,
       },
     };
+    normalizedMap.project_synthesis = deriveProjectSynthesisFromMap(
+      normalizedMap,
+      raw.project_synthesis,
+      fallback.project_synthesis,
+    );
+    return normalizedMap;
   }
 
   function compileProjectDescriptionFromAnalysisMap(analysisMap) {
     const map = toProfile(analysisMap);
-    const author = toProfile(map.author_context);
     const entities = Array.isArray(map.entities) ? map.entities : [];
     const synthesis = toProfile(map.project_synthesis);
-    const topEntities = entities.slice(0, 4).map((entity) => toProfile(entity));
-    const topBase = topEntities
-      .map((entity) => {
-        const name = toTrimmedString(entity.name, 120);
-        const summary = toTrimmedString(entity.summary, 180);
-        if (!name) return '';
-        return summary ? `${name}: ${summary}` : name;
-      })
+    const entitiesById = new Map(entities.map((entity) => [toTrimmedString(entity.entity_id, 120), toProfile(entity)]));
+    const author = entitiesById.get(toTrimmedString(map.author_entity_id, 120)) || null;
+    const namesForIds = (ids) => (Array.isArray(ids) ? ids : [])
+      .map((id) => entitiesById.get(toTrimmedString(id, 120))?.name || '')
       .filter(Boolean)
-      .join('; ');
-    const topStrengths = topEntities
-      .flatMap((entity) => normalizeProjectAnalysisList(entity.strengths, { maxItems: 2, maxLength: 110 }))
-      .slice(0, 4)
-      .join('; ');
+      .join(', ');
 
     const sections = [
       ['Название проекта', toTrimmedString(map.project_name, 180) || 'Проект'],
-      ['Авторский контур', [toTrimmedString(author.name, 120), toTrimmedString(author.role_in_project, 180), toTrimmedString(author.why_matters, 240)].filter(Boolean).join('. ')],
+      ['Авторский контур', author ? `${toTrimmedString(author.name, 120)} — ${toTrimmedString(author.summary, 220)}` : ''],
       ['Главная цель', toTrimmedString(synthesis.main_goal, 240)],
-      ['Текущая база проекта', topBase],
-      ['Сильные стороны контура', topStrengths],
-      ['Ограничения и bottlenecks', [toTrimmedString(synthesis.main_bottleneck, 240), toTrimmedString(synthesis.critical_constraint, 240)].filter(Boolean).join('. ')],
-      ['Скрытая возможность', toTrimmedString(synthesis.hidden_leverage, 240)],
+      ['Ключевые драйверы', namesForIds(synthesis.top_drivers)],
+      ['Главные ограничения', namesForIds(synthesis.top_constraints)],
+      ['Слабые или фоновые узлы', namesForIds(synthesis.weak_background_entities)],
+      ['Чего не хватает', normalizeProjectEntityShortList(synthesis.missing_elements, 6, 140).join('; ')],
       ['Ближайший фокус', toTrimmedString(synthesis.next_focus, 240)],
     ].filter(([, value]) => Boolean(toTrimmedString(value, 2000)));
 
     return toTrimmedString(
-      sections
-        .map(([label, value]) => `${label}:\n${value}`)
-        .join('\n\n'),
-      3000,
+      sections.map(([label, value]) => `${label}:\n${value}`).join('\n\n'),
+      2600,
     );
   }
 
@@ -1500,7 +1499,6 @@ function createAiRouter(deps) {
 
   function buildProjectContextFallbackResult({
     scopeContext,
-    aggregatedEntityFields,
     sourceEntities,
     connections,
   }) {
@@ -1508,14 +1506,13 @@ function createAiRouter(deps) {
       scopeContext,
       sourceEntities,
       connections,
-      aggregatedEntityFields,
     });
 
     return {
       analysisMap,
-      summary: 'Контекст собран в упрощенном режиме без полного LLM-анализа.',
-      changeReason: 'fallback_after_timeout',
-      missing: [],
+      summary: 'LLM build failed; degraded snapshot preserved.',
+      changeReason: 'degraded_snapshot_after_build_failure',
+      missing: ['LLM build failed; synthesis unavailable.'],
     };
   }
 
@@ -1933,9 +1930,7 @@ function createAiRouter(deps) {
         connections: contextData?.connections,
       });
       const normalizedAnalysisMap = normalizeProjectAnalysisMap(payload.analysisMap, fallbackAnalysisMap);
-      const nextDescription =
-        compileProjectDescriptionFromAnalysisMap(normalizedAnalysisMap)
-        || normalizeProjectContextDescription(payload.description, payload.summary);
+      const nextDescription = compileProjectDescriptionFromAnalysisMap(normalizedAnalysisMap);
       const missing = normalizeProjectContextMissing(payload.missing);
 
       const freshProject = await Entity.findOne({ _id: projectId, owner_id: ownerId });
@@ -1955,8 +1950,8 @@ function createAiRouter(deps) {
         },
         llm_output: payload._fallbackError
           ? {
-            mode: 'fallback',
-            rawReply: '',
+            mode: 'degraded_snapshot',
+            rawReply: toTrimmedString(buildAiResponse?.reply, 20000),
             parsedPayload: null,
             fallbackUsed: true,
             error: toTrimmedString(payload._fallbackError, 240),
@@ -1983,7 +1978,7 @@ function createAiRouter(deps) {
         project_context_summary: toTrimmedString(payload.summary, 600),
         project_context_change_reason: toTrimmedString(payload.changeReason, 400),
         project_context_missing: missing,
-        project_context_build_mode: payload._fallbackError ? 'fallback' : 'llm',
+        project_context_build_mode: payload._fallbackError ? 'degraded_snapshot' : 'llm',
         project_context_last_llm_error: toTrimmedString(payload._fallbackError, 240),
         project_context_entity_count: Array.isArray(contextData?.entities) ? contextData.entities.length : 0,
         project_context_connection_count: Array.isArray(contextData?.connections) ? contextData.connections.length : 0,

@@ -32,12 +32,14 @@ function createProjectEnrichmentPrompts(deps) {
   function buildProjectContextBuildPayload({
     contextData,
   }) {
+    const scope = toProfile(contextData?.scope);
     const compactEntities = (Array.isArray(contextData?.entities) ? contextData.entities : [])
       .slice(0, 180)
       .map((entity) => {
         const row = toProfile(entity);
         return {
           id: toTrimmedString(row.id || row._id, 80),
+          type: toTrimmedString(row.type, 24),
           name: toTrimmedString(row.name, 120),
           description: toTrimmedString(row.description || toProfile(row.ai_metadata).description, 2400),
           isAuthor: row.isAuthor === true || row.is_me === true || row.is_mine === true,
@@ -76,7 +78,13 @@ function createProjectEnrichmentPrompts(deps) {
       })
       .filter(Boolean);
 
+    const authorEntityId = compactEntities.find((entity) => entity.is_me === true)?.id
+      || compactEntities.find((entity) => entity.is_mine === true)?.id
+      || '';
+
     return {
+      project_name: toTrimmedString(scope.projectName || scope.name, 160),
+      author_entity_id: authorEntityId,
       graph: {
         entities: compactEntities,
         connections: compactConnections,
@@ -172,23 +180,19 @@ function createProjectEnrichmentPrompts(deps) {
   function buildProjectContextBuildSystemPrompt() {
     return [
       'Ты Synapse12 Project Context Builder.',
-      'Работай только по входному JSON-контексту без внешних фактов и догадок.',
-      'Задача: собрать project_analysis_map по dashboard snapshot.',
-      'Источник истины для этой задачи: только description сущностей, связи/группы графа и author flags.',
-      'Нельзя использовать структурированные поля сущностей, историю чатов сущностей, text_input, voice_input, documents, description_history и любые сырые диалоги.',
-      'Нужно вернуть аналитическую карту проекта, а не набор project fields.',
-      'Не выдумывай факты, роли, метрики и связи.',
-      'Учитывай группы как агрегированные узлы, если они есть во входных данных.',
-      'Сначала оцени каждую сущность как рабочий узел проекта: роль, сильные стороны, слабые стороны, возможности, риски, why_now.',
-      'Если во входе указан author, используй его как опорную систему координат: кто это, какова его роль в проекте, из какого личного контура задаются цели и вопросы.',
-      'Важно: author не равен единственному центру анализа. После фиксации авторского контура обязательно проверь внешний слой проекта на скрытые возможности, недооцененные активы, bottlenecks и ограничения.',
-      'Двигайся по спирали: author contour -> ближайшие сущности -> рабочие связи -> проектный синтез.',
-      'Связывай тезисы причинно-следственно: кто управляет чем, что уже дает результат, что мешает росту, где скрытое leverage.',
-      'importance в entities[] возвращай числом от 0 до 100.',
-      'strength в connections[] возвращай числом от 0 до 100.',
-      'confidence в project_synthesis возвращай числом от 0 до 100.',
-      'evidence храни короткими цитатами или указателями на факты, не длинными абзацами.',
-      'Если данных не хватает, лучше верни пустую строку/пустой массив, чем выдумывай.',
+      'Работай только по входному JSON графа без внешних фактов и догадок.',
+      'Источник истины: только project_name, author_entity_id, name/type/description сущностей, author flags, связи, описание связей и группы.',
+      'Нельзя использовать чаты сущностей, history, text_input, voice_input, documents, description_history и любые field arrays.',
+      'Твоя задача не отвечать пользователю, а собрать project_analysis_map.',
+      'Для каждой сущности верни: summary, strengths, weaknesses, opportunities, risks, goal_relevance, confidence, internal_score, final_score, score_reason, background.',
+      'Для каждой связи верни: meaning, polarity, strength, goal_relevance, final_score, score_reason.',
+      'Числовые оценки возвращай в диапазоне 0..100.',
+      'Если описание слабое или мутное, понижай confidence.',
+      'Если сущность или связь слабо относится к цели, goal_relevance должен быть низким или нулевым.',
+      'Не каждая сущность обязана иметь вклад. Фоновая сущность может иметь почти нулевой score и background=true.',
+      'Если цель проекта не видна из графа, оставь project_synthesis.main_goal пустым.',
+      'Если данных не хватает, лучше верни пустые строки и пустые массивы, чем выдумывай.',
+      'Ты не придумываешь формулы; формулы применяются на backend.',
       'Верни СТРОГО JSON без markdown.',
       'Формат:',
       '{',
@@ -198,29 +202,23 @@ function createProjectEnrichmentPrompts(deps) {
       '  "missing": [],',
       '  "analysisMap": {',
       '    "project_name": "string",',
-      '    "author_context": {',
-      '      "entity_id": "string",',
-      '      "name": "string",',
-      '      "role_in_project": "string",',
-      '      "why_matters": "string"',
-      '    },',
+      '    "author_entity_id": "string",',
       '    "entities": [',
       '      {',
       '        "entity_id": "string",',
-      '        "name": "string",',
       '        "type": "string",',
-      '        "role_in_project": "string",',
+      '        "name": "string",',
       '        "summary": "string",',
       '        "strengths": [],',
       '        "weaknesses": [],',
       '        "opportunities": [],',
       '        "risks": [],',
-      '        "importance": 0,',
-      '        "why_now": "string",',
-      '        "relation_to_author": "string",',
-      '        "relation_to_goal": "string",',
-      '        "stage": "string",',
-      '        "evidence": []',
+      '        "goal_relevance": 0,',
+      '        "confidence": 0,',
+      '        "internal_score": 0,',
+      '        "final_score": 0,',
+      '        "score_reason": "string",',
+      '        "background": false',
       '      }',
       '    ],',
       '    "connections": [',
@@ -229,16 +227,19 @@ function createProjectEnrichmentPrompts(deps) {
       '        "to": "string",',
       '        "label": "string",',
       '        "meaning": "string",',
-      '        "impact": "positive | negative | neutral",',
-      '        "strength": 0',
+      '        "polarity": "positive | neutral | negative",',
+      '        "strength": 0,',
+      '        "goal_relevance": 0,',
+      '        "final_score": 0,',
+      '        "score_reason": "string"',
       '      }',
       '    ],',
       '    "project_synthesis": {',
       '      "main_goal": "string",',
-      '      "current_engine": "string",',
-      '      "main_bottleneck": "string",',
-      '      "hidden_leverage": "string",',
-      '      "critical_constraint": "string",',
+      '      "top_drivers": [],',
+      '      "top_constraints": [],',
+      '      "weak_background_entities": [],',
+      '      "missing_elements": [],',
       '      "next_focus": "string",',
       '      "confidence": 0',
       '    }',
@@ -254,7 +255,7 @@ function createProjectEnrichmentPrompts(deps) {
       contextData,
     });
 
-    return ['Контекст сборки проекта (JSON):', JSON.stringify(payload, null, 2)].join('\n');
+    return ['Project graph (JSON):', JSON.stringify(payload, null, 2)].join('\n');
   }
 
   return {
