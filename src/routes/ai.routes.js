@@ -200,13 +200,9 @@ function createAiRouter(deps) {
     strict: true,
     schema: {
       type: 'object',
-      required: ['status', 'summary', 'changeReason', 'missing', 'analysisMap'],
+      required: ['analysisMap'],
       additionalProperties: false,
       properties: {
-        status: { type: 'string', enum: ['ready', 'need_clarification'] },
-        summary: { type: 'string' },
-        changeReason: { type: 'string' },
-        missing: { type: 'array', items: { type: 'string' } },
         analysisMap: {
           type: 'object',
           required: ['project_name', 'author_entity_id', 'entities', 'connections'],
@@ -1388,9 +1384,6 @@ function createAiRouter(deps) {
 
     return {
       analysisMap,
-      summary: 'LLM build failed; degraded snapshot preserved.',
-      changeReason: 'degraded_snapshot_after_build_failure',
-      missing: ['LLM build failed; synthesis unavailable.'],
     };
   }
 
@@ -1790,7 +1783,7 @@ function createAiRouter(deps) {
         }));
 
         const parsed = extractJsonObjectFromText(buildAiResponse.reply);
-        if (!parsed || parsed.status !== 'ready') {
+        if (!parsed || !parsed.analysisMap || typeof parsed.analysisMap !== 'object') {
           throw Object.assign(new Error('Failed to parse project context build result'), { status: 502 });
         }
         payload = toProfile(parsed);
@@ -1810,7 +1803,9 @@ function createAiRouter(deps) {
       });
       const normalizedAnalysisMap = normalizeProjectAnalysisMap(payload.analysisMap, fallbackAnalysisMap);
       const nextDescription = compileProjectDescriptionFromAnalysisMap(normalizedAnalysisMap);
-      const missing = normalizeProjectContextMissing(payload.missing);
+      const missing = payload._fallbackError
+        ? ['LLM build failed; degraded snapshot preserved.']
+        : [];
 
       const freshProject = await Entity.findOne({ _id: projectId, owner_id: ownerId });
       if (!freshProject || freshProject.type !== 'project') {
@@ -1864,8 +1859,8 @@ function createAiRouter(deps) {
         project_context_built_at: new Date().toISOString(),
         project_context_version: nextVersion,
         project_context_error: '',
-        project_context_summary: toTrimmedString(payload.summary, 600),
-        project_context_change_reason: toTrimmedString(payload.changeReason, 400),
+        project_context_summary: '',
+        project_context_change_reason: payload._fallbackError ? 'degraded_snapshot_after_build_failure' : '',
         project_context_missing: missing,
         project_context_build_mode: payload._fallbackError ? 'degraded_snapshot' : 'llm',
         project_context_last_llm_error: toTrimmedString(payload._fallbackError, 240),
