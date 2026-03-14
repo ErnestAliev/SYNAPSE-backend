@@ -1603,6 +1603,100 @@ function createAiRouter(deps) {
     return hashProjectContextCanvasSignature(buildProjectContextCanvasSignature(canvasData));
   }
 
+  function buildJsonSizeStats(payload) {
+    const text = JSON.stringify(payload ?? null);
+    return {
+      chars: text.length,
+      bytes: Buffer.byteLength(text, 'utf8'),
+    };
+  }
+
+  function buildProjectContextBuildPreview({
+    project,
+    scopeContext,
+    sourceHash,
+    reducedContextData,
+    aggregatedEntityFields,
+    narrativeContext,
+    contextData,
+    sourceEntities,
+  }) {
+    const systemPrompt = aiPrompts.buildProjectContextBuildSystemPrompt();
+    const userPrompt = aiPrompts.buildProjectContextBuildUserPrompt({
+      contextData: reducedContextData,
+      aggregatedEntityFields,
+      author: narrativeContext.author,
+      narrativeRings: narrativeContext.narrativeRings,
+      sourceHash,
+    });
+    const buildModel = toTrimmedString(OPENAI_MODEL, 120) || toTrimmedString(OPENAI_PROJECT_MODEL, 120) || 'gpt-5';
+    const requestPreview = typeof aiProvider.previewOpenAiAgentRequest === 'function'
+      ? aiProvider.previewOpenAiAgentRequest({
+        systemPrompt,
+        userPrompt,
+        model: buildModel,
+        temperature: 0.1,
+        maxOutputTokens: 1400,
+        timeoutMs: 65_000,
+        reasoningEffort: 'low',
+        verbosity: 'low',
+        jsonSchema: PROJECT_CONTEXT_BUILD_OUTPUT_SCHEMA,
+      })
+      : null;
+    const fallbackAnalysisMap = buildProjectAnalysisMapFallback({
+      scopeContext,
+      sourceEntities,
+      connections: contextData?.connections,
+    });
+    const fallbackDescription = compileProjectDescriptionFromAnalysisMap(fallbackAnalysisMap);
+    const requestBody = toProfile(requestPreview?.requestBody);
+    const projectMeta = toProfile(project?.ai_metadata);
+
+    return {
+      timestamp: new Date().toISOString(),
+      scope: {
+        type: scopeContext?.scopeType,
+        projectId: scopeContext?.projectId,
+        projectName: scopeContext?.projectName,
+        totalEntities: Number(scopeContext?.totalEntities) || 0,
+      },
+      input: {
+        projectId: toTrimmedString(project?._id, 120),
+        sourceHash,
+        buildMode: toTrimmedString(projectMeta.project_context_build_mode, 24),
+        currentContextStatus: toTrimmedString(projectMeta.project_context_status, 24),
+      },
+      prompts: {
+        model: buildModel,
+        systemPrompt,
+        userPrompt,
+        requestBody,
+        requestBodySize: buildJsonSizeStats(requestBody),
+        jsonSchemaName: PROJECT_CONTEXT_BUILD_OUTPUT_SCHEMA.name,
+      },
+      builderContext: {
+        sourceHash,
+        contextData: reducedContextData,
+        author: narrativeContext.author,
+        narrativeRings: narrativeContext.narrativeRings,
+        aggregatedEntityFields,
+      },
+      fallbackPreview: {
+        analysisMap: fallbackAnalysisMap,
+        compiledDescription: fallbackDescription,
+      },
+      savedProjectContext: {
+        description: toTrimmedString(
+          projectMeta.project_context_compiled_description || projectMeta.description,
+          4000,
+        ),
+        buildMode: toTrimmedString(projectMeta.project_context_build_mode, 24),
+        status: toTrimmedString(projectMeta.project_context_status, 24),
+        analysisMap: toProfile(projectMeta.project_analysis_map),
+      },
+    };
+  }
+
   async function runProjectChatAutoEnrichment({
     ownerId,
     scopeContext,
@@ -1725,6 +1819,82 @@ function createAiRouter(deps) {
     });
   }
 
+  router.post('/project-context/preview', requireAuth, async (req, res, next) => {
+    try {
+      const ownerId = requireOwnerId(req);
+      const projectId = toTrimmedString(req.body?.projectId, 80);
+      if (!projectId) {
+        return res.status(400).json({ message: 'projectId is required' });
+      }
+
+      const project = await Entity.findOne({ _id: projectId, owner_id: ownerId });
+      if (!project || project.type !== 'project') {
+        return res.status(404).json({ message: 'Project not found' });
+      }
+
+      const sourceHash = buildProjectContextSourceHash(project.canvas_data);
+      const scopeContext = await resolveAgentScopeContext(ownerId, {
+        type: 'project',
+        projectId,
+      });
+      const sourceEntities = Array.isArray(scopeContext.sourceEntities) ? scopeContext.sourceEntities : scopeContext.entities;
+      const llmContextResult = llmContextTools.buildAgentLlmContext({
+        scopeContext,
+        history: [],
+        attachments: [],
+        message: 'Собери контекст проекта по текущему dashboard snapshot.',
+      });
+      const contextData = llmContextResult.contextData;
+      const reducedContextData = {
+        ...toProfile(contextData),
+        entities: (Array.isArray(sourceEntities) ? sourceEntities : [])
+          .slice(0, 80)
+          .map((entity) => {
+            const row = toProfile(entity);
+            const meta = toProfile(row.ai_metadata);
+            return {
+              id: normalizeProjectEntityId(row._id || row.id, 120),
+              type: toTrimmedString(row.type, 24),
+              name: toTrimmedString(row.name, 120),
+              description: toTrimmedString(meta.description, 2400),
+              is_me: row.is_me === true,
+              is_mine: row.is_mine === true,
+              roles: Array.isArray(meta.roles) ? meta.roles.slice(0, 4) : [],
+              status: Array.isArray(meta.status) ? meta.status.slice(0, 4) : [],
+              metrics: Array.isArray(meta.metrics) ? meta.metrics.slice(0, 3) : [],
+              risks: Array.isArray(meta.risks) ? meta.risks.slice(0, 3) : [],
+              resources: Array.isArray(meta.resources) ? meta.resources.slice(0, 3) : [],
+              outcomes: Array.isArray(meta.outcomes) ? meta.outcomes.slice(0, 3) : [],
+              location: Array.isArray(meta.location) ? meta.location.slice(0, 3) : [],
+              stage: Array.isArray(meta.stage) ? meta.stage.slice(0, 2) : [],
+            };
+          }),
+        connections: (Array.isArray(contextData?.connections) ? contextData.connections : []).slice(0, 120),
+        groups: (Array.isArray(contextData?.groups) ? contextData.groups : []).slice(0, 40),
+      };
+      const aggregatedEntityFields = collectProjectAggregatedEntityFields(sourceEntities);
+      const narrativeContext = buildProjectNarrativeContext({
+        sourceEntities,
+        connections: reducedContextData.connections,
+      });
+
+      return res.status(200).json(
+        buildProjectContextBuildPreview({
+          project,
+          scopeContext,
+          sourceHash,
+          reducedContextData,
+          aggregatedEntityFields,
+          narrativeContext,
+          contextData,
+          sourceEntities,
+        }),
+      );
+    } catch (error) {
+      return next(error);
+    }
+  });
+
   router.post('/project-context/build', requireAuth, async (req, res, next) => {
     try {
       const ownerId = requireOwnerId(req);
@@ -1806,18 +1976,33 @@ function createAiRouter(deps) {
       });
 
       const buildModel = toTrimmedString(OPENAI_MODEL, 120) || toTrimmedString(OPENAI_PROJECT_MODEL, 120) || 'gpt-5';
+      const buildRequestPreview = typeof aiProvider.previewOpenAiAgentRequest === 'function'
+        ? aiProvider.previewOpenAiAgentRequest({
+          systemPrompt,
+          userPrompt,
+          model: buildModel,
+          temperature: 0.1,
+          maxOutputTokens: 1400,
+          timeoutMs: 65_000,
+          reasoningEffort: 'low',
+          verbosity: 'low',
+          jsonSchema: PROJECT_CONTEXT_BUILD_OUTPUT_SCHEMA,
+        })
+        : null;
       let payload = null;
+      let buildAiResponse = null;
       try {
-        const aiResponse = await withAiTrace({
+        buildAiResponse = await withAiTrace({
           label: 'project-context.build',
           ownerId,
           model: buildModel,
           projectId,
           promptLengths: { system: systemPrompt.length, user: userPrompt.length },
-          includeDebug: false,
+          includeDebug: true,
         }, () => aiProvider.requestOpenAiAgentReply({
           systemPrompt,
           userPrompt,
+          includeRawPayload: true,
           model: buildModel,
           temperature: 0.1,
           maxOutputTokens: 1400,
@@ -1829,7 +2014,7 @@ function createAiRouter(deps) {
           singleRequest: true,
         }));
 
-        const parsed = extractJsonObjectFromText(aiResponse.reply);
+        const parsed = extractJsonObjectFromText(buildAiResponse.reply);
         if (!parsed || parsed.status !== 'ready') {
           throw Object.assign(new Error('Failed to parse project context build result'), { status: 502 });
         }
@@ -1862,11 +2047,63 @@ function createAiRouter(deps) {
 
       const freshMeta = toProfile(freshProject.ai_metadata);
       const nextVersion = Math.max(0, Number(freshMeta.project_context_version) || 0) + 1;
+      const buildLog = {
+        exportedAt: new Date().toISOString(),
+        source: 'project-context.build',
+        scope: {
+          type: scopeContext?.scopeType,
+          projectId: scopeContext?.projectId,
+          projectName: scopeContext?.projectName,
+          totalEntities: Number(scopeContext?.totalEntities) || 0,
+        },
+        input: {
+          projectId,
+          sourceHash,
+          sourceEntityCount: Array.isArray(sourceEntities) ? sourceEntities.length : 0,
+          reducedEntityCount: Array.isArray(reducedContextData?.entities) ? reducedContextData.entities.length : 0,
+          reducedConnectionCount: Array.isArray(reducedContextData?.connections) ? reducedContextData.connections.length : 0,
+          reducedGroupCount: Array.isArray(reducedContextData?.groups) ? reducedContextData.groups.length : 0,
+        },
+        prompts: {
+          model: buildModel,
+          systemPrompt,
+          userPrompt,
+          requestBody: toProfile(buildRequestPreview?.requestBody),
+          requestBodySize: buildJsonSizeStats(toProfile(buildRequestPreview?.requestBody)),
+        },
+        builderContext: {
+          sourceHash,
+          contextData: reducedContextData,
+          author: narrativeContext.author,
+          narrativeRings: narrativeContext.narrativeRings,
+          aggregatedEntityFields,
+        },
+        llmResult: payload._fallbackError
+          ? {
+            mode: 'fallback',
+            error: toTrimmedString(payload._fallbackError, 240),
+            payload,
+          }
+          : {
+            mode: 'llm',
+            reply: toTrimmedString(buildAiResponse?.reply, 20000),
+            parsedPayload: payload,
+            provider: toProfile(buildAiResponse?.debug),
+          },
+        normalizedResult: {
+          analysisMap: normalizedAnalysisMap,
+          compiledDescription: nextDescription,
+          missing,
+          summary: toTrimmedString(payload.summary, 600),
+          changeReason: toTrimmedString(payload.changeReason, 400),
+        },
+      };
       freshProject.ai_metadata = {
         ...freshMeta,
         description: nextDescription,
         project_context_compiled_description: nextDescription,
         project_analysis_map: normalizedAnalysisMap,
+        project_context_last_build_log: buildLog,
         project_context_status: 'fresh',
         project_context_source_hash: sourceHash,
         project_context_built_at: new Date().toISOString(),
