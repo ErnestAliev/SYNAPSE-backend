@@ -474,9 +474,9 @@ function createAiRouter(deps) {
   }
 
   function normalizeProjectContextDescription(rawValue, fallbackValue = '') {
-    const primary = toTrimmedString(rawValue, 3000);
+    const primary = toTrimmedString(rawValue, 7000);
     if (primary) return primary;
-    return toTrimmedString(fallbackValue, 3000);
+    return toTrimmedString(fallbackValue, 7000);
   }
 
   function collectProjectAggregatedEntityFields(sourceEntities) {

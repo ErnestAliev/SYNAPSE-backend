@@ -1005,7 +1005,7 @@ function createAgentPrompts(deps) {
         ? {
             description: toTrimmedString(
               projectMetadata.project_context_compiled_description || projectMetadata.description,
-              4000,
+              7000,
             ),
             analysisMap: toProfile(projectMetadata.project_analysis_map),
             contextStatus: toTrimmedString(projectMetadata.project_context_status, 32),
@@ -1410,7 +1410,7 @@ function createAgentPrompts(deps) {
       ? {
           description: toTrimmedString(
             projectMetadata.project_context_compiled_description || projectMetadata.description,
-            4000,
+            7000,
           ),
           analysisMap: toProfile(projectMetadata.project_analysis_map),
           contextStatus: toTrimmedString(projectMetadata.project_context_status, 32),
@@ -1481,7 +1481,7 @@ function createAgentPrompts(deps) {
 
   function buildRouterPrompt(contextData, userMessage) {
     const entities = Array.isArray(contextData?.entities) ? contextData.entities : [];
-    const projectContextDescription = toTrimmedString(toProfile(contextData?.projectContext).description, 4000);
+    const projectContextDescription = toTrimmedString(toProfile(contextData?.projectContext).description, 7000);
     const semanticSignals = (
       entities.length
         ? entities
@@ -1517,7 +1517,7 @@ function createAgentPrompts(deps) {
         : `Текущий контекст: вкладка "${entityType}" (${totalEntities} сущностей).`;
     const projectExtractionHint =
       scopeType === 'project'
-        ? 'Важно: для проектного чата выделяй факты, риски, задачи и метрики максимально конкретно.'
+        ? 'Важно: для project chat главным источником истины является собранный projectContext.description; если ответа нет в этом контексте, скажи это прямо. Отвечай коротко, ёмко и в формате живого диалога, а не длинного эссе.'
         : '';
 
     return [
@@ -1576,11 +1576,17 @@ function createAgentPrompts(deps) {
       '',
       'Response Contract:',
       '- Сначала молча разберись в смысле вопроса, проверь релевантные факты и ограничения в переданном контексте.',
-      '- Для project chat сначала опирайся на projectContext.description и projectContext.analysisMap.',
+      '- Для project chat опирайся прежде всего на projectContext.description. analysisMap используй только как вспомогательный слой весов и связей.',
+      '- Не подменяй ответ общим управленческим консалтингом, если в projectContext уже есть конкретные факты, цели, роли, активы и ограничения.',
+      '- Если вопрос можно ответить из projectContext.description, отвечай прямо по нему.',
+      '- Если в projectContext недостаточно данных, скажи коротко чего именно не хватает.',
+      '- Если для сильного ответа нужна недостающая информация, задай один короткий уточняющий вопрос.',
+      '- Если видишь, что контекст проекта устарел или в нём не хватает важного факта, можешь коротко предложить обновить контекст или добавить конкретную информацию на дашборд.',
       '- Если в stateSnapshot.author есть author, используй это как ориентир: вопрос задан из личного контура автора проекта.',
       '- Но не своди анализ только к автору: проверь внешний контур проекта на скрытые возможности, bottlenecks и недооцененные узлы.',
       '- При конфликте с устаревшими данными используй приоритет новых фактов пользователя.',
-      '- По умолчанию верни короткий прямой ответ одним абзацем без показа внутреннего анализа.',
+      '- По умолчанию верни короткий ёмкий ответ: 1-3 коротких абзаца без показа внутреннего анализа.',
+      '- Не пиши длинные портянки. Лучше коротко ответить, затем при необходимости задать вопрос или предложить следующий точечный шаг.',
       '- Развернутое объяснение давай только если пользователь явно запросил обоснование.',
     ].join('\n');
   }
