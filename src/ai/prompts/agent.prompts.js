@@ -1005,9 +1005,8 @@ function createAgentPrompts(deps) {
         ? {
             description: toTrimmedString(
               projectMetadata.project_context_compiled_description || projectMetadata.description,
-              7000,
+              12000,
             ),
-            analysisMap: toProfile(projectMetadata.project_analysis_map),
             contextStatus: toTrimmedString(projectMetadata.project_context_status, 32),
             builtAt: toTrimmedString(projectMetadata.project_context_built_at, 80),
           }
@@ -1064,22 +1063,8 @@ function createAgentPrompts(deps) {
     };
   }
 
-  function buildProjectContextAuthorHint(projectContext) {
-    const context = toProfile(projectContext);
-    const analysisMap = toProfile(context.analysisMap);
-    const entities = Array.isArray(analysisMap.entities) ? analysisMap.entities : [];
-    const authorId = toTrimmedString(analysisMap.author_entity_id, 120);
-    if (!authorId) return null;
-    const authorNode = entities.find((entity) => toTrimmedString(entity?.entity_id, 120) === authorId);
-    if (!authorNode) return null;
-    return {
-      id: authorId,
-      type: '',
-      name: toTrimmedString(authorNode.name, 160),
-      description: toTrimmedString(authorNode.summary, 360),
-      is_me: true,
-      is_mine: true,
-    };
+  function buildProjectContextAuthorHint() {
+    return null;
   }
 
   function serializeSourceNode(node) {
@@ -1410,9 +1395,8 @@ function createAgentPrompts(deps) {
       ? {
           description: toTrimmedString(
             projectMetadata.project_context_compiled_description || projectMetadata.description,
-            7000,
+            12000,
           ),
-          analysisMap: toProfile(projectMetadata.project_analysis_map),
           contextStatus: toTrimmedString(projectMetadata.project_context_status, 32),
           builtAt: toTrimmedString(projectMetadata.project_context_built_at, 80),
         }
@@ -1481,7 +1465,7 @@ function createAgentPrompts(deps) {
 
   function buildRouterPrompt(contextData, userMessage) {
     const entities = Array.isArray(contextData?.entities) ? contextData.entities : [];
-    const projectContextDescription = toTrimmedString(toProfile(contextData?.projectContext).description, 7000);
+    const projectContextDescription = toTrimmedString(toProfile(contextData?.projectContext).description, 12000);
     const semanticSignals = (
       entities.length
         ? entities
@@ -1489,7 +1473,7 @@ function createAgentPrompts(deps) {
           .filter(Boolean)
           .join(' ')
         : projectContextDescription
-    ).slice(0, 6000);
+    ).slice(0, 9000);
 
     const query = toTrimmedString(userMessage, 2400);
 
@@ -1576,7 +1560,7 @@ function createAgentPrompts(deps) {
       '',
       'Response Contract:',
       '- Сначала молча разберись в смысле вопроса, проверь релевантные факты и ограничения в переданном контексте.',
-      '- Для project chat опирайся прежде всего на projectContext.description. analysisMap используй только как вспомогательный слой весов и связей.',
+      '- Для project chat опирайся только на projectContext.description.',
       '- Не подменяй ответ общим управленческим консалтингом, если в projectContext уже есть конкретные факты, цели, роли, активы и ограничения.',
       '- Если вопрос можно ответить из projectContext.description, отвечай прямо по нему.',
       '- Если в projectContext недостаточно данных, скажи коротко чего именно не хватает.',

@@ -53,7 +53,7 @@ const PROJECT_DEEP_REASONING_OUTPUT_SCHEMA = Object.freeze({
 
 const PROJECT_REASONING_CONTRACT = Object.freeze([
   '1. Пойми, о чём спрашивает автор прямо сейчас.',
-  '2. Опирайся прежде всего на projectContext.description, а analysisMap используй как вспомогательный слой.',
+  '2. Опирайся только на projectContext.description.',
   '3. Зафиксируй current_point и target_point по фактам контекста.',
   '4. Выдели реальные ограничения и недостающий контекст.',
   '5. Сформулируй короткий живой вывод человеческим языком.',
@@ -346,10 +346,7 @@ function createProjectChatFlow({ deps, helpers }) {
 
     const finalAnswerLower = toTrimmedString(candidate?.final_answer, 9000).toLowerCase();
     const projectEntities = Array.isArray(contextData?.entities) ? contextData.entities : [];
-    const analysisMapEntities = Array.isArray(toProfile(contextData?.projectContext).analysisMap?.entities)
-      ? toProfile(contextData?.projectContext).analysisMap.entities
-      : [];
-    const entityNames = [...projectEntities, ...analysisMapEntities]
+    const entityNames = [...projectEntities]
       .map((entity) => toTrimmedString(entity?.name, 160).toLowerCase())
       .filter((name) => name.length >= 3)
       .slice(0, 120);
@@ -510,8 +507,7 @@ function createProjectChatFlow({ deps, helpers }) {
     const reasoningPayload = {
       scope: toProfile(payloadContext.scope),
       projectContext: {
-        description: toTrimmedString(projectContext.description, 7000),
-        analysisMap: toProfile(projectContext.analysisMap),
+        description: toTrimmedString(projectContext.description, 12000),
         contextStatus: toTrimmedString(projectContext.contextStatus, 32),
         builtAt: toTrimmedString(projectContext.builtAt, 80),
       },
@@ -530,7 +526,6 @@ function createProjectChatFlow({ deps, helpers }) {
       'Ты Synapse12 Project Chat Analyst.',
       'Работай только по данным из входного JSON-контекста.',
       'Главный источник истины для project chat: projectContext.description.',
-      'projectContext.analysisMap — вспомогательный слой весов и связей.',
       'Сначала выполни внутренний анализ по reasoning_contract, затем верни строго JSON по схеме.',
       'Не выдумывай факты вне переданного контекста.',
       'Отвечай человеческим языком, без официоза и без корпоративного тона.',

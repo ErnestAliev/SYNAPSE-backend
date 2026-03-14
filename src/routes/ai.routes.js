@@ -474,9 +474,9 @@ function createAiRouter(deps) {
   }
 
   function normalizeProjectContextDescription(rawValue, fallbackValue = '') {
-    const primary = toTrimmedString(rawValue, 7000);
+    const primary = toTrimmedString(rawValue, 12000);
     if (primary) return primary;
-    return toTrimmedString(fallbackValue, 7000);
+    return toTrimmedString(fallbackValue, 12000);
   }
 
   function collectProjectAggregatedEntityFields(sourceEntities) {
@@ -1091,6 +1091,52 @@ function createAiRouter(deps) {
       sections.map(([label, value]) => `${label}:\n${value}`).join('\n\n'),
       2600,
     );
+  }
+
+  function buildProjectWeightSections(analysisMap) {
+    const map = toProfile(analysisMap);
+    const entities = Array.isArray(map.entities) ? map.entities : [];
+    const connections = Array.isArray(map.connections) ? map.connections : [];
+    const entitiesById = new Map(
+      entities.map((entity) => [toTrimmedString(entity.entity_id, 120), toProfile(entity)]),
+    );
+
+    const topEntities = [...entities]
+      .filter((entity) => Number(entity.final_score) > 0)
+      .sort((left, right) => Number(right.final_score) - Number(left.final_score))
+      .slice(0, 10)
+      .map((entity) => `${toTrimmedString(entity.name, 120)} (${clampProjectScore(entity.final_score)})`)
+      .filter(Boolean)
+      .join(', ');
+
+    const topConnections = [...connections]
+      .filter((connection) => Number(connection.final_score) > 0)
+      .sort((left, right) => Number(right.final_score) - Number(left.final_score))
+      .slice(0, 8)
+      .map((connection) => {
+        const fromName = entitiesById.get(toTrimmedString(connection.from, 120))?.name || toTrimmedString(connection.from, 120);
+        const toName = entitiesById.get(toTrimmedString(connection.to, 120))?.name || toTrimmedString(connection.to, 120);
+        const label = toTrimmedString(connection.label, 120);
+        const score = clampProjectScore(connection.final_score);
+        return label ? `${fromName} -> ${toName} (${label}, ${score})` : `${fromName} -> ${toName} (${score})`;
+      })
+      .filter(Boolean)
+      .join('; ');
+
+    const sections = [];
+    if (topEntities) sections.push(`Веса сущностей:\n${topEntities}`);
+    if (topConnections) sections.push(`Веса связей:\n${topConnections}`);
+    return sections.join('\n\n');
+  }
+
+  function appendProjectWeightsToDescription(description, analysisMap) {
+    const base = toTrimmedString(description, 12000);
+    const weightsBlock = toTrimmedString(buildProjectWeightSections(analysisMap), 4000);
+    if (!weightsBlock) return base;
+    if (/Веса сущностей:/i.test(base) || /Веса связей:/i.test(base)) {
+      return base;
+    }
+    return toTrimmedString(base ? `${base}\n\n${weightsBlock}` : weightsBlock, 12000);
   }
 
   function pickProjectAuthorEntity(sourceEntities) {
@@ -1844,7 +1890,10 @@ function createAiRouter(deps) {
       });
       const normalizedAnalysisMap = normalizeProjectAnalysisMap(payload.analysisMap, fallbackAnalysisMap);
       const fallbackDescription = compileProjectDescriptionFromAnalysisMap(normalizedAnalysisMap);
-      const nextDescription = normalizeProjectContextDescription(payload.compiled_context, fallbackDescription);
+      const nextDescription = appendProjectWeightsToDescription(
+        normalizeProjectContextDescription(payload.compiled_context, fallbackDescription),
+        normalizedAnalysisMap,
+      );
       const missing = payload._fallbackError
         ? ['LLM build failed; degraded snapshot preserved.']
         : [];
