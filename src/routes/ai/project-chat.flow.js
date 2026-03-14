@@ -4,12 +4,11 @@ const PROJECT_DEEP_REASONING_OUTPUT_SCHEMA = Object.freeze({
   strict: true,
   schema: {
     type: 'object',
-    required: ['final_answer', 'reasoning_state', 'next_best_question', 'answer_pattern'],
+    required: ['final_answer', 'reasoning_state', 'next_best_question'],
     additionalProperties: false,
     properties: {
-      final_answer: { type: 'string', maxLength: 3200 },
+      final_answer: { type: 'string', maxLength: 2600 },
       next_best_question: { anyOf: [{ type: 'string' }, { type: 'null' }] },
-      answer_pattern: { type: 'string', maxLength: 80 },
       reasoning_state: {
         type: 'object',
         required: [
@@ -18,16 +17,9 @@ const PROJECT_DEEP_REASONING_OUTPUT_SCHEMA = Object.freeze({
           'current_point',
           'target_point',
           'constraints',
-          'fast_levers',
-          'excluded_paths',
-          'next_best_question',
           'relevant_entities',
-          'confirmed_facts',
-          'uncertain_facts',
-          'conflicts',
           'core_conclusion',
-          'why_not_enough',
-          'next_growth_contour',
+          'missing_context',
         ],
         additionalProperties: false,
         properties: {
@@ -36,9 +28,6 @@ const PROJECT_DEEP_REASONING_OUTPUT_SCHEMA = Object.freeze({
           current_point: { type: 'string', maxLength: 900 },
           target_point: { type: 'string', maxLength: 900 },
           constraints: { type: 'array', maxItems: 5, items: { type: 'string', maxLength: 180 } },
-          fast_levers: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 180 } },
-          excluded_paths: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 180 } },
-          next_best_question: { anyOf: [{ type: 'string' }, { type: 'null' }] },
           relevant_entities: {
             type: 'array',
             maxItems: 6,
@@ -54,12 +43,8 @@ const PROJECT_DEEP_REASONING_OUTPUT_SCHEMA = Object.freeze({
               },
             },
           },
-          confirmed_facts: { type: 'array', maxItems: 6, items: { type: 'string', maxLength: 220 } },
-          uncertain_facts: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 220 } },
-          conflicts: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 220 } },
           core_conclusion: { type: 'string', maxLength: 1000 },
-          why_not_enough: { type: 'string', maxLength: 1000 },
-          next_growth_contour: { type: 'string', maxLength: 1000 },
+          missing_context: { type: 'string', maxLength: 800 },
         },
       },
     },
@@ -67,23 +52,12 @@ const PROJECT_DEEP_REASONING_OUTPUT_SCHEMA = Object.freeze({
 });
 
 const PROJECT_REASONING_CONTRACT = Object.freeze([
-  '1. Определи actor (кто субъект запроса).',
-  '2. Зафиксируй intent (что именно хочет получить сейчас).',
-  '3. Определи current_point (где система находится сейчас по фактам контекста).',
-  '4. Определи target_point (к какому результату нужно прийти).',
-  '5. Выдели constraints (реальные ограничения: ресурс, срок, риски, зависимости).',
-  '6. Найди fast_levers (быстрые рычаги наибольшего эффекта).',
-  '7. Отсеки excluded_paths (что сейчас делать не стоит и почему).',
-  '8. Сформулируй core_conclusion (главный вывод, а не пересказ фактов).',
-  '9. Зафиксируй why_not_enough (почему найденные шаги пока не решают главную цель).',
-  '10. Зафиксируй next_growth_contour (куда копать дальше для следующего слоя роста).',
-  '11. При необходимости задай один next_best_question, только если он открывает новый слой анализа.',
-]);
-
-const PROJECT_ANSWER_PATTERNS = Object.freeze([
-  'Pattern A: Факт-ориентированный: что происходит -> главный узел -> быстрый шаг -> что исключаем -> (опционально) следующий вопрос.',
-  'Pattern B: Ограничения-first: ограничения -> реалистичный рычаг -> короткий план действия -> что не сработает -> (опционально) следующий вопрос.',
-  'Pattern C: Конфликты/пробелы: конфликт данных -> рабочая гипотеза -> проверяемый следующий шаг -> что не делать -> (опционально) следующий вопрос.',
+  '1. Пойми, о чём спрашивает автор прямо сейчас.',
+  '2. Опирайся прежде всего на projectContext.description, а analysisMap используй как вспомогательный слой.',
+  '3. Зафиксируй current_point и target_point по фактам контекста.',
+  '4. Выдели реальные ограничения и недостающий контекст.',
+  '5. Сформулируй короткий живой вывод человеческим языком.',
+  '6. Если нужно, задай один короткий уточняющий вопрос или предложи обновить контекст.',
 ]);
 
 const PROJECT_REQUIRED_REASONING_BLOCKS = Object.freeze([
@@ -92,11 +66,8 @@ const PROJECT_REQUIRED_REASONING_BLOCKS = Object.freeze([
   'current_point',
   'target_point',
   'constraints',
-  'fast_levers',
-  'excluded_paths',
   'core_conclusion',
-  'why_not_enough',
-  'next_growth_contour',
+  'missing_context',
 ]);
 
 // Field names that must never appear literally inside final_answer.
@@ -104,14 +75,8 @@ const PROJECT_REQUIRED_REASONING_BLOCKS = Object.freeze([
 const FINAL_ANSWER_FORBIDDEN_FIELD_LABELS = Object.freeze([
   'core_conclusion',
   'reasoning_state',
-  'fast_levers',
-  'excluded_paths',
   'relevant_entities',
-  'confirmed_facts',
-  'uncertain_facts',
-  'answer_pattern',
-  'why_not_enough',
-  'next_growth_contour',
+  'missing_context',
   'current_point',
   'target_point',
 ]);
@@ -147,15 +112,15 @@ function createProjectChatFlow({ deps, helpers }) {
     const configuredVerbosity = toTrimmedString(AGENT_CHAT_MAIN_REQUEST_CONFIG.verbosity, 12).toLowerCase();
 
     return {
-      temperature: AGENT_CHAT_MAIN_REQUEST_CONFIG.temperature,
+      temperature: Math.max(0.6, Number(AGENT_CHAT_MAIN_REQUEST_CONFIG.temperature) || 0),
       maxOutputTokens: Number.isFinite(configuredTokens)
         ? Math.max(PROJECT_DEEP_REASONING_MIN_OUTPUT_TOKENS, Math.floor(configuredTokens))
         : PROJECT_DEEP_REASONING_MIN_OUTPUT_TOKENS,
       timeoutMs: Number.isFinite(configuredTimeout)
         ? Math.max(PROJECT_DEEP_REASONING_MIN_TIMEOUT_MS, Math.floor(configuredTimeout))
         : PROJECT_DEEP_REASONING_MIN_TIMEOUT_MS,
-      reasoningEffort: AGENT_CHAT_MAIN_REQUEST_CONFIG.reasoningEffort,
-      verbosity: configuredVerbosity || 'low',
+      reasoningEffort: 'medium',
+      verbosity: configuredVerbosity === 'low' ? 'medium' : configuredVerbosity || 'medium',
     };
   }
 
@@ -214,8 +179,6 @@ function createProjectChatFlow({ deps, helpers }) {
 
   function normalizeReasoningState(rawState, topLevelQuestion = '') {
     const state = toProfile(rawState);
-    const stateQuestion = normalizeOptionalQuestion(state.next_best_question);
-    const nextBestQuestion = topLevelQuestion || stateQuestion;
 
     return {
       actor: toTrimmedString(state.actor, 320),
@@ -223,16 +186,9 @@ function createProjectChatFlow({ deps, helpers }) {
       current_point: toTrimmedString(state.current_point, 1200),
       target_point: toTrimmedString(state.target_point, 1200),
       constraints: normalizeStringList(state.constraints, { maxItems: 8, itemMaxLength: 240 }),
-      fast_levers: normalizeStringList(state.fast_levers, { maxItems: 8, itemMaxLength: 240 }),
-      excluded_paths: normalizeStringList(state.excluded_paths, { maxItems: 8, itemMaxLength: 240 }),
-      next_best_question: nextBestQuestion || null,
       relevant_entities: normalizeRelevantEntities(state.relevant_entities),
-      confirmed_facts: normalizeStringList(state.confirmed_facts, { maxItems: 14, itemMaxLength: 360 }),
-      uncertain_facts: normalizeStringList(state.uncertain_facts, { maxItems: 10, itemMaxLength: 360 }),
-      conflicts: normalizeStringList(state.conflicts, { maxItems: 8, itemMaxLength: 360 }),
       core_conclusion: toTrimmedString(state.core_conclusion || state.conclusion, 1400),
-      why_not_enough: toTrimmedString(state.why_not_enough || state.insufficiency_reason || state.why_insufficient, 1400),
-      next_growth_contour: toTrimmedString(state.next_growth_contour, 1400),
+      missing_context: toTrimmedString(state.missing_context || state.why_not_enough || state.gaps, 1200),
     };
   }
 
@@ -243,12 +199,8 @@ function createProjectChatFlow({ deps, helpers }) {
 
     return {
       final_answer: toTrimmedString(payload.final_answer, 8000) || toTrimmedString(rawReplyText, 8000),
-      next_best_question: topLevelQuestion || reasoningState.next_best_question || null,
-      answer_pattern: toTrimmedString(payload.answer_pattern, 120),
-      reasoning_state: {
-        ...reasoningState,
-        next_best_question: topLevelQuestion || reasoningState.next_best_question || null,
-      },
+      next_best_question: topLevelQuestion || null,
+      reasoning_state: reasoningState,
     };
   }
 
@@ -383,80 +335,51 @@ function createProjectChatFlow({ deps, helpers }) {
       current_point: hasNonEmptyString(reasoningState.current_point),
       target_point: hasNonEmptyString(reasoningState.target_point),
       constraints: hasNonEmptyArray(reasoningState.constraints),
-      fast_levers: hasNonEmptyArray(reasoningState.fast_levers),
-      excluded_paths: hasNonEmptyArray(reasoningState.excluded_paths),
       core_conclusion: hasNonEmptyString(reasoningState.core_conclusion),
-      why_not_enough: hasNonEmptyString(reasoningState.why_not_enough),
-      next_growth_contour: hasNonEmptyString(reasoningState.next_growth_contour),
+      missing_context: hasNonEmptyString(reasoningState.missing_context),
     };
 
     const missingMandatoryBlocks = PROJECT_REQUIRED_REASONING_BLOCKS.filter((key) => !blockChecks[key]);
     const finalAnswerPresent = hasNonEmptyString(candidate?.final_answer);
-    const finalAnswerStructured = countMeaningfulParagraphs(candidate?.final_answer) >= 5
-      || (
-        blockChecks.core_conclusion
-        && blockChecks.why_not_enough
-        && blockChecks.next_growth_contour
-        && blockChecks.fast_levers
-        && blockChecks.excluded_paths
-      );
+    const finalAnswerParagraphs = countMeaningfulParagraphs(candidate?.final_answer);
+    const finalAnswerStructured = finalAnswerParagraphs >= 1 && finalAnswerParagraphs <= 3;
 
     const finalAnswerLower = toTrimmedString(candidate?.final_answer, 9000).toLowerCase();
-    const entityNames = (Array.isArray(contextData?.entities) ? contextData.entities : [])
+    const projectEntities = Array.isArray(contextData?.entities) ? contextData.entities : [];
+    const analysisMapEntities = Array.isArray(toProfile(contextData?.projectContext).analysisMap?.entities)
+      ? toProfile(contextData?.projectContext).analysisMap.entities
+      : [];
+    const entityNames = [...projectEntities, ...analysisMapEntities]
       .map((entity) => toTrimmedString(entity?.name, 160).toLowerCase())
       .filter((name) => name.length >= 3)
       .slice(0, 120);
     const mentionsKnownEntity = entityNames.some((name) => finalAnswerLower.includes(name));
-    const hasConfirmedFacts = hasNonEmptyArray(reasoningState.confirmed_facts);
     const hasRelevantEntities = hasNonEmptyArray(reasoningState.relevant_entities);
     const factAnchored = entityNames.length === 0
       ? finalAnswerPresent
-      : hasConfirmedFacts || hasRelevantEntities || mentionsKnownEntity;
+      : hasRelevantEntities || mentionsKnownEntity;
     const coreConclusion = toTrimmedString(reasoningState.core_conclusion, 1400);
-    const whyNotEnough = toTrimmedString(reasoningState.why_not_enough, 1400);
-    const nextGrowthContour = toTrimmedString(reasoningState.next_growth_contour, 1400);
     const coreConclusionTooShort = coreConclusion.length < 40;
-    const whyNotEnoughTooShort = whyNotEnough.length < 40;
-    const nextGrowthContourTooShort = nextGrowthContour.length < 30;
-    const factualPool = [
-      ...(Array.isArray(reasoningState.confirmed_facts) ? reasoningState.confirmed_facts : []),
-      ...(Array.isArray(reasoningState.uncertain_facts) ? reasoningState.uncertain_facts : []),
-      ...(Array.isArray(reasoningState.conflicts) ? reasoningState.conflicts : []),
-    ];
-    const coreConclusionEchoesFacts = factualPool.some((item) => areSemanticallyClose(coreConclusion, item));
 
-    // --- final_answer text-quality checks ---
-    // Detects literal JSON field names copied into the user-visible answer.
     const finalAnswerContainsFieldLabels = FINAL_ANSWER_FORBIDDEN_FIELD_LABELS.some((label) =>
       finalAnswerLower.includes(label),
     );
-    // Detects numbered sub-list items ("1) ...", "2) ...") inside paragraphs — the
-    // signature of server-assembled joinNumberedList output leaking into final_answer.
-    const finalAnswerHasSubLists =
-      (toTrimmedString(candidate?.final_answer, 9000).match(/^\d+\) /gm) || []).length >= 3;
-    // Detects when the first paragraph opens with a data-retelling phrase instead of
-    // a synthetic conclusion.
-    const firstParagraphLower = finalAnswerLower.split(/\n\s*\n/)[0]?.trim() || '';
-    const finalAnswerLeadsWithFact =
-      /^(по контексту|согласно данным|в данной ситуации|исходя из|на основе)/.test(firstParagraphLower);
-
-    const factRetellingDetected = coreConclusionTooShort || coreConclusionEchoesFacts || finalAnswerLeadsWithFact;
+    const finalAnswerHasSubLists = (toTrimmedString(candidate?.final_answer, 9000).match(/^\d+\) /gm) || []).length >= 2;
+    const factRetellingDetected = coreConclusionTooShort;
 
     const nextQuestionQuality = evaluateNextBestQuestionQuality(
-      candidate?.next_best_question || reasoningState?.next_best_question,
+      candidate?.next_best_question,
       contextData,
     );
 
     let score = 0;
-    score += Object.values(blockChecks).filter(Boolean).length * 12;
+    score += Object.values(blockChecks).filter(Boolean).length * 14;
     if (finalAnswerPresent) score += 10;
-    if (finalAnswerStructured) score += 8;
+    if (finalAnswerStructured) score += 10;
     if (factAnchored) score += 10;
     if (!factRetellingDetected) score += 8;
     if (!finalAnswerContainsFieldLabels) score += 8;
     if (!finalAnswerHasSubLists) score += 6;
-    if (!whyNotEnoughTooShort) score += 6;
-    if (!nextGrowthContourTooShort) score += 6;
     if (nextQuestionQuality.present && nextQuestionQuality.accepted) score += 4;
     if (nextQuestionQuality.present && !nextQuestionQuality.accepted) score -= 2;
 
@@ -467,9 +390,7 @@ function createProjectChatFlow({ deps, helpers }) {
       && factAnchored
       && !factRetellingDetected
       && !finalAnswerContainsFieldLabels
-      && !finalAnswerHasSubLists
-      && !whyNotEnoughTooShort
-      && !nextGrowthContourTooShort;
+      && !finalAnswerHasSubLists;
 
     return {
       passed,
@@ -481,12 +402,8 @@ function createProjectChatFlow({ deps, helpers }) {
       factAnchored,
       factRetellingDetected,
       coreConclusionTooShort,
-      coreConclusionEchoesFacts,
-      finalAnswerLeadsWithFact,
       finalAnswerContainsFieldLabels,
       finalAnswerHasSubLists,
-      whyNotEnoughTooShort,
-      nextGrowthContourTooShort,
       nextQuestionQuality,
     };
   }
@@ -501,29 +418,19 @@ function createProjectChatFlow({ deps, helpers }) {
         ? `Не покрыты обязательные блоки: ${failedBlocks.join(', ')}.`
         : 'Обязательные блоки покрыты, но есть проблемы качества.',
       gateResult?.factAnchored ? '' : 'Усиль привязку к фактам и сущностям из контекста.',
-      // Empty final_answer — must regenerate with actual text.
       !gateResult?.finalAnswerPresent
-        ? 'final_answer пустой: напиши 5 абзацев человеческого текста в поле final_answer.'
+        ? 'final_answer пустой: напиши короткий человеческий ответ в поле final_answer.'
         : '',
-      // Structure check — only if answer is present but lacks 5 paragraphs.
       gateResult?.finalAnswerPresent && !gateResult?.finalAnswerStructured
-        ? 'Сделай final_answer в 5 смысловых абзацах, разделённых пустой строкой.'
+        ? 'Сделай final_answer коротким: 1-3 абзаца живого текста.'
         : '',
-      gateResult?.factRetellingDetected ? 'Избегай пересказа фактов: дай явный синтетический главный вывод.' : '',
-      // New: first paragraph starts with a retelling phrase.
-      gateResult?.finalAnswerLeadsWithFact
-        ? 'Первый абзац final_answer не должен начинаться с пересказа данных ("По контексту...", "Согласно данным..." и т.п.): начни с синтетического вывода, которого не было явно на поверхности.'
-        : '',
-      // New: field label names copied into the answer.
+      gateResult?.factRetellingDetected ? 'Избегай пустого пересказа: дай прямой вывод по вопросу автора.' : '',
       gateResult?.finalAnswerContainsFieldLabels
-        ? 'Запрещено копировать названия JSON-полей (core_conclusion, fast_levers, excluded_paths и т.д.) в final_answer: перепиши как связный человеческий текст.'
+        ? 'Запрещено копировать названия JSON-полей в final_answer: перепиши как живой человеческий текст.'
         : '',
-      // New: sub-list items "1) ...\n2) ..." inside paragraphs.
       gateResult?.finalAnswerHasSubLists
-        ? 'final_answer не должен содержать нумерованных подсписков вида "1) ...", "2) ...": встраивай fast_levers и excluded_paths в связный текст абзацев.'
+        ? 'Не используй нумерованные подсписки внутри ответа.'
         : '',
-      gateResult?.whyNotEnoughTooShort ? 'Подробно объясни, почему найденные шаги пока недостаточны для главной цели.' : '',
-      gateResult?.nextGrowthContourTooShort ? 'Определи следующий контур роста (next_growth_contour), а не общий совет.' : '',
       gateResult?.nextQuestionQuality?.present && !gateResult?.nextQuestionQuality?.accepted
         ? `next_best_question некорректен: ${gateResult.nextQuestionQuality.reason}.`
         : '',
@@ -540,6 +447,7 @@ function createProjectChatFlow({ deps, helpers }) {
     previousAttempt = null,
   }) {
     const payloadContext = toProfile(contextData);
+    const projectContext = toProfile(payloadContext.projectContext);
     const compactEntities = (Array.isArray(payloadContext.entities) ? payloadContext.entities : [])
       .slice(0, 140)
       .map((entity) => {
@@ -601,6 +509,12 @@ function createProjectChatFlow({ deps, helpers }) {
       });
     const reasoningPayload = {
       scope: toProfile(payloadContext.scope),
+      projectContext: {
+        description: toTrimmedString(projectContext.description, 7000),
+        analysisMap: toProfile(projectContext.analysisMap),
+        contextStatus: toTrimmedString(projectContext.contextStatus, 32),
+        builtAt: toTrimmedString(projectContext.builtAt, 80),
+      },
       stateSnapshot: toProfile(payloadContext.stateSnapshot),
       entities: compactEntities,
       connections: compactConnections,
@@ -611,24 +525,24 @@ function createProjectChatFlow({ deps, helpers }) {
     };
 
     const contractText = PROJECT_REASONING_CONTRACT.map((line) => `- ${line}`).join('\n');
-    const patternsText = PROJECT_ANSWER_PATTERNS.map((line) => `- ${line}`).join('\n');
-
     const systemPrompt = [
       'PROJECT DEEP REASONING MODE (single-call):',
-      'Ты Synapse12 Project Deep Reasoning Analyst.',
+      'Ты Synapse12 Project Chat Analyst.',
       'Работай только по данным из входного JSON-контекста.',
+      'Главный источник истины для project chat: projectContext.description.',
+      'projectContext.analysisMap — вспомогательный слой весов и связей.',
       'Сначала выполни внутренний анализ по reasoning_contract, затем верни строго JSON по схеме.',
       'Не выдумывай факты вне переданного контекста.',
-      'Если в stateSnapshot.author есть author или в entities присутствуют флаги is_me/is_mine, считай это личным контуром автора проекта: именно от его имени обычно ставятся цели, задаются вопросы и принимаются решения.',
-      'Но не делай автора единственным центром анализа: обязательно проверяй внешний проектный контур на скрытые возможности, недооцененные активы, узкие места и конфликты, которые могут быть важнее личного фокуса автора.',
-      'actor, intent, current_point и target_point определяй с учетом роли автора в проекте, его целей, ресурсов и ограничений, но итоговый вывод строй по смыслу всего проектного контура.',
+      'Отвечай человеческим языком, без официоза и без корпоративного тона.',
+      'final_answer должен быть коротким, ёмким и живым: 1-3 абзаца.',
+      'Если контекста хватает, отвечай прямо по сути вопроса.',
+      'Если контекста не хватает, коротко скажи чего именно не хватает и при необходимости задай один уточняющий вопрос.',
+      'Можно предложить обновить контекст или добавить конкретный факт на дашборд, если это реально усилит ответ.',
+      'Если в stateSnapshot.author есть author, используй это как ориентир: вопрос задан из личного контура автора проекта.',
+      'Но не зацикливайся только на авторе: смотри на весь проектный контур.',
       'Не добавляй markdown и не добавляй текст вне JSON-объекта.',
-      'final_answer — это 5 связных абзацев человеческого текста, разделённых пустой строкой.',
-      'Первый абзац final_answer — это синтетический вывод, которого не было явно на поверхности данных.',
-      'ЗАПРЕЩЕНО в final_answer: копировать названия JSON-полей (core_conclusion, fast_levers, excluded_paths, reasoning_state, relevant_entities, confirmed_facts, uncertain_facts, why_not_enough, next_growth_contour, current_point, target_point, answer_pattern).',
-      'ЗАПРЕЩЕНО в final_answer: оформлять содержимое абзацев 2 и 3 как нумерованный или маркированный подсписок с отдельными строками вида "1) ...", "2) ...".',
-      'ЗАПРЕЩЕНО начинать первый абзац final_answer с пересказа данных: "По контексту...", "Согласно данным...", "В данной ситуации...", "Исходя из...", "На основе...".',
-      'fast_levers и excluded_paths встраивай в связный текст абзацев, а не выводи как отдельные строки-пункты.',
+      'ЗАПРЕЩЕНО в final_answer: копировать названия JSON-полей.',
+      'ЗАПРЕЩЕНО в final_answer: уходить в длинное эссе, общие менеджерские шаблоны и канцелярит.',
       'next_best_question добавляй только если он реально открывает новый слой анализа.',
       'Если вопрос не нужен — верни next_best_question = null.',
     ].join('\n');
@@ -640,44 +554,32 @@ function createProjectChatFlow({ deps, helpers }) {
       'REASONING_CONTRACT (обязательный порядок):',
       contractText,
       '',
-      'ANSWER_PATTERNS (ориентир структуры final_answer, не копировать текст):',
-      patternsText,
-      '',
       'OUTPUT CONTRACT (строго JSON):',
       '{',
       '  "final_answer": "string",',
       '  "next_best_question": "string | null",',
-      '  "answer_pattern": "string",',
       '  "reasoning_state": {',
       '    "actor": "string",',
       '    "intent": "string",',
       '    "current_point": "string",',
       '    "target_point": "string",',
       '    "constraints": ["string"],',
-      '    "fast_levers": ["string"],',
-      '    "excluded_paths": ["string"],',
-      '    "next_best_question": "string | null",',
       '    "relevant_entities": [{"id":"string","name":"string","type":"string","why_relevant":"string"}],',
-      '    "confirmed_facts": ["string"],',
-      '    "uncertain_facts": ["string"],',
-      '    "conflicts": ["string"],',
       '    "core_conclusion": "string",',
-      '    "why_not_enough": "string",',
-      '    "next_growth_contour": "string"',
+      '    "missing_context": "string"',
       '  }',
       '}',
       '',
-      'ФОРМАТ final_answer (обязателен, 5 абзацев, между абзацами пустая строка; КАЖДЫЙ абзац — связный текст БЕЗ вложенных подсписков):',
-      '1. Главный вывод. [синтетический вывод 2-4 предложения — то, чего не было явно на поверхности данных]',
-      '2. Что делать прямо сейчас. [конкретные действия вписать в связный текст, не отдельными строками-пунктами]',
-      '3. Что не делать сейчас. [ложные ходы описать текстом, не отдельными строками-пунктами]',
-      '4. Почему этого недостаточно для главной цели. [объяснение почему локальные шаги не решают главную задачу]',
-      '5. Куда копать дальше / следующий вопрос. [следующий слой анализа или один сильный вопрос]',
+      'ФОРМАТ final_answer:',
+      '- 1-3 коротких абзаца живого текста.',
+      '- Сначала прямой вывод по вопросу автора.',
+      '- Затем, если уместно, короткое пояснение или один точечный следующий шаг.',
+      '- Если не хватает данных, скажи это коротко и без воды.',
       '',
       'КРИТИЧЕСКОЕ ТРЕБОВАНИЕ: обязательные блоки reasoning_state должны быть заполнены содержательно:',
-      '- actor, intent, current_point, target_point, constraints, fast_levers, excluded_paths, core_conclusion, why_not_enough, next_growth_contour.',
+      '- actor, intent, current_point, target_point, constraints, core_conclusion, missing_context.',
       '- next_best_question — условный блок, только при реальной пользе.',
-      '- Если есть stateSnapshot.author, используй его как контур интерпретации запроса, но отдельно проверь, не лежит ли главный вывод в сущностях и связях за пределами личного круга автора.',
+      '- Если есть stateSnapshot.author, используй его как контур интерпретации запроса, но проверяй весь проектный контур.',
       regenerationFeedback ? '' : '',
       regenerationFeedback ? regenerationFeedback : '',
       previousAttempt
@@ -693,25 +595,10 @@ function createProjectChatFlow({ deps, helpers }) {
     };
   }
 
-  function joinNarrativeList(values, fallbackText) {
-    const items = normalizeStringList(values, { maxItems: 3, itemMaxLength: 260 });
-    if (!items.length) return fallbackText;
-    if (items.length === 1) return `${items[0].replace(/[.;:!?]+$/g, '')}.`;
-    return `${items.map((item) => item.replace(/[.;:!?]+$/g, '')).join('; ')}.`;
-  }
-
   function buildInsufficientDataStructuredAnswer(nextQuestion) {
-    return [
-      '1. Главный вывод.\nСейчас данных недостаточно, чтобы сформулировать надежный главный вывод без риска ошибки.',
-      '2. Что делать прямо сейчас.\nСоберите недостающие факты по текущей точке, целевой точке и реальным ограничениям перед выбором стратегии.',
-      '3. Что не делать сейчас.\nНе масштабируйте действия и не фиксируйте долгосрочные решения, пока ключевые гипотезы не подтверждены фактами.',
-      '4. Почему этого недостаточно для главной цели.\nБез подтвержденных фактов по узкому месту можно выбрать активность, которая создает видимость прогресса, но не двигает к цели.',
-      `5. Куда копать дальше / следующий вопрос.\n${
-        nextQuestion
-          ? `Уточняющий вопрос: ${nextQuestion}`
-          : 'Уточните: какой конкретный измеримый результат в ближайшие 2-4 недели будет считаться достижением главной цели?'
-      }`,
-    ].join('\n\n');
+    const base = 'Сейчас контекста недостаточно для сильного ответа без риска промаха.';
+    if (!nextQuestion) return base;
+    return `${base}\n\n${nextQuestion}`;
   }
 
   // Returns true when final_answer looks like a JSON field dump rather than human text:
@@ -729,49 +616,26 @@ function createProjectChatFlow({ deps, helpers }) {
     const state = toProfile(payload.reasoning_state);
     const rawFinalAnswer = toTrimmedString(payload.final_answer, 8000);
     const coreConclusion = toTrimmedString(state.core_conclusion, 1400);
-    const whyNotEnough = toTrimmedString(state.why_not_enough, 1400);
-    const nextGrowthContour = toTrimmedString(state.next_growth_contour, 1400);
+    const missingContext = toTrimmedString(state.missing_context, 1200);
     const nextQuestion = nextQuestionDecision?.present && nextQuestionDecision?.accepted
       ? toTrimmedString(nextQuestionDecision.value, 360)
       : '';
 
-    // Primary path: use the LLM's final_answer when it is clean human prose.
-    // The LLM is instructed to write 5 paragraphs with paragraph markers but without
-    // nested sub-lists or field label leaks. If those conditions hold, the LLM text is
-    // used directly — it integrates fast_levers and excluded_paths as flowing sentences.
-    const rawFinalAnswerStructured = countMeaningfulParagraphs(rawFinalAnswer) >= 5;
+    const rawFinalAnswerStructured = countMeaningfulParagraphs(rawFinalAnswer) >= 1;
     if (rawFinalAnswer && rawFinalAnswerStructured && !detectsFinalAnswerIssues(rawFinalAnswer)) {
       return nextQuestion
         ? rawFinalAnswer.trimEnd() + '\n\n' + `Следующий вопрос: ${nextQuestion}`
         : rawFinalAnswer;
     }
 
-    const hasCoreTriplet = Boolean(coreConclusion || whyNotEnough || nextGrowthContour);
-    if (!hasCoreTriplet) {
+    if (!coreConclusion) {
       return buildInsufficientDataStructuredAnswer(nextQuestion);
     }
 
-    // Fallback: assemble structured answer from reasoning_state fields.
-    // Used when final_answer is absent or failed the issues check.
-    const doNow = joinNarrativeList(
-      state.fast_levers,
-      'Критические быстрые действия не выделены; нужно уточнить контекст исполнения.',
-    );
-    const dontDo = joinNarrativeList(
-      state.excluded_paths,
-      'Неподходящие шаги не выделены; высок риск распыления ресурсов.',
-    );
-    const blocks = [
-      `1. Главный вывод.\n${coreConclusion || 'Главный вывод не зафиксирован.'}`,
-      `2. Что делать прямо сейчас.\n${doNow}`,
-      `3. Что не делать сейчас.\n${dontDo}`,
-      `4. Почему этого недостаточно для главной цели.\n${whyNotEnough || 'Причина недостаточности не раскрыта.'}`,
-      `5. Куда копать дальше / следующий вопрос.\n${[
-        nextGrowthContour || 'Следующий контур роста не определен.',
-        nextQuestion ? `Уточняющий вопрос: ${nextQuestion}` : '',
-      ].filter(Boolean).join('\n')}`,
-    ];
-    return blocks.join('\n\n');
+    const parts = [coreConclusion];
+    if (missingContext) parts.push(`Не хватает: ${missingContext}`);
+    if (nextQuestion) parts.push(`Следующий вопрос: ${nextQuestion}`);
+    return parts.join('\n\n');
   }
 
   async function requestProjectReasoningAttempt({
