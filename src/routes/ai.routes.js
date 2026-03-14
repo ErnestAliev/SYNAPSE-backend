@@ -473,10 +473,38 @@ function createAiRouter(deps) {
     return str.slice(0, itemMaxLength);
   }
 
+  function trimProjectContextAtNaturalBoundary(value, maxLength = 18000) {
+    const text = toTrimmedString(value, Math.max(0, maxLength + 800));
+    if (!text) return '';
+    if (text.length <= maxLength) return text;
+
+    const windowStart = Math.max(0, maxLength - 1200);
+    const candidateWindow = text.slice(windowStart, maxLength + 1);
+    const breakCandidates = [
+      candidateWindow.lastIndexOf('\n\n'),
+      candidateWindow.lastIndexOf('. '),
+      candidateWindow.lastIndexOf('! '),
+      candidateWindow.lastIndexOf('? '),
+      candidateWindow.lastIndexOf('; '),
+    ].filter((index) => index >= 0);
+
+    if (breakCandidates.length) {
+      const cutIndex = windowStart + Math.max(...breakCandidates) + 1;
+      return text.slice(0, cutIndex).trim();
+    }
+
+    const whitespaceCut = text.lastIndexOf(' ', maxLength);
+    if (whitespaceCut > maxLength - 400) {
+      return text.slice(0, whitespaceCut).trim();
+    }
+
+    return text.slice(0, maxLength).trim();
+  }
+
   function normalizeProjectContextDescription(rawValue, fallbackValue = '') {
-    const primary = toTrimmedString(rawValue, 12000);
+    const primary = trimProjectContextAtNaturalBoundary(rawValue, 18000);
     if (primary) return primary;
-    return toTrimmedString(fallbackValue, 12000);
+    return trimProjectContextAtNaturalBoundary(fallbackValue, 18000);
   }
 
   function collectProjectAggregatedEntityFields(sourceEntities) {
@@ -1130,13 +1158,13 @@ function createAiRouter(deps) {
   }
 
   function appendProjectWeightsToDescription(description, analysisMap) {
-    const base = toTrimmedString(description, 12000);
+    const base = trimProjectContextAtNaturalBoundary(description, 18000);
     const weightsBlock = toTrimmedString(buildProjectWeightSections(analysisMap), 4000);
     if (!weightsBlock) return base;
     if (/Веса сущностей:/i.test(base) || /Веса связей:/i.test(base)) {
       return base;
     }
-    return toTrimmedString(base ? `${base}\n\n${weightsBlock}` : weightsBlock, 12000);
+    return trimProjectContextAtNaturalBoundary(base ? `${base}\n\n${weightsBlock}` : weightsBlock, 18000);
   }
 
   function pickProjectAuthorEntity(sourceEntities) {

@@ -129,10 +129,10 @@ function createProjectChatFlow({ deps, helpers }) {
     const configuredTimeout = Number(AGENT_CHAT_MAIN_REQUEST_CONFIG.timeoutMs);
     return {
       temperature: 0.6,
-      maxOutputTokens: 1800,
+      maxOutputTokens: 2600,
       timeoutMs: Number.isFinite(configuredTimeout)
-        ? Math.max(60_000, Math.floor(configuredTimeout))
-        : 60_000,
+        ? Math.max(90_000, Math.floor(configuredTimeout))
+        : 90_000,
       reasoningEffort: 'medium',
       verbosity: 'low',
     };
@@ -521,7 +521,7 @@ function createProjectChatFlow({ deps, helpers }) {
     const reasoningPayload = {
       scope: toProfile(payloadContext.scope),
       projectContext: {
-        description: toTrimmedString(projectContext.description, 12000),
+        description: toTrimmedString(projectContext.description, 18000),
         contextStatus: toTrimmedString(projectContext.contextStatus, 32),
         builtAt: toTrimmedString(projectContext.builtAt, 80),
       },
@@ -684,7 +684,7 @@ function createProjectChatFlow({ deps, helpers }) {
 
     const userPrompt = [
       'Контекст проекта:',
-      toTrimmedString(projectContext.description, 12000),
+      toTrimmedString(projectContext.description, 18000),
       '',
       'Вопрос пользователя:',
       toTrimmedString(message, 2400),
@@ -754,7 +754,7 @@ function createProjectChatFlow({ deps, helpers }) {
       timeoutMs: requestConfig.timeoutMs,
       reasoningEffort: requestConfig.reasoningEffort,
       verbosity: requestConfig.verbosity,
-      singleRequest: true,
+      singleRequest: false,
     }));
 
     return {

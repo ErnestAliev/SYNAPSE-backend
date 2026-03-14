@@ -1005,7 +1005,7 @@ function createAgentPrompts(deps) {
         ? {
             description: toTrimmedString(
               projectMetadata.project_context_compiled_description || projectMetadata.description,
-              12000,
+              18000,
             ),
             contextStatus: toTrimmedString(projectMetadata.project_context_status, 32),
             builtAt: toTrimmedString(projectMetadata.project_context_built_at, 80),
@@ -1395,7 +1395,7 @@ function createAgentPrompts(deps) {
       ? {
           description: toTrimmedString(
             projectMetadata.project_context_compiled_description || projectMetadata.description,
-            12000,
+            18000,
           ),
           contextStatus: toTrimmedString(projectMetadata.project_context_status, 32),
           builtAt: toTrimmedString(projectMetadata.project_context_built_at, 80),
@@ -1465,7 +1465,7 @@ function createAgentPrompts(deps) {
 
   function buildRouterPrompt(contextData, userMessage) {
     const entities = Array.isArray(contextData?.entities) ? contextData.entities : [];
-    const projectContextDescription = toTrimmedString(toProfile(contextData?.projectContext).description, 12000);
+    const projectContextDescription = toTrimmedString(toProfile(contextData?.projectContext).description, 18000);
     const semanticSignals = (
       entities.length
         ? entities
@@ -1473,7 +1473,7 @@ function createAgentPrompts(deps) {
           .filter(Boolean)
           .join(' ')
         : projectContextDescription
-    ).slice(0, 9000);
+    ).slice(0, 12000);
 
     const query = toTrimmedString(userMessage, 2400);
 
