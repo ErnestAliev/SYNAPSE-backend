@@ -125,6 +125,19 @@ function createProjectChatFlow({ deps, helpers }) {
     };
   }
 
+  function resolveProjectDirectReplyRequestConfig() {
+    const configuredTimeout = Number(AGENT_CHAT_MAIN_REQUEST_CONFIG.timeoutMs);
+    return {
+      temperature: 0.85,
+      maxOutputTokens: 1800,
+      timeoutMs: Number.isFinite(configuredTimeout)
+        ? Math.max(60_000, Math.floor(configuredTimeout))
+        : 60_000,
+      reasoningEffort: 'low',
+      verbosity: 'low',
+    };
+  }
+
   function normalizeStringList(values, {
     maxItems = 12,
     itemMaxLength = 240,
@@ -613,6 +626,10 @@ function createProjectChatFlow({ deps, helpers }) {
       'Не выдумывай факты вне контекста.',
       'Пиши обычным человеческим языком, без официоза и без корпоративного тона.',
       'Ответ должен быть коротким и живым: 1-3 коротких абзаца.',
+      'Отвечай прямо на вопрос автора, а не общими управленческими шаблонами.',
+      'Если цель, сроки, деньги, роли, объекты или ограничения уже явно названы в контексте, опирайся на них и не говори, что они не зафиксированы.',
+      'Если в ответе уместны конкретные объекты, люди, суммы, сроки или ограничения из контекста, называй их прямо.',
+      'Если видишь реалистичный путь к цели из самого контекста, сформулируй его простым языком.',
       'Если данных не хватает, скажи это прямо и задай не больше одного короткого уточняющего вопроса.',
       'Если видишь пробел в контексте, можешь коротко предложить обновить контекст или добавить конкретный факт на дашборд.',
       'Не используй markdown-списки, не пиши JSON.',
@@ -645,7 +662,7 @@ function createProjectChatFlow({ deps, helpers }) {
     contextData,
     llmSerializationTrace,
   }) {
-    const requestConfig = resolveProjectDeepReasoningRequestConfig();
+    const requestConfig = resolveProjectDirectReplyRequestConfig();
     const fallbackPrompts = buildProjectPlainTextFallbackPrompts({ contextData, message });
     const requestPreview = typeof aiProvider.previewOpenAiAgentRequest === 'function'
       ? aiProvider.previewOpenAiAgentRequest({
@@ -653,7 +670,7 @@ function createProjectChatFlow({ deps, helpers }) {
         systemPrompt: fallbackPrompts.systemPrompt,
         userPrompt: fallbackPrompts.userPrompt,
         temperature: requestConfig.temperature,
-        maxOutputTokens: Math.max(1400, Math.floor(requestConfig.maxOutputTokens * 0.6)),
+        maxOutputTokens: requestConfig.maxOutputTokens,
         timeoutMs: requestConfig.timeoutMs,
         reasoningEffort: requestConfig.reasoningEffort,
         verbosity: requestConfig.verbosity,
@@ -688,7 +705,7 @@ function createProjectChatFlow({ deps, helpers }) {
       includeRawPayload: includeDebug,
       model: deepModel,
       temperature: requestConfig.temperature,
-      maxOutputTokens: Math.max(1400, Math.floor(requestConfig.maxOutputTokens * 0.6)),
+      maxOutputTokens: requestConfig.maxOutputTokens,
       allowEmptyResponse: false,
       timeoutMs: requestConfig.timeoutMs,
       reasoningEffort: requestConfig.reasoningEffort,
@@ -919,7 +936,7 @@ function createProjectChatFlow({ deps, helpers }) {
       '';
 
     const promptPack = hasQuestion
-      ? buildProjectReasoningPrompts({
+      ? buildProjectPlainTextFallbackPrompts({
         contextData,
         message,
       })
@@ -928,7 +945,7 @@ function createProjectChatFlow({ deps, helpers }) {
     const systemPromptWithoutRoleInjection = promptPack.systemPrompt;
     const systemPrompt = promptPack.systemPrompt;
     const userPrompt = promptPack.userPrompt;
-    const requestConfig = resolveProjectDeepReasoningRequestConfig();
+    const requestConfig = resolveProjectDirectReplyRequestConfig();
 
     const requestPreviewBeforeRoleInjection = hasQuestion && typeof aiProvider.previewOpenAiAgentRequest === 'function'
       ? aiProvider.previewOpenAiAgentRequest({
@@ -940,7 +957,6 @@ function createProjectChatFlow({ deps, helpers }) {
         timeoutMs: requestConfig.timeoutMs,
         reasoningEffort: requestConfig.reasoningEffort,
         verbosity: requestConfig.verbosity,
-        jsonSchema: PROJECT_DEEP_REASONING_OUTPUT_SCHEMA,
       })
       : null;
     const mainReplyRequestPreview = hasQuestion && typeof aiProvider.previewOpenAiAgentRequest === 'function'
@@ -953,7 +969,6 @@ function createProjectChatFlow({ deps, helpers }) {
         timeoutMs: requestConfig.timeoutMs,
         reasoningEffort: requestConfig.reasoningEffort,
         verbosity: requestConfig.verbosity,
-        jsonSchema: PROJECT_DEEP_REASONING_OUTPUT_SCHEMA,
       })
       : null;
 
@@ -1093,14 +1108,14 @@ function createProjectChatFlow({ deps, helpers }) {
       toTrimmedString(OPENAI_PROJECT_MODEL, 120) ||
       '';
 
-    const passOnePromptPack = buildProjectReasoningPrompts({
+    const directPromptPack = buildProjectPlainTextFallbackPrompts({
       contextData,
       message,
     });
-    const systemPromptWithoutRoleInjection = passOnePromptPack.systemPrompt;
-    const systemPrompt = passOnePromptPack.systemPrompt;
-    const userPrompt = passOnePromptPack.userPrompt;
-    const requestConfig = resolveProjectDeepReasoningRequestConfig();
+    const systemPromptWithoutRoleInjection = directPromptPack.systemPrompt;
+    const systemPrompt = directPromptPack.systemPrompt;
+    const userPrompt = directPromptPack.userPrompt;
+    const requestConfig = resolveProjectDirectReplyRequestConfig();
 
     const requestPreviewBeforeRoleInjection = typeof aiProvider.previewOpenAiAgentRequest === 'function'
       ? aiProvider.previewOpenAiAgentRequest({
@@ -1112,7 +1127,6 @@ function createProjectChatFlow({ deps, helpers }) {
         timeoutMs: requestConfig.timeoutMs,
         reasoningEffort: requestConfig.reasoningEffort,
         verbosity: requestConfig.verbosity,
-        jsonSchema: PROJECT_DEEP_REASONING_OUTPUT_SCHEMA,
       })
       : null;
     const mainReplyRequestPreview = typeof aiProvider.previewOpenAiAgentRequest === 'function'
@@ -1125,19 +1139,13 @@ function createProjectChatFlow({ deps, helpers }) {
         timeoutMs: requestConfig.timeoutMs,
         reasoningEffort: requestConfig.reasoningEffort,
         verbosity: requestConfig.verbosity,
-        jsonSchema: PROJECT_DEEP_REASONING_OUTPUT_SCHEMA,
       })
       : null;
 
     const payloadSizeBeforeRoleInjection = buildRequestBodySize(toProfile(requestPreviewBeforeRoleInjection?.requestBody));
     const payloadSizeAfterRoleInjection = buildRequestBodySize(toProfile(mainReplyRequestPreview?.requestBody));
 
-    const attempts = [];
-    const replyStartedAt = Date.now();
-    let regenerationSkippedReason = '';
-
-    const passOne = await requestProjectReasoningAttempt({
-      attemptIndex: 1,
+    const directResult = await requestProjectPlainTextFallback({
       ownerId,
       deepModel,
       includeDebug,
@@ -1145,86 +1153,10 @@ function createProjectChatFlow({ deps, helpers }) {
       message,
       history,
       attachments,
-      roleSelection,
-      questionGate,
-      systemPrompt: passOnePromptPack.systemPrompt,
-      userPrompt: passOnePromptPack.userPrompt,
       contextData,
       llmSerializationTrace,
     });
-    attempts.push(passOne);
-
-    const regenerationDeadlineMs = Math.max(45_000, Math.floor(requestConfig.timeoutMs * 0.55));
-    const elapsedAfterPassOne = Date.now() - replyStartedAt;
-    const canRunRegeneration =
-      !passOne.qualityGate.passed
-      && PROJECT_DEEP_REASONING_MAX_CALLS > 1
-      && elapsedAfterPassOne < regenerationDeadlineMs;
-
-    if (canRunRegeneration) {
-      const passTwoPromptPack = buildProjectReasoningPrompts({
-        contextData,
-        message,
-        regenerationFeedback: buildRegenerationFeedback(passOne.qualityGate),
-        previousAttempt: passOne.normalizedCandidate,
-      });
-
-      const passTwo = await requestProjectReasoningAttempt({
-        attemptIndex: 2,
-        ownerId,
-        deepModel,
-        includeDebug,
-        scopeContext,
-        message,
-        history,
-        attachments,
-        roleSelection,
-        questionGate,
-        systemPrompt: passTwoPromptPack.systemPrompt,
-        userPrompt: passTwoPromptPack.userPrompt,
-        contextData,
-        llmSerializationTrace,
-      });
-      attempts.push(passTwo);
-    } else if (!passOne.qualityGate.passed && PROJECT_DEEP_REASONING_MAX_CALLS > 1) {
-      regenerationSkippedReason = elapsedAfterPassOne >= regenerationDeadlineMs
-        ? 'skipped_due_time_budget'
-        : 'skipped_by_policy';
-    }
-
-    const selectedAttempt = pickBestAttempt(attempts) || passOne;
-    const selectedCandidate = selectedAttempt.normalizedCandidate;
-    const nextQuestionDecision = evaluateNextBestQuestionQuality(
-      selectedCandidate?.next_best_question || selectedCandidate?.reasoning_state?.next_best_question,
-      contextData,
-    );
-
-    let finalReply = buildStructuredFinalAnswer(selectedCandidate, nextQuestionDecision);
-    let plainTextFallbackResult = null;
-    const needsPlainTextFallback =
-      selectedAttempt?.qualityGate?.passed !== true
-      || selectedAttempt?.parsedResult?.parseError === 'empty_reply'
-      || !hasNonEmptyString(selectedCandidate?.final_answer)
-      || isEmptyProjectReplyFallback(selectedAttempt?.aiResponse?.reply)
-      || isEmptyProjectReplyFallback(finalReply)
-      || isInsufficientStructuredAnswer(finalReply);
-
-    if (needsPlainTextFallback) {
-      plainTextFallbackResult = await requestProjectPlainTextFallback({
-        ownerId,
-        deepModel,
-        includeDebug,
-        scopeContext,
-        message,
-        history,
-        attachments,
-        contextData,
-        llmSerializationTrace,
-      });
-      if (toTrimmedString(plainTextFallbackResult.reply, 8000)) {
-        finalReply = toTrimmedString(plainTextFallbackResult.reply, 8000);
-      }
-    }
+    const finalReply = toTrimmedString(directResult.reply, 8000) || EMPTY_PROJECT_REPLY_FALLBACK;
     const questionGateResult = aiPrompts.inspectAgentReplyQuestionGate({
       reply: finalReply,
       questionGate,
@@ -1254,8 +1186,9 @@ function createProjectChatFlow({ deps, helpers }) {
     }
 
     const selectedModel =
-      toTrimmedString(selectedAttempt?.aiResponse?.debug?.response?.model, 120)
-      || toTrimmedString(selectedAttempt?.aiResponse?.debug?.request?.model, 120)
+      toTrimmedString(directResult?.debug?.response?.model, 120)
+      || toTrimmedString(directResult?.debug?.request?.model, 120)
+      || directResult?.model
       || deepModel
       || 'unknown';
 
@@ -1304,42 +1237,16 @@ function createProjectChatFlow({ deps, helpers }) {
           requestBodyBeforeRoleInjection: toProfile(requestPreviewBeforeRoleInjection?.requestBody),
           requestBody: toProfile(mainReplyRequestPreview?.requestBody),
         },
-        deepReasoning: {
-          mode: PROJECT_DEEP_REASONING_MAX_CALLS > 1
-            ? 'single_call_with_one_regeneration_max'
-            : 'single_call_only',
+        directContextChat: {
+          mode: 'single_plain_text_call',
           requestConfig,
-          reasoningContract: PROJECT_REASONING_CONTRACT,
-          answerPatterns: PROJECT_ANSWER_PATTERNS,
-          maxCalls: PROJECT_DEEP_REASONING_MAX_CALLS,
-          regenerationUsed: attempts.length > 1,
-          regenerationSkippedReason,
-          selectedAttempt: selectedAttempt?.attemptIndex || 1,
-          qualityGate: selectedAttempt?.qualityGate || null,
-          reasoningState: selectedCandidate?.reasoning_state || null,
-          answerPattern: selectedCandidate?.answer_pattern || '',
-          nextBestQuestion: nextQuestionDecision,
-          finalAnswerAssembly: 'server_structured_from_reasoning_state',
-          attempts: attempts.map((attempt) => ({
-            attemptIndex: attempt.attemptIndex,
-            qualityGate: attempt.qualityGate,
-            parseError: attempt.parsedResult?.parseError || '',
-            model: toTrimmedString(attempt?.aiResponse?.debug?.response?.model, 120) || deepModel,
-            usage: attempt?.aiResponse?.usage || null,
-            payloadSize: attempt?.payloadSize || { chars: 0, bytes: 0 },
-          })),
-          plainTextFallback: plainTextFallbackResult
-            ? {
-              used: true,
-              model: plainTextFallbackResult.model,
-              payloadSize: plainTextFallbackResult.payloadSize,
-              prompts: plainTextFallbackResult.prompts,
-            }
-            : { used: false },
+          prompts: directResult.prompts,
+          payloadSize: directResult.payloadSize,
+          finalAnswerAssembly: 'provider_plain_text',
         },
         response: {
           reply: finalReply,
-          usage: selectedAttempt?.aiResponse?.usage,
+          usage: directResult?.usage,
           model: selectedModel,
         },
         projectAutoEnrichment: scopeContext.scopeType === 'project'
@@ -1349,13 +1256,13 @@ function createProjectChatFlow({ deps, helpers }) {
             monitorMode: monitorMode === true,
           }
           : null,
-        provider: selectedAttempt?.aiResponse?.debug || {},
+        provider: directResult?.debug || {},
       }
       : undefined;
 
     return {
       reply: finalReply,
-      usage: selectedAttempt?.aiResponse?.usage,
+      usage: directResult?.usage,
       model: selectedModel,
       detectedRole,
       selectedRoles: roleSelection.selectedRoles,
