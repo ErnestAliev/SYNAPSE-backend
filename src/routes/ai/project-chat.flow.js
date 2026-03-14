@@ -713,6 +713,10 @@ function createProjectChatFlow({ deps, helpers }) {
     return `${base}\n\n${nextQuestion}`;
   }
 
+  function isInsufficientStructuredAnswer(text) {
+    return toTrimmedString(text, 240).startsWith('Сейчас контекста недостаточно для сильного ответа без риска промаха.');
+  }
+
   // Returns true when final_answer looks like a JSON field dump rather than human text:
   // — contains literal field names from the reasoning schema, or
   // — contains numbered sub-list items (the "1) ...\n2) ..." pattern from joinNumberedList).
@@ -1198,9 +1202,12 @@ function createProjectChatFlow({ deps, helpers }) {
     let finalReply = buildStructuredFinalAnswer(selectedCandidate, nextQuestionDecision);
     let plainTextFallbackResult = null;
     const needsPlainTextFallback =
-      selectedAttempt?.parsedResult?.parseError === 'empty_reply'
+      selectedAttempt?.qualityGate?.passed !== true
+      || selectedAttempt?.parsedResult?.parseError === 'empty_reply'
+      || !hasNonEmptyString(selectedCandidate?.final_answer)
       || isEmptyProjectReplyFallback(selectedAttempt?.aiResponse?.reply)
-      || isEmptyProjectReplyFallback(finalReply);
+      || isEmptyProjectReplyFallback(finalReply)
+      || isInsufficientStructuredAnswer(finalReply);
 
     if (needsPlainTextFallback) {
       plainTextFallbackResult = await requestProjectPlainTextFallback({
