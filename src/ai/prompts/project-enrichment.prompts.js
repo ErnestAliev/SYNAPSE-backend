@@ -28,6 +28,68 @@ function createProjectEnrichmentPrompts(deps) {
     toTrimmedString,
     toProfile,
   } = deps;
+
+  function buildProjectContextBuildPayload({
+    contextData,
+    author,
+    narrativeRings,
+    sourceHash,
+  }) {
+    const compactEntities = (Array.isArray(contextData?.entities) ? contextData.entities : [])
+      .slice(0, 180)
+      .map((entity) => {
+        const row = toProfile(entity);
+        return {
+          id: toTrimmedString(row.id || row._id, 80),
+          name: toTrimmedString(row.name, 120),
+          description: toTrimmedString(row.description || toProfile(row.ai_metadata).description, 2400),
+          is_me: row.is_me === true,
+          is_mine: row.is_mine === true,
+        };
+      })
+      .filter((entity) => entity.id && (entity.name || entity.description));
+
+    const compactConnections = (Array.isArray(contextData?.connections) ? contextData.connections : [])
+      .slice(0, 240)
+      .map((connection) => {
+        const row = toProfile(connection);
+        return {
+          from: toTrimmedString(row.from || row.source, 80),
+          to: toTrimmedString(row.to || row.target, 80),
+          label: toTrimmedString(row.label, 160),
+          description: toTrimmedString(
+            row.description || row.meaning || row.semanticMeaning || row.summary || row.label,
+            600,
+          ),
+        };
+      })
+      .filter((connection) => connection.from && connection.to);
+
+    const compactGroups = (Array.isArray(contextData?.groups) ? contextData.groups : [])
+      .slice(0, 80)
+      .map((group) => {
+        const row = toProfile(group);
+        const id = toTrimmedString(row.id, 80);
+        const nodeIds = (Array.isArray(row.nodeIds) ? row.nodeIds : [])
+          .map((nodeId) => toTrimmedString(nodeId, 80))
+          .filter(Boolean);
+        if (!id || nodeIds.length < 2) return null;
+        return { id, nodeIds };
+      })
+      .filter(Boolean);
+
+    return {
+      sourceHash: toTrimmedString(sourceHash, 120),
+      author: toProfile(author),
+      narrativeRings: toProfile(narrativeRings),
+      graph: {
+        entities: compactEntities,
+        connections: compactConnections,
+        groups: compactGroups,
+      },
+    };
+  }
+
   function buildProjectEnrichmentSystemPrompt() {
     return [
       'Ты Synapse12 Project Context Extractor.',
@@ -196,31 +258,12 @@ function createProjectEnrichmentPrompts(deps) {
     narrativeRings,
     sourceHash,
   }) {
-    const compactEntities = (Array.isArray(contextData?.entities) ? contextData.entities : [])
-      .slice(0, 180)
-      .map((entity) => {
-        const row = toProfile(entity);
-        return {
-          id: toTrimmedString(row.id || row._id, 80),
-          type: toTrimmedString(row.type, 24),
-          name: toTrimmedString(row.name, 120),
-          description: toTrimmedString(row.description || toProfile(row.ai_metadata).description, 2400),
-          is_me: row.is_me === true,
-          is_mine: row.is_mine === true,
-        };
-      });
-
-    const payload = {
-      scope: toProfile(contextData?.scope),
-      sourceHash: toTrimmedString(sourceHash, 120),
-      author: toProfile(author),
-      narrativeRings: toProfile(narrativeRings),
-      graph: {
-        entities: compactEntities,
-        connections: Array.isArray(contextData?.connections) ? contextData.connections : [],
-        groups: Array.isArray(contextData?.groups) ? contextData.groups : [],
-      },
-    };
+    const payload = buildProjectContextBuildPayload({
+      contextData,
+      author,
+      narrativeRings,
+      sourceHash,
+    });
 
     return ['Контекст сборки проекта (JSON):', JSON.stringify(payload, null, 2)].join('\n');
   }
@@ -229,6 +272,7 @@ function createProjectEnrichmentPrompts(deps) {
     buildProjectEnrichmentSystemPrompt,
     buildProjectEnrichmentUserPrompt,
     buildProjectContextBuildSystemPrompt,
+    buildProjectContextBuildPayload,
     buildProjectContextBuildUserPrompt,
   };
 }

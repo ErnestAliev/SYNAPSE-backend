@@ -1613,6 +1613,12 @@ function createAiRouter(deps) {
     sourceEntities,
   }) {
     const systemPrompt = aiPrompts.buildProjectContextBuildSystemPrompt();
+    const userPayload = aiPrompts.buildProjectContextBuildPayload({
+      contextData: reducedContextData,
+      author: narrativeContext.author,
+      narrativeRings: narrativeContext.narrativeRings,
+      sourceHash,
+    });
     const userPrompt = aiPrompts.buildProjectContextBuildUserPrompt({
       contextData: reducedContextData,
       author: narrativeContext.author,
@@ -1620,30 +1626,13 @@ function createAiRouter(deps) {
       sourceHash,
     });
     const buildModel = toTrimmedString(OPENAI_MODEL, 120) || toTrimmedString(OPENAI_PROJECT_MODEL, 120) || 'gpt-5';
-    const fallbackAnalysisMap = buildProjectAnalysisMapFallback({
-      scopeContext,
-      sourceEntities,
-      connections: contextData?.connections,
-    });
-    const fallbackDescription = compileProjectDescriptionFromAnalysisMap(fallbackAnalysisMap);
-    const projectMeta = toProfile(project?.ai_metadata);
-
     return {
       exportedAt: new Date().toISOString(),
       source: 'project-context.preview',
       llm_input: {
         model: buildModel,
         systemPrompt,
-        userPrompt,
-        sourceHash,
-        project: {
-          id: toTrimmedString(project?._id, 120),
-          name: toTrimmedString(project?.name, 200),
-          totalEntities: Number(scopeContext?.totalEntities) || 0,
-        },
-        contextData: reducedContextData,
-        author: narrativeContext.author,
-        narrativeRings: narrativeContext.narrativeRings,
+        userPayload,
       },
       llm_output: {
         mode: 'preview_only',
@@ -1651,17 +1640,6 @@ function createAiRouter(deps) {
         parsedPayload: null,
         fallbackUsed: false,
         error: '',
-      },
-      system_postprocess: {
-        previewOnly: true,
-        currentSavedContext: {
-          status: toTrimmedString(projectMeta.project_context_status, 24),
-          buildMode: toTrimmedString(projectMeta.project_context_build_mode, 24),
-        },
-        fallbackResult: {
-          analysisMap: fallbackAnalysisMap,
-          compiledDescription: fallbackDescription,
-        },
       },
     };
   }
@@ -1917,6 +1895,12 @@ function createAiRouter(deps) {
       });
 
       const systemPrompt = aiPrompts.buildProjectContextBuildSystemPrompt();
+      const userPayload = aiPrompts.buildProjectContextBuildPayload({
+        contextData: reducedContextData,
+        author: narrativeContext.author,
+        narrativeRings: narrativeContext.narrativeRings,
+        sourceHash,
+      });
       const userPrompt = aiPrompts.buildProjectContextBuildUserPrompt({
         contextData: reducedContextData,
         author: narrativeContext.author,
@@ -1987,17 +1971,8 @@ function createAiRouter(deps) {
         source: 'project-context.build',
         llm_input: {
           model: buildModel,
-          sourceHash,
           systemPrompt,
-          userPrompt,
-          project: {
-            id: projectId,
-            name: toTrimmedString(scopeContext?.projectName, 200),
-            totalEntities: Number(scopeContext?.totalEntities) || 0,
-          },
-          contextData: reducedContextData,
-          author: narrativeContext.author,
-          narrativeRings: narrativeContext.narrativeRings,
+          userPayload,
         },
         llm_output: payload._fallbackError
           ? {
@@ -2014,13 +1989,6 @@ function createAiRouter(deps) {
             fallbackUsed: false,
             error: '',
           },
-        system_postprocess: {
-          analysisMap: normalizedAnalysisMap,
-          compiledDescription: nextDescription,
-          missing,
-          summary: toTrimmedString(payload.summary, 600),
-          changeReason: toTrimmedString(payload.changeReason, 400),
-        },
       };
       freshProject.ai_metadata = {
         ...freshMeta,
