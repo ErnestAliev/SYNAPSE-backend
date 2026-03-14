@@ -200,38 +200,29 @@ function createAiRouter(deps) {
     strict: true,
     schema: {
       type: 'object',
-      required: ['analysisMap'],
+      required: ['compiled_context', 'analysisMap'],
       additionalProperties: false,
       properties: {
+        compiled_context: { type: 'string' },
         analysisMap: {
           type: 'object',
-          required: ['project_name', 'author_entity_id', 'entities', 'connections'],
+          required: ['entities', 'connections'],
           additionalProperties: false,
           properties: {
-            project_name: { type: 'string' },
-            author_entity_id: { type: 'string' },
             entities: {
               type: 'array',
               items: {
                 type: 'object',
                 required: [
                   'entity_id',
-                  'name',
-                  'summary',
                   'goal_relevance',
-                  'graph_support',
                   'confidence',
-                  'background',
                 ],
                 additionalProperties: false,
                 properties: {
                   entity_id: { type: 'string' },
-                  name: { type: 'string' },
-                  summary: { type: 'string' },
                   goal_relevance: { type: 'integer', minimum: 0, maximum: 100 },
-                  graph_support: { type: 'integer', minimum: 0, maximum: 100 },
                   confidence: { type: 'integer', minimum: 0, maximum: 100 },
-                  background: { type: 'boolean' },
                 },
               },
             },
@@ -749,6 +740,7 @@ function createAiRouter(deps) {
   function buildProjectConnectionIndex(connections) {
     const list = Array.isArray(connections) ? connections : [];
     const byEntityId = new Map();
+    const labeledByEntityId = new Map();
     const pairLabels = new Map();
     for (const rawConnection of list) {
       const connection = toProfile(rawConnection);
@@ -758,6 +750,10 @@ function createAiRouter(deps) {
       if (!from || !to) continue;
       byEntityId.set(from, (byEntityId.get(from) || 0) + 1);
       byEntityId.set(to, (byEntityId.get(to) || 0) + 1);
+      if (label) {
+        labeledByEntityId.set(from, (labeledByEntityId.get(from) || 0) + 1);
+        labeledByEntityId.set(to, (labeledByEntityId.get(to) || 0) + 1);
+      }
       const leftKey = `${from}|${to}`;
       const rightKey = `${to}|${from}`;
       if (label) {
@@ -765,7 +761,43 @@ function createAiRouter(deps) {
         pairLabels.set(rightKey, [...(pairLabels.get(rightKey) || []), label]);
       }
     }
-    return { byEntityId, pairLabels };
+    return { byEntityId, labeledByEntityId, pairLabels };
+  }
+
+  function buildProjectGroupMembership(groups) {
+    const memberIds = new Set();
+    const list = Array.isArray(groups) ? groups : [];
+    for (const rawGroup of list) {
+      const group = toProfile(rawGroup);
+      const nodeIds = Array.isArray(group.nodeIds) ? group.nodeIds : [];
+      for (const rawNodeId of nodeIds) {
+        const nodeId = normalizeProjectEntityId(rawNodeId, 120);
+        if (nodeId) memberIds.add(nodeId);
+      }
+    }
+    return memberIds;
+  }
+
+  function computeProjectGraphSupport(entity, connectionIndex, groupMembership) {
+    const row = toProfile(entity);
+    const entityId = normalizeProjectEntityId(row._id || row.id, 120);
+    const description = toTrimmedString(toProfile(row.ai_metadata).description || row.description, 2400);
+    const degree = Number(connectionIndex?.byEntityId?.get(entityId) || 0);
+    const labeledDegree = Number(connectionIndex?.labeledByEntityId?.get(entityId) || 0);
+    const inGroup = groupMembership instanceof Set && groupMembership.has(entityId);
+    let score = 0;
+    if (description) score += 20;
+    score += Math.min(48, degree * 12);
+    score += Math.min(18, labeledDegree * 6);
+    if (inGroup) score += 10;
+    return clampProjectScore(score, 0);
+  }
+
+  function computeProjectEntityBackground(goalRelevance, graphSupport, confidence, finalScore) {
+    const lowGoal = clampProjectScore(goalRelevance) <= 20;
+    const lowGraph = clampProjectScore(graphSupport) <= 25;
+    const lowConfidence = clampProjectScore(confidence) <= 20;
+    return clampProjectScore(finalScore) <= 12 || (lowGoal && lowGraph) || (lowGoal && lowConfidence);
   }
 
   function buildProjectEntityImportance(entity, connectionCount = 0) {
@@ -866,7 +898,10 @@ function createAiRouter(deps) {
     scopeContext,
     sourceEntities,
     connections,
+    groups,
   }) {
+    const connectionIndex = buildProjectConnectionIndex(connections);
+    const groupMembership = buildProjectGroupMembership(groups);
     const entities = (Array.isArray(sourceEntities) ? sourceEntities : [])
       .map((entity) => {
         const row = toProfile(entity);
@@ -874,15 +909,18 @@ function createAiRouter(deps) {
         const name = toTrimmedString(row.name, 120);
         if (!entityId || !name) return null;
         const summary = buildProjectDegradedSummary(entity, 160);
+        const graphSupport = computeProjectGraphSupport(entity, connectionIndex, groupMembership);
+        const confidence = summary ? 10 : 0;
+        const finalScore = computeEntityFinalScore(graphSupport, 0, confidence);
         return {
           entity_id: entityId,
           name,
           summary,
           goal_relevance: 0,
-          graph_support: 0,
-          confidence: summary ? 10 : 0,
-          final_score: 0,
-          background: true,
+          graph_support: graphSupport,
+          confidence,
+          final_score: finalScore,
+          background: computeProjectEntityBackground(0, graphSupport, confidence, finalScore),
         };
       })
       .filter(Boolean);
@@ -923,13 +961,13 @@ function createAiRouter(deps) {
   function normalizeProjectAnalysisEntity(rawValue, fallbackValue = {}) {
     const raw = toProfile(rawValue);
     const fallback = toProfile(fallbackValue);
-    const name = toTrimmedString(raw.name, 120) || toTrimmedString(fallback.name, 120);
-    const summary = toTrimmedString(raw.summary, 220) || toTrimmedString(fallback.summary, 220);
+    const name = toTrimmedString(fallback.name, 120);
+    const summary = toTrimmedString(fallback.summary, 220);
     const goalRelevance = clampProjectScore(raw.goal_relevance, fallback.goal_relevance);
-    const graphSupport = clampProjectScore(raw.graph_support, fallback.graph_support);
+    const graphSupport = clampProjectScore(fallback.graph_support, 0);
     const confidence = clampProjectScore(raw.confidence, fallback.confidence);
     const finalScore = computeEntityFinalScore(graphSupport, goalRelevance, confidence);
-    const background = raw.background === true || (raw.background !== false && finalScore <= 10);
+    const background = computeProjectEntityBackground(goalRelevance, graphSupport, confidence, finalScore);
 
     return {
       entity_id: normalizeProjectEntityId(raw.entity_id, 120) || normalizeProjectEntityId(fallback.entity_id, 120),
@@ -1010,8 +1048,8 @@ function createAiRouter(deps) {
       .filter((connection) => connection.from && connection.to);
 
     const normalizedMap = {
-      project_name: toTrimmedString(raw.project_name, 160) || toTrimmedString(fallback.project_name, 160) || 'Проект',
-      author_entity_id: normalizeProjectEntityId(raw.author_entity_id, 120) || normalizeProjectEntityId(fallback.author_entity_id, 120),
+      project_name: toTrimmedString(fallback.project_name, 160) || 'Проект',
+      author_entity_id: normalizeProjectEntityId(fallback.author_entity_id, 120),
       entities,
       connections,
     };
@@ -1027,28 +1065,26 @@ function createAiRouter(deps) {
       .filter((entity) => entity.background !== true && entity.final_score > 0)
       .sort((left, right) => right.final_score - left.final_score)
       .slice(0, 5);
-    const backgroundEntities = [...entities]
-      .filter((entity) => entity.background === true || entity.final_score <= 10)
-      .slice(0, 6);
     const topConnections = [...(Array.isArray(map.connections) ? map.connections : [])]
+      .filter((connection) => Number(connection.final_score) > 0)
       .sort((left, right) => Number(right.final_score) - Number(left.final_score))
       .slice(0, 4)
       .map((connection) => {
         const fromName = entitiesById.get(toTrimmedString(connection.from, 120))?.name || toTrimmedString(connection.from, 120);
         const toName = entitiesById.get(toTrimmedString(connection.to, 120))?.name || toTrimmedString(connection.to, 120);
         const label = toTrimmedString(connection.label, 120);
-        return label ? `${fromName} -> ${toName} (${label})` : `${fromName} -> ${toName}`;
+        const score = clampProjectScore(connection.final_score);
+        return label ? `${fromName} -> ${toName} (${label}, ${score})` : `${fromName} -> ${toName} (${score})`;
       })
       .filter(Boolean)
       .join('; ');
 
     const sections = [
       ['Название проекта', toTrimmedString(map.project_name, 180) || 'Проект'],
-      ['Авторский контур', author ? `${toTrimmedString(author.name, 120)} — ${toTrimmedString(author.summary, 220)}` : ''],
+      ['Автор', author ? `${toTrimmedString(author.name, 120)} (${clampProjectScore(author.final_score)})` : ''],
       ['Контекст графа', `${entities.length} сущностей, ${(Array.isArray(map.connections) ? map.connections.length : 0)} связей.`],
-      ['Сильные узлы', topEntities.map((entity) => `${toTrimmedString(entity.name, 120)} (${clampProjectScore(entity.final_score)})`).join(', ')],
-      ['Фоновые узлы', backgroundEntities.map((entity) => toTrimmedString(entity.name, 120)).filter(Boolean).join(', ')],
-      ['Сильные связи', topConnections],
+      ['Опорные узлы', topEntities.map((entity) => `${toTrimmedString(entity.name, 120)} (${clampProjectScore(entity.final_score)})`).join(', ')],
+      ['Опорные связи', topConnections],
     ].filter(([, value]) => Boolean(toTrimmedString(value, 2000)));
 
     return toTrimmedString(
@@ -1375,14 +1411,17 @@ function createAiRouter(deps) {
     scopeContext,
     sourceEntities,
     connections,
+    groups,
   }) {
     const analysisMap = buildProjectAnalysisMapFallback({
       scopeContext,
       sourceEntities,
       connections,
+      groups,
     });
 
     return {
+      compiled_context: '',
       analysisMap,
     };
   }
@@ -1783,7 +1822,7 @@ function createAiRouter(deps) {
         }));
 
         const parsed = extractJsonObjectFromText(buildAiResponse.reply);
-        if (!parsed || !parsed.analysisMap || typeof parsed.analysisMap !== 'object') {
+        if (!parsed || typeof parsed.compiled_context !== 'string' || !parsed.analysisMap || typeof parsed.analysisMap !== 'object') {
           throw Object.assign(new Error('Failed to parse project context build result'), { status: 502 });
         }
         payload = toProfile(parsed);
@@ -1792,6 +1831,7 @@ function createAiRouter(deps) {
           scopeContext,
           sourceEntities,
           connections: contextData?.connections,
+          groups: contextData?.groups,
         });
         payload._fallbackError = toTrimmedString(error?.message, 240);
       }
@@ -1800,9 +1840,11 @@ function createAiRouter(deps) {
         scopeContext,
         sourceEntities,
         connections: contextData?.connections,
+        groups: contextData?.groups,
       });
       const normalizedAnalysisMap = normalizeProjectAnalysisMap(payload.analysisMap, fallbackAnalysisMap);
-      const nextDescription = compileProjectDescriptionFromAnalysisMap(normalizedAnalysisMap);
+      const fallbackDescription = compileProjectDescriptionFromAnalysisMap(normalizedAnalysisMap);
+      const nextDescription = normalizeProjectContextDescription(payload.compiled_context, fallbackDescription);
       const missing = payload._fallbackError
         ? ['LLM build failed; degraded snapshot preserved.']
         : [];

@@ -999,8 +999,9 @@ function createAgentPrompts(deps) {
   function buildAgentContextData({ scopeContext, history, attachments }) {
     const cleanedEntities = cleanContextData(scopeContext.entities);
     const projectMetadata = toProfile(scopeContext.projectMetadata);
+    const isProjectScope = scopeContext.scopeType === 'project';
     const projectContext =
-      scopeContext.scopeType === 'project'
+      isProjectScope
         ? {
             description: toTrimmedString(
               projectMetadata.project_context_compiled_description || projectMetadata.description,
@@ -1023,8 +1024,8 @@ function createAgentPrompts(deps) {
         contextLimit: AI_CONTEXT_ENTITY_LIMIT,
       },
       ...(projectContext ? { projectContext } : {}),
-      entities: cleanedEntities,
-      connections: scopeContext.connections,
+      entities: isProjectScope ? [] : cleanedEntities,
+      connections: isProjectScope ? [] : scopeContext.connections,
       attachments,
       history,
     };
@@ -1046,7 +1047,7 @@ function createAgentPrompts(deps) {
     };
   }
 
-  function buildAuthorHint(llmNodes) {
+  function buildAuthorHint(llmNodes, projectContext = null) {
     const nodes = Array.isArray(llmNodes) ? llmNodes : [];
     const authorNode = nodes.find((node) => node?.is_me === true)
       || nodes.find((node) => node?.is_mine === true)
@@ -1060,6 +1061,24 @@ function createAgentPrompts(deps) {
       description: toTrimmedString(authorNode.description, 360),
       is_me: authorNode.is_me === true,
       is_mine: authorNode.is_mine === true,
+    };
+  }
+
+  function buildProjectContextAuthorHint(projectContext) {
+    const context = toProfile(projectContext);
+    const analysisMap = toProfile(context.analysisMap);
+    const entities = Array.isArray(analysisMap.entities) ? analysisMap.entities : [];
+    const authorId = toTrimmedString(analysisMap.author_entity_id, 120);
+    if (!authorId) return null;
+    const authorNode = entities.find((entity) => toTrimmedString(entity?.entity_id, 120) === authorId);
+    if (!authorNode) return null;
+    return {
+      id: authorId,
+      type: '',
+      name: toTrimmedString(authorNode.name, 160),
+      description: toTrimmedString(authorNode.summary, 360),
+      is_me: true,
+      is_mine: true,
     };
   }
 
@@ -1254,6 +1273,7 @@ function createAgentPrompts(deps) {
     sourceHistory,
     llmHistory,
     message,
+    projectContext,
   }) {
     const latestUserRequestFull =
       toTrimmedString(message, 2400) || toTrimmedString(llmHistory[llmHistory.length - 1]?.text, 2400);
@@ -1266,7 +1286,7 @@ function createAgentPrompts(deps) {
         name: node.name,
         description: toTrimmedString(node.description, 280),
       }));
-    const authorHint = buildAuthorHint(llmNodes);
+    const authorHint = buildAuthorHint(llmNodes) || buildProjectContextAuthorHint(projectContext);
 
     return {
       stage: sourceHistory.length > 1 ? 'follow_up' : 'initial',
@@ -1291,6 +1311,7 @@ function createAgentPrompts(deps) {
   function buildAgentLlmContextData({ scopeContext, history, attachments, message }) {
     const scope = toProfile(scopeContext);
     const projectMetadata = toProfile(scope.projectMetadata);
+    const isProjectScope = scope.scopeType === 'project';
     const rawEntities = Array.isArray(scope.sourceEntities)
       ? scope.sourceEntities
       : Array.isArray(scope.entities)
@@ -1305,12 +1326,14 @@ function createAgentPrompts(deps) {
 
     const llmNodes = [];
     const llmNodeIdSet = new Set();
-    for (const rawEntity of rawEntities) {
-      const serialized = serializeEntityForLlm(rawEntity);
-      if (!serialized) continue;
-      if (llmNodeIdSet.has(serialized.id)) continue;
-      llmNodeIdSet.add(serialized.id);
-      llmNodes.push(serialized);
+    if (!isProjectScope) {
+      for (const rawEntity of rawEntities) {
+        const serialized = serializeEntityForLlm(rawEntity);
+        if (!serialized) continue;
+        if (llmNodeIdSet.has(serialized.id)) continue;
+        llmNodeIdSet.add(serialized.id);
+        llmNodes.push(serialized);
+      }
     }
 
     const nodeEntityByNodeId = new Map();
@@ -1320,73 +1343,88 @@ function createAgentPrompts(deps) {
 
     const droppedEdges = [];
     const llmEdges = [];
-    const llmEdgeDedup = new Set();
-    for (const edge of sourceEdges) {
-      const sourceNodeId = toTrimmedString(edge.source, 120);
-      const targetNodeId = toTrimmedString(edge.target, 120);
-      if (!sourceNodeId || !targetNodeId) {
-        droppedEdges.push({
-          edge,
-          reason: 'invalid_edge_endpoint',
-        });
-        continue;
-      }
+    if (!isProjectScope) {
+      const llmEdgeDedup = new Set();
+      for (const edge of sourceEdges) {
+        const sourceNodeId = toTrimmedString(edge.source, 120);
+        const targetNodeId = toTrimmedString(edge.target, 120);
+        if (!sourceNodeId || !targetNodeId) {
+          droppedEdges.push({
+            edge,
+            reason: 'invalid_edge_endpoint',
+          });
+          continue;
+        }
 
-      const from =
-        nodeEntityByNodeId.get(sourceNodeId) || (llmNodeIdSet.has(sourceNodeId) ? sourceNodeId : '');
-      const to = nodeEntityByNodeId.get(targetNodeId) || (llmNodeIdSet.has(targetNodeId) ? targetNodeId : '');
+        const from =
+          nodeEntityByNodeId.get(sourceNodeId) || (llmNodeIdSet.has(sourceNodeId) ? sourceNodeId : '');
+        const to = nodeEntityByNodeId.get(targetNodeId) || (llmNodeIdSet.has(targetNodeId) ? targetNodeId : '');
 
-      if (!from || !to) {
-        droppedEdges.push({
-          edge,
-          reason: !from && !to ? 'missing_source_and_target_node_mapping' : !from ? 'missing_source_node_mapping' : 'missing_target_node_mapping',
-        });
-        continue;
-      }
+        if (!from || !to) {
+          droppedEdges.push({
+            edge,
+            reason: !from && !to ? 'missing_source_and_target_node_mapping' : !from ? 'missing_source_node_mapping' : 'missing_target_node_mapping',
+          });
+          continue;
+        }
 
-      if (!llmNodeIdSet.has(from) || !llmNodeIdSet.has(to)) {
-        droppedEdges.push({
-          edge,
-          reason: !llmNodeIdSet.has(from) && !llmNodeIdSet.has(to)
-            ? 'source_and_target_entity_filtered_out'
-            : !llmNodeIdSet.has(from)
-              ? 'source_entity_filtered_out'
-              : 'target_entity_filtered_out',
+        if (!llmNodeIdSet.has(from) || !llmNodeIdSet.has(to)) {
+          droppedEdges.push({
+            edge,
+            reason: !llmNodeIdSet.has(from) && !llmNodeIdSet.has(to)
+              ? 'source_and_target_entity_filtered_out'
+              : !llmNodeIdSet.has(from)
+                ? 'source_entity_filtered_out'
+                : 'target_entity_filtered_out',
+            from,
+            to,
+          });
+          continue;
+        }
+
+        const relation = {
           from,
           to,
-        });
-        continue;
+          type: resolveEdgeTypeForLlm(edge),
+          label: toTrimmedString(edge.label, 120),
+          ...resolveEdgeDirectionForLlm(edge, from, to),
+        };
+        const dedupKey = `${relation.from}|${relation.to}|${relation.type}|${relation.label}`;
+        if (llmEdgeDedup.has(dedupKey)) {
+          droppedEdges.push({
+            edge,
+            reason: 'duplicate_relation',
+            from,
+            to,
+          });
+          continue;
+        }
+        llmEdgeDedup.add(dedupKey);
+        llmEdges.push(relation);
       }
-
-      const relation = {
-        from,
-        to,
-        type: resolveEdgeTypeForLlm(edge),
-        label: toTrimmedString(edge.label, 120),
-        ...resolveEdgeDirectionForLlm(edge, from, to),
-      };
-      const dedupKey = `${relation.from}|${relation.to}|${relation.type}|${relation.label}`;
-      if (llmEdgeDedup.has(dedupKey)) {
-        droppedEdges.push({
-          edge,
-          reason: 'duplicate_relation',
-          from,
-          to,
-        });
-        continue;
-      }
-      llmEdgeDedup.add(dedupKey);
-      llmEdges.push(relation);
     }
 
     const historyContext = normalizeAgentHistoryForLlm(history);
     const attachmentContext = normalizeAgentAttachmentsForLlm(attachments);
+    const projectContext = isProjectScope
+      ? {
+          description: toTrimmedString(
+            projectMetadata.project_context_compiled_description || projectMetadata.description,
+            4000,
+          ),
+          analysisMap: toProfile(projectMetadata.project_analysis_map),
+          contextStatus: toTrimmedString(projectMetadata.project_context_status, 32),
+          builtAt: toTrimmedString(projectMetadata.project_context_built_at, 80),
+        }
+      : null;
+
     const stateSnapshot = buildAgentStateSnapshot({
       llmNodes,
       llmEdges,
       sourceHistory: historyContext.sourceHistory,
       llmHistory: historyContext.llmHistory,
       message,
+      projectContext,
     });
 
     const contextData = {
@@ -1396,25 +1434,13 @@ function createAgentPrompts(deps) {
         entityType: scope.entityType,
         projectId: scope.projectId,
         projectName: scope.projectName,
-        totalEntities: llmNodes.length,
+        totalEntities: isProjectScope ? Number(scope.totalEntities) || llmNodes.length : llmNodes.length,
         contextLimit: AI_CONTEXT_ENTITY_LIMIT,
       },
-      ...(scope.scopeType === 'project'
-        ? {
-            projectContext: {
-              description: toTrimmedString(
-                projectMetadata.project_context_compiled_description || projectMetadata.description,
-                4000,
-              ),
-              analysisMap: toProfile(projectMetadata.project_analysis_map),
-              contextStatus: toTrimmedString(projectMetadata.project_context_status, 32),
-              builtAt: toTrimmedString(projectMetadata.project_context_built_at, 80),
-            },
-          }
-        : {}),
+      ...(projectContext ? { projectContext } : {}),
       entities: llmNodes,
       connections: llmEdges,
-      groups: Array.isArray(scope.groups) ? scope.groups : [],
+      groups: isProjectScope ? [] : Array.isArray(scope.groups) ? scope.groups : [],
       attachments: attachmentContext.llmAttachments,
       history: historyContext.llmHistory,
       stateSnapshot,
@@ -1455,11 +1481,15 @@ function createAgentPrompts(deps) {
 
   function buildRouterPrompt(contextData, userMessage) {
     const entities = Array.isArray(contextData?.entities) ? contextData.entities : [];
-    const semanticSignals = entities
-      .map((entity) => collectEntitySemanticSignals(entity).join(' '))
-      .filter(Boolean)
-      .join(' ')
-      .slice(0, 6000);
+    const projectContextDescription = toTrimmedString(toProfile(contextData?.projectContext).description, 4000);
+    const semanticSignals = (
+      entities.length
+        ? entities
+          .map((entity) => collectEntitySemanticSignals(entity).join(' '))
+          .filter(Boolean)
+          .join(' ')
+        : projectContextDescription
+    ).slice(0, 6000);
 
     const query = toTrimmedString(userMessage, 2400);
 
@@ -1519,10 +1549,12 @@ function createAgentPrompts(deps) {
     const graphContext = {
       scope: toProfile(payloadContext?.scope),
       projectContext: toProfile(payloadContext?.projectContext),
-      entities: Array.isArray(payloadContext?.entities) ? payloadContext.entities : [],
-      connections: Array.isArray(payloadContext?.connections) ? payloadContext.connections : [],
       attachments: Array.isArray(payloadContext?.attachments) ? payloadContext.attachments : [],
     };
+    if (toTrimmedString(toProfile(payloadContext?.scope).type, 24) !== 'project') {
+      graphContext.entities = Array.isArray(payloadContext?.entities) ? payloadContext.entities : [];
+      graphContext.connections = Array.isArray(payloadContext?.connections) ? payloadContext.connections : [];
+    }
     const dialogueMemory = {
       history: Array.isArray(payloadContext?.history) ? payloadContext.history : [],
       latestAssistantQuestion: toTrimmedString(stateSnapshot?.latestAssistantQuestion, 360),
@@ -1543,9 +1575,9 @@ function createAgentPrompts(deps) {
       currentRequest,
       '',
       'Response Contract:',
-      '- Сначала молча разберись в смысле вопроса, проверь релевантные связи и ограничения в переданном контексте.',
-      '- Сначала опирайся на projectContext.analysisMap и projectContext.description, а полный граф используй только как уточняющий слой.',
-      '- Если в stateSnapshot.author есть author или у сущностей есть is_me/is_mine, используй это как ориентир: вопрос задан из личного контура автора проекта.',
+      '- Сначала молча разберись в смысле вопроса, проверь релевантные факты и ограничения в переданном контексте.',
+      '- Для project chat сначала опирайся на projectContext.description и projectContext.analysisMap.',
+      '- Если в stateSnapshot.author есть author, используй это как ориентир: вопрос задан из личного контура автора проекта.',
       '- Но не своди анализ только к автору: проверь внешний контур проекта на скрытые возможности, bottlenecks и недооцененные узлы.',
       '- При конфликте с устаревшими данными используй приоритет новых фактов пользователя.',
       '- По умолчанию верни короткий прямой ответ одним абзацем без показа внутреннего анализа.',
