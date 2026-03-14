@@ -1198,24 +1198,15 @@ function createAiRouter(deps) {
     const meta = toProfile(row.ai_metadata);
     const name = toTrimmedString(row.name, 120);
     if (!name) return null;
-    const pickList = (fieldKey, maxItems = 3, maxLen = 72) => {
-      return (Array.isArray(meta[fieldKey]) ? meta[fieldKey] : [])
-        .map((item) => toTrimmedString(item, maxLen))
-        .filter(Boolean)
-        .slice(0, maxItems);
-    };
 
     return {
       id: normalizeProjectEntityId(row._id, 120),
       name,
       type: toTrimmedString(row.type, 24),
       isAuthor: row.is_me === true || row.is_mine === true,
+      is_me: row.is_me === true,
+      is_mine: row.is_mine === true,
       description: toTrimmedString(meta.description, 320),
-      roles: pickList('roles'),
-      status: pickList('status'),
-      metrics: pickList('metrics', 2, 96),
-      risks: pickList('risks', 2, 96),
-      locations: pickList('location', 2, 80),
     };
   }
 

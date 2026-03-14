@@ -43,6 +43,7 @@ function createProjectEnrichmentPrompts(deps) {
           id: toTrimmedString(row.id || row._id, 80),
           name: toTrimmedString(row.name, 120),
           description: toTrimmedString(row.description || toProfile(row.ai_metadata).description, 2400),
+          isAuthor: row.isAuthor === true || row.is_me === true || row.is_mine === true,
           is_me: row.is_me === true,
           is_mine: row.is_mine === true,
         };
@@ -78,10 +79,33 @@ function createProjectEnrichmentPrompts(deps) {
       })
       .filter(Boolean);
 
+    const compactAuthor = (() => {
+      const row = toProfile(author);
+      const entityId = toTrimmedString(row.entity_id || row.id, 80);
+      if (!entityId) return null;
+      return {
+        entity_id: entityId,
+        isAuthor: row.isAuthor === true || row.is_me === true || row.is_mine === true,
+        is_me: row.is_me === true,
+        is_mine: row.is_mine === true,
+      };
+    })();
+
+    const compactNarrativeRings = {
+      inner: (Array.isArray(toProfile(narrativeRings).inner) ? toProfile(narrativeRings).inner : [])
+        .map((item) => toTrimmedString(toProfile(item).entity_id || toProfile(item).id, 80))
+        .filter(Boolean)
+        .slice(0, 12),
+      outer: (Array.isArray(toProfile(narrativeRings).outer) ? toProfile(narrativeRings).outer : [])
+        .map((item) => toTrimmedString(toProfile(item).entity_id || toProfile(item).id, 80))
+        .filter(Boolean)
+        .slice(0, 12),
+    };
+
     return {
       sourceHash: toTrimmedString(sourceHash, 120),
-      author: toProfile(author),
-      narrativeRings: toProfile(narrativeRings),
+      author: compactAuthor,
+      narrativeRings: compactNarrativeRings,
       graph: {
         entities: compactEntities,
         connections: compactConnections,
