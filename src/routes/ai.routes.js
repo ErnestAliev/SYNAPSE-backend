@@ -1606,15 +1606,9 @@ function createAiRouter(deps) {
     const systemPrompt = aiPrompts.buildProjectContextBuildSystemPrompt();
     const userPayload = aiPrompts.buildProjectContextBuildPayload({
       contextData: reducedContextData,
-      author: narrativeContext.author,
-      narrativeRings: narrativeContext.narrativeRings,
-      sourceHash,
     });
     const userPrompt = aiPrompts.buildProjectContextBuildUserPrompt({
       contextData: reducedContextData,
-      author: narrativeContext.author,
-      narrativeRings: narrativeContext.narrativeRings,
-      sourceHash,
     });
     const buildModel = toTrimmedString(OPENAI_MODEL, 120) || toTrimmedString(OPENAI_PROJECT_MODEL, 120) || 'gpt-5';
     return {
@@ -1888,15 +1882,9 @@ function createAiRouter(deps) {
       const systemPrompt = aiPrompts.buildProjectContextBuildSystemPrompt();
       const userPayload = aiPrompts.buildProjectContextBuildPayload({
         contextData: reducedContextData,
-        author: narrativeContext.author,
-        narrativeRings: narrativeContext.narrativeRings,
-        sourceHash,
       });
       const userPrompt = aiPrompts.buildProjectContextBuildUserPrompt({
         contextData: reducedContextData,
-        author: narrativeContext.author,
-        narrativeRings: narrativeContext.narrativeRings,
-        sourceHash,
       });
 
       const buildModel = toTrimmedString(OPENAI_MODEL, 120) || toTrimmedString(OPENAI_PROJECT_MODEL, 120) || 'gpt-5';
