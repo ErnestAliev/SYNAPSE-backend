@@ -131,8 +131,8 @@ function createProjectChatFlow({ deps, helpers }) {
       temperature: 0.6,
       maxOutputTokens: 2600,
       timeoutMs: Number.isFinite(configuredTimeout)
-        ? Math.max(90_000, Math.floor(configuredTimeout))
-        : 90_000,
+        ? Math.max(240_000, Math.floor(configuredTimeout))
+        : 240_000,
       reasoningEffort: 'medium',
       verbosity: 'low',
     };
@@ -754,7 +754,7 @@ function createProjectChatFlow({ deps, helpers }) {
       timeoutMs: requestConfig.timeoutMs,
       reasoningEffort: requestConfig.reasoningEffort,
       verbosity: requestConfig.verbosity,
-      singleRequest: false,
+      singleRequest: true,
     }));
 
     return {
