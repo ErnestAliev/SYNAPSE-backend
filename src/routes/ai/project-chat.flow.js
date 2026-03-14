@@ -138,6 +138,56 @@ function createProjectChatFlow({ deps, helpers }) {
     };
   }
 
+  function extractAssistantQuestion(text) {
+    const normalized = toTrimmedString(text, 1600);
+    if (!normalized) return '';
+
+    const labeledMatch = normalized.match(/Следующий вопрос:\s*([^\n]+)$/i);
+    if (labeledMatch?.[1]) {
+      return toTrimmedString(labeledMatch[1], 360);
+    }
+
+    const questionMatches = normalized.match(/[^.!?\n]*\?/g) || [];
+    const lastQuestion = questionMatches
+      .map((item) => toTrimmedString(item, 360))
+      .filter(Boolean)
+      .slice(-1)[0];
+
+    return lastQuestion || '';
+  }
+
+  function buildProjectDialogueState(contextData, currentMessage) {
+    const payloadContext = toProfile(contextData);
+    const history = Array.isArray(payloadContext.history) ? payloadContext.history : [];
+    const recentTurns = history
+      .slice(-6)
+      .map((item) => {
+        const row = toProfile(item);
+        const role = row.role === 'assistant' ? 'assistant' : 'user';
+        const text = toTrimmedString(row.text, 500);
+        if (!text) return null;
+        return { role, text };
+      })
+      .filter(Boolean);
+
+    const lastAssistantTurn = [...history]
+      .reverse()
+      .find((item) => toProfile(item).role === 'assistant');
+    const openQuestion = extractAssistantQuestion(toProfile(lastAssistantTurn).text);
+    const currentText = toTrimmedString(currentMessage, 2400);
+
+    let modeHint = 'new_question';
+    if (openQuestion) {
+      modeHint = currentText.includes('?') ? 'mixed' : 'answer_open_question';
+    }
+
+    return {
+      open_question: openQuestion || null,
+      mode_hint: modeHint,
+      recent_turns: recentTurns,
+    };
+  }
+
   function normalizeStringList(values, {
     maxItems = 12,
     itemMaxLength = 240,
@@ -611,6 +661,7 @@ function createProjectChatFlow({ deps, helpers }) {
   function buildProjectPlainTextFallbackPrompts({ contextData, message }) {
     const payloadContext = toProfile(contextData);
     const projectContext = toProfile(payloadContext.projectContext);
+    const dialogueState = buildProjectDialogueState(payloadContext, message);
     const systemPrompt = [
       'Ты работаешь как сильный проектный собеседник.',
       '',
@@ -679,12 +730,19 @@ function createProjectChatFlow({ deps, helpers }) {
       '- брейншторм,',
       '- предложение, что именно надо быстро проверить или добрать.',
       '',
+      'Если в dialogue_state есть open_question и текущее сообщение отвечает на него, считай это продолжением текущей ветки, а не новой темой.',
+      'Если текущее сообщение одновременно отвечает на open_question и задаёт новый вопрос, сначала учти ответ пользователя, потом ответь по новой формулировке.',
+      'Используй recent_turns только как локальную память текущей ветки, а не как материал для пересказа.',
+      '',
       'Отвечай на языке пользователя.',
     ].join('\n');
 
     const userPrompt = [
       'Контекст проекта:',
       toTrimmedString(projectContext.description, 18000),
+      '',
+      'Диалоговый контекст:',
+      JSON.stringify(dialogueState, null, 2),
       '',
       'Вопрос пользователя:',
       toTrimmedString(message, 2400),
@@ -1156,6 +1214,7 @@ function createProjectChatFlow({ deps, helpers }) {
       contextData,
       message,
     });
+    const dialogueState = buildProjectDialogueState(contextData, message);
     const systemPromptWithoutRoleInjection = directPromptPack.systemPrompt;
     const systemPrompt = directPromptPack.systemPrompt;
     const userPrompt = directPromptPack.userPrompt;
@@ -1284,6 +1343,7 @@ function createProjectChatFlow({ deps, helpers }) {
         directContextChat: {
           mode: 'single_plain_text_call',
           requestConfig,
+          dialogueState,
           prompts: directResult.prompts,
           payloadSize: directResult.payloadSize,
           finalAnswerAssembly: 'provider_plain_text',
