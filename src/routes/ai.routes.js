@@ -200,52 +200,10 @@ function createAiRouter(deps) {
     strict: true,
     schema: {
       type: 'object',
-      required: ['compiled_context', 'analysisMap'],
+      required: ['compiled_context'],
       additionalProperties: false,
       properties: {
         compiled_context: { type: 'string' },
-        analysisMap: {
-          type: 'object',
-          required: ['entities', 'connections'],
-          additionalProperties: false,
-          properties: {
-            entities: {
-              type: 'array',
-              items: {
-                type: 'object',
-                required: [
-                  'entity_id',
-                  'goal_relevance',
-                  'confidence',
-                ],
-                additionalProperties: false,
-                properties: {
-                  entity_id: { type: 'string' },
-                  goal_relevance: { type: 'integer', minimum: 0, maximum: 100 },
-                  confidence: { type: 'integer', minimum: 0, maximum: 100 },
-                },
-              },
-            },
-            connections: {
-              type: 'array',
-              items: {
-                type: 'object',
-                required: ['from', 'to', 'label', 'meaning', 'polarity', 'connection_relevance', 'connection_strength', 'confidence'],
-                additionalProperties: false,
-                properties: {
-                  from: { type: 'string' },
-                  to: { type: 'string' },
-                  label: { type: 'string' },
-                  meaning: { type: 'string' },
-                  polarity: { type: 'string', enum: ['positive', 'negative', 'neutral'] },
-                  connection_relevance: { type: 'integer', minimum: 0, maximum: 100 },
-                  connection_strength: { type: 'integer', minimum: 0, maximum: 100 },
-                  confidence: { type: 'integer', minimum: 0, maximum: 100 },
-                },
-              },
-            },
-          },
-        },
       },
     },
   });
@@ -1487,16 +1445,8 @@ function createAiRouter(deps) {
     connections,
     groups,
   }) {
-    const analysisMap = buildProjectAnalysisMapFallback({
-      scopeContext,
-      sourceEntities,
-      connections,
-      groups,
-    });
-
     return {
       compiled_context: '',
-      analysisMap,
     };
   }
 
@@ -1896,7 +1846,7 @@ function createAiRouter(deps) {
         }));
 
         const parsed = extractJsonObjectFromText(buildAiResponse.reply);
-        if (!parsed || typeof parsed.compiled_context !== 'string' || !parsed.analysisMap || typeof parsed.analysisMap !== 'object') {
+        if (!parsed || typeof parsed.compiled_context !== 'string') {
           throw Object.assign(new Error('Failed to parse project context build result'), { status: 502 });
         }
         payload = toProfile(parsed);
@@ -1910,18 +1860,7 @@ function createAiRouter(deps) {
         payload._fallbackError = toTrimmedString(error?.message, 240);
       }
 
-      const fallbackAnalysisMap = buildProjectAnalysisMapFallback({
-        scopeContext,
-        sourceEntities,
-        connections: contextData?.connections,
-        groups: contextData?.groups,
-      });
-      const normalizedAnalysisMap = normalizeProjectAnalysisMap(payload.analysisMap, fallbackAnalysisMap);
-      const fallbackDescription = compileProjectDescriptionFromAnalysisMap(normalizedAnalysisMap);
-      const nextDescription = appendProjectWeightsToDescription(
-        normalizeProjectContextDescription(payload.compiled_context, fallbackDescription),
-        normalizedAnalysisMap,
-      );
+      const nextDescription = normalizeProjectContextDescription(payload.compiled_context, '');
       const missing = payload._fallbackError
         ? ['LLM build failed; degraded snapshot preserved.']
         : [];
@@ -1971,7 +1910,7 @@ function createAiRouter(deps) {
         ...freshMeta,
         description: nextDescription,
         project_context_compiled_description: nextDescription,
-        project_analysis_map: normalizedAnalysisMap,
+        project_analysis_map: {},
         project_context_last_build_log: buildLog,
         project_context_status: 'fresh',
         project_context_source_hash: sourceHash,
