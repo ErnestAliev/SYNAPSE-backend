@@ -1616,7 +1616,6 @@ function createAiRouter(deps) {
     scopeContext,
     sourceHash,
     reducedContextData,
-    aggregatedEntityFields,
     narrativeContext,
     contextData,
     sourceEntities,
@@ -1624,7 +1623,6 @@ function createAiRouter(deps) {
     const systemPrompt = aiPrompts.buildProjectContextBuildSystemPrompt();
     const userPrompt = aiPrompts.buildProjectContextBuildUserPrompt({
       contextData: reducedContextData,
-      aggregatedEntityFields,
       author: narrativeContext.author,
       narrativeRings: narrativeContext.narrativeRings,
       sourceHash,
@@ -1679,7 +1677,6 @@ function createAiRouter(deps) {
         contextData: reducedContextData,
         author: narrativeContext.author,
         narrativeRings: narrativeContext.narrativeRings,
-        aggregatedEntityFields,
       },
       fallbackPreview: {
         analysisMap: fallbackAnalysisMap,
@@ -1859,20 +1856,11 @@ function createAiRouter(deps) {
               description: toTrimmedString(meta.description, 2400),
               is_me: row.is_me === true,
               is_mine: row.is_mine === true,
-              roles: Array.isArray(meta.roles) ? meta.roles.slice(0, 4) : [],
-              status: Array.isArray(meta.status) ? meta.status.slice(0, 4) : [],
-              metrics: Array.isArray(meta.metrics) ? meta.metrics.slice(0, 3) : [],
-              risks: Array.isArray(meta.risks) ? meta.risks.slice(0, 3) : [],
-              resources: Array.isArray(meta.resources) ? meta.resources.slice(0, 3) : [],
-              outcomes: Array.isArray(meta.outcomes) ? meta.outcomes.slice(0, 3) : [],
-              location: Array.isArray(meta.location) ? meta.location.slice(0, 3) : [],
-              stage: Array.isArray(meta.stage) ? meta.stage.slice(0, 2) : [],
             };
           }),
         connections: (Array.isArray(contextData?.connections) ? contextData.connections : []).slice(0, 120),
         groups: (Array.isArray(contextData?.groups) ? contextData.groups : []).slice(0, 40),
       };
-      const aggregatedEntityFields = collectProjectAggregatedEntityFields(sourceEntities);
       const narrativeContext = buildProjectNarrativeContext({
         sourceEntities,
         connections: reducedContextData.connections,
@@ -1884,7 +1872,6 @@ function createAiRouter(deps) {
           scopeContext,
           sourceHash,
           reducedContextData,
-          aggregatedEntityFields,
           narrativeContext,
           contextData,
           sourceEntities,
@@ -1947,20 +1934,11 @@ function createAiRouter(deps) {
               description: toTrimmedString(meta.description, 2400),
               is_me: row.is_me === true,
               is_mine: row.is_mine === true,
-              roles: Array.isArray(meta.roles) ? meta.roles.slice(0, 4) : [],
-              status: Array.isArray(meta.status) ? meta.status.slice(0, 4) : [],
-              metrics: Array.isArray(meta.metrics) ? meta.metrics.slice(0, 3) : [],
-              risks: Array.isArray(meta.risks) ? meta.risks.slice(0, 3) : [],
-              resources: Array.isArray(meta.resources) ? meta.resources.slice(0, 3) : [],
-              outcomes: Array.isArray(meta.outcomes) ? meta.outcomes.slice(0, 3) : [],
-              location: Array.isArray(meta.location) ? meta.location.slice(0, 3) : [],
-              stage: Array.isArray(meta.stage) ? meta.stage.slice(0, 2) : [],
             };
           }),
         connections: (Array.isArray(contextData?.connections) ? contextData.connections : []).slice(0, 120),
         groups: (Array.isArray(contextData?.groups) ? contextData.groups : []).slice(0, 40),
       };
-      const aggregatedEntityFields = collectProjectAggregatedEntityFields(sourceEntities);
       const narrativeContext = buildProjectNarrativeContext({
         sourceEntities,
         connections: reducedContextData.connections,
@@ -1969,7 +1947,6 @@ function createAiRouter(deps) {
       const systemPrompt = aiPrompts.buildProjectContextBuildSystemPrompt();
       const userPrompt = aiPrompts.buildProjectContextBuildUserPrompt({
         contextData: reducedContextData,
-        aggregatedEntityFields,
         author: narrativeContext.author,
         narrativeRings: narrativeContext.narrativeRings,
         sourceHash,
@@ -2076,7 +2053,6 @@ function createAiRouter(deps) {
           contextData: reducedContextData,
           author: narrativeContext.author,
           narrativeRings: narrativeContext.narrativeRings,
-          aggregatedEntityFields,
         },
         llmResult: payload._fallbackError
           ? {

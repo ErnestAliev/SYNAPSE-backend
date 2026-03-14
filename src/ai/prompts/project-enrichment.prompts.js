@@ -117,8 +117,8 @@ function createProjectEnrichmentPrompts(deps) {
       'Ты Synapse12 Project Context Builder.',
       'Работай только по входному JSON-контексту без внешних фактов и догадок.',
       'Задача: собрать project_analysis_map по dashboard snapshot.',
-      'Источник истины для этой задачи: только description сущностей, разрешенные структурированные поля сущностей и связи/группы графа.',
-      'Нельзя использовать историю чатов сущностей, text_input, voice_input, documents, description_history и любые сырые диалоги.',
+      'Источник истины для этой задачи: только description сущностей, связи/группы графа и author flags.',
+      'Нельзя использовать структурированные поля сущностей, историю чатов сущностей, text_input, voice_input, documents, description_history и любые сырые диалоги.',
       'Нужно вернуть аналитическую карту проекта, а не набор project fields.',
       'Не выдумывай факты, роли, метрики и связи.',
       'Учитывай группы как агрегированные узлы, если они есть во входных данных.',
@@ -192,7 +192,6 @@ function createProjectEnrichmentPrompts(deps) {
 
   function buildProjectContextBuildUserPrompt({
     contextData,
-    aggregatedEntityFields,
     author,
     narrativeRings,
     sourceHash,
@@ -208,14 +207,6 @@ function createProjectEnrichmentPrompts(deps) {
           description: toTrimmedString(row.description || toProfile(row.ai_metadata).description, 2400),
           is_me: row.is_me === true,
           is_mine: row.is_mine === true,
-          roles: Array.isArray(row.roles) ? row.roles : [],
-          status: Array.isArray(row.status) ? row.status : [],
-          metrics: Array.isArray(row.metrics) ? row.metrics : [],
-          risks: Array.isArray(row.risks) ? row.risks : [],
-          resources: Array.isArray(row.resources) ? row.resources : [],
-          outcomes: Array.isArray(row.outcomes) ? row.outcomes : [],
-          location: Array.isArray(row.location) ? row.location : [],
-          stage: Array.isArray(row.stage) ? row.stage : [],
         };
       });
 
@@ -228,15 +219,6 @@ function createProjectEnrichmentPrompts(deps) {
         entities: compactEntities,
         connections: Array.isArray(contextData?.connections) ? contextData.connections : [],
         groups: Array.isArray(contextData?.groups) ? contextData.groups : [],
-      },
-      aggregatedEntityFields: {
-        metrics: Array.isArray(aggregatedEntityFields?.metrics) ? aggregatedEntityFields.metrics.slice(0, 8) : [],
-        risks: Array.isArray(aggregatedEntityFields?.risks) ? aggregatedEntityFields.risks.slice(0, 8) : [],
-        status: Array.isArray(aggregatedEntityFields?.status) ? aggregatedEntityFields.status.slice(0, 8) : [],
-        outcomes: Array.isArray(aggregatedEntityFields?.outcomes) ? aggregatedEntityFields.outcomes.slice(0, 8) : [],
-        owners: Array.isArray(aggregatedEntityFields?.owners) ? aggregatedEntityFields.owners.slice(0, 6) : [],
-        resources: Array.isArray(aggregatedEntityFields?.resources) ? aggregatedEntityFields.resources.slice(0, 8) : [],
-        location: Array.isArray(aggregatedEntityFields?.location) ? aggregatedEntityFields.location.slice(0, 8) : [],
       },
     };
 

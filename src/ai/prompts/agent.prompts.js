@@ -999,7 +999,6 @@ function createAgentPrompts(deps) {
   function buildAgentContextData({ scopeContext, history, attachments }) {
     const cleanedEntities = cleanContextData(scopeContext.entities);
     const projectMetadata = toProfile(scopeContext.projectMetadata);
-    const projectAnalysisMap = toProfile(projectMetadata.project_analysis_map);
     const projectContext =
       scopeContext.scopeType === 'project'
         ? {
@@ -1009,9 +1008,6 @@ function createAgentPrompts(deps) {
             ),
             contextStatus: toTrimmedString(projectMetadata.project_context_status, 32),
             builtAt: toTrimmedString(projectMetadata.project_context_built_at, 80),
-            buildMode: toTrimmedString(projectMetadata.project_context_build_mode, 24),
-            summary: toTrimmedString(projectMetadata.project_context_summary, 600),
-            analysisMap: projectAnalysisMap,
           }
         : null;
 
@@ -1411,9 +1407,6 @@ function createAgentPrompts(deps) {
               ),
               contextStatus: toTrimmedString(projectMetadata.project_context_status, 32),
               builtAt: toTrimmedString(projectMetadata.project_context_built_at, 80),
-              buildMode: toTrimmedString(projectMetadata.project_context_build_mode, 24),
-              summary: toTrimmedString(projectMetadata.project_context_summary, 600),
-              analysisMap: toProfile(projectMetadata.project_analysis_map),
             },
           }
         : {}),
@@ -1505,7 +1498,6 @@ function createAgentPrompts(deps) {
       'Используй автора как опорную точку для интерпретации целей, ресурсов, ограничений и личной роли в проекте, но не зацикливайся только на нём.',
       'Обязательно проверяй, нет ли вне прямого авторского контура скрытых недооцененных активов, узлов, возможностей или ограничений, которые сильнее влияют на результат проекта.',
       'Критично: при конфликте между старым контекстом и новыми фактами пользователя приоритет у САМЫХ СВЕЖИХ user-сообщений.',
-      'Если в projectContext.analysisMap есть аналитическая карта проекта, используй её как основной слой понимания проекта: сущности, связи, synthesis и bottlenecks.',
       'Не повторяй дословно предыдущие ответы ассистента: каждый ход должен обновлять оценку по новым данным.',
       STRICT_FORMATTING_RULES,
     ].join('\n');
@@ -1550,7 +1542,7 @@ function createAgentPrompts(deps) {
       '',
       'Response Contract:',
       '- Сначала молча разберись в смысле вопроса, проверь релевантные связи и ограничения в переданном контексте.',
-      '- Если есть projectContext.analysisMap, сначала опирайся на него, а полный граф используй только как уточняющий слой.',
+      '- Сначала опирайся на projectContext.description, а полный граф используй только как уточняющий слой.',
       '- Если в stateSnapshot.author есть author или у сущностей есть is_me/is_mine, используй это как ориентир: вопрос задан из личного контура автора проекта.',
       '- Но не своди анализ только к автору: проверь внешний контур проекта на скрытые возможности, bottlenecks и недооцененные узлы.',
       '- При конфликте с устаревшими данными используй приоритет новых фактов пользователя.',
