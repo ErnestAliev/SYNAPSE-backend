@@ -106,6 +106,8 @@ function createProjectChatFlow({ deps, helpers }) {
     runProjectChatAutoEnrichment,
     buildAgentLlmContext,
   } = helpers;
+  const PROJECT_CHAT_MODEL = 'gpt-5.4';
+  const PROJECT_CHAT_MAX_OUTPUT_TOKENS = 25_000;
 
   function resolveProjectDeepReasoningRequestConfig() {
     const configuredTokens = Number(AGENT_CHAT_MAIN_REQUEST_CONFIG.maxOutputTokens);
@@ -115,8 +117,8 @@ function createProjectChatFlow({ deps, helpers }) {
     return {
       temperature: Math.max(0.6, Number(AGENT_CHAT_MAIN_REQUEST_CONFIG.temperature) || 0),
       maxOutputTokens: Number.isFinite(configuredTokens)
-        ? Math.max(PROJECT_DEEP_REASONING_MIN_OUTPUT_TOKENS, Math.floor(configuredTokens))
-        : PROJECT_DEEP_REASONING_MIN_OUTPUT_TOKENS,
+        ? Math.max(PROJECT_CHAT_MAX_OUTPUT_TOKENS, Math.floor(configuredTokens))
+        : PROJECT_CHAT_MAX_OUTPUT_TOKENS,
       timeoutMs: Number.isFinite(configuredTimeout)
         ? Math.max(PROJECT_DEEP_REASONING_MIN_TIMEOUT_MS, Math.floor(configuredTimeout))
         : PROJECT_DEEP_REASONING_MIN_TIMEOUT_MS,
@@ -129,7 +131,7 @@ function createProjectChatFlow({ deps, helpers }) {
     const configuredTimeout = Number(AGENT_CHAT_MAIN_REQUEST_CONFIG.timeoutMs);
     return {
       temperature: 0.6,
-      maxOutputTokens: 2600,
+      maxOutputTokens: PROJECT_CHAT_MAX_OUTPUT_TOKENS,
       timeoutMs: Number.isFinite(configuredTimeout)
         ? Math.max(240_000, Math.floor(configuredTimeout))
         : 240_000,
@@ -1033,6 +1035,7 @@ function createProjectChatFlow({ deps, helpers }) {
     const detectedRole = resolveCompatibleDetectedRole(roleSelection, normalizedRoleHint);
 
     const deepModel =
+      PROJECT_CHAT_MODEL ||
       toTrimmedString(OPENAI_PROJECT_MODEL, 120) ||
       toTrimmedString(OPENAI_MODEL, 120) ||
       '';
@@ -1206,6 +1209,7 @@ function createProjectChatFlow({ deps, helpers }) {
     const detectedRole = resolveCompatibleDetectedRole(roleSelection, normalizedRoleHint);
 
     const deepModel =
+      PROJECT_CHAT_MODEL ||
       toTrimmedString(OPENAI_PROJECT_MODEL, 120) ||
       toTrimmedString(OPENAI_MODEL, 120) ||
       '';
