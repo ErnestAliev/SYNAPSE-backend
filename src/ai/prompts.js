@@ -23,6 +23,7 @@ function createAiPrompts(deps) {
     buildProjectEnrichmentSystemPrompt: projectEnrichmentPrompts.buildProjectEnrichmentSystemPrompt,
     buildProjectEnrichmentUserPrompt: projectEnrichmentPrompts.buildProjectEnrichmentUserPrompt,
     buildProjectContextBuildSystemPrompt: projectEnrichmentPrompts.buildProjectContextBuildSystemPrompt,
+    buildProjectContextBuildPayload: projectEnrichmentPrompts.buildProjectContextBuildPayload,
     buildProjectContextBuildUserPrompt: projectEnrichmentPrompts.buildProjectContextBuildUserPrompt,
     buildEntityAnalyzerSystemPrompt: entityProtectedPrompts.buildEntityAnalyzerSystemPrompt,
     buildEntityAnalyzerUserPrompt: entityProtectedPrompts.buildEntityAnalyzerUserPrompt,
