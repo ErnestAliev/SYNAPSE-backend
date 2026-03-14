@@ -1603,14 +1603,6 @@ function createAiRouter(deps) {
     return hashProjectContextCanvasSignature(buildProjectContextCanvasSignature(canvasData));
   }
 
-  function buildJsonSizeStats(payload) {
-    const text = JSON.stringify(payload ?? null);
-    return {
-      chars: text.length,
-      bytes: Buffer.byteLength(text, 'utf8'),
-    };
-  }
-
   function buildProjectContextBuildPreview({
     project,
     scopeContext,
@@ -1628,68 +1620,48 @@ function createAiRouter(deps) {
       sourceHash,
     });
     const buildModel = toTrimmedString(OPENAI_MODEL, 120) || toTrimmedString(OPENAI_PROJECT_MODEL, 120) || 'gpt-5';
-    const requestPreview = typeof aiProvider.previewOpenAiAgentRequest === 'function'
-      ? aiProvider.previewOpenAiAgentRequest({
-        systemPrompt,
-        userPrompt,
-        model: buildModel,
-        temperature: 0.1,
-        maxOutputTokens: 1400,
-        timeoutMs: 65_000,
-        reasoningEffort: 'low',
-        verbosity: 'low',
-        jsonSchema: PROJECT_CONTEXT_BUILD_OUTPUT_SCHEMA,
-      })
-      : null;
     const fallbackAnalysisMap = buildProjectAnalysisMapFallback({
       scopeContext,
       sourceEntities,
       connections: contextData?.connections,
     });
     const fallbackDescription = compileProjectDescriptionFromAnalysisMap(fallbackAnalysisMap);
-    const requestBody = toProfile(requestPreview?.requestBody);
     const projectMeta = toProfile(project?.ai_metadata);
 
     return {
-      timestamp: new Date().toISOString(),
-      scope: {
-        type: scopeContext?.scopeType,
-        projectId: scopeContext?.projectId,
-        projectName: scopeContext?.projectName,
-        totalEntities: Number(scopeContext?.totalEntities) || 0,
-      },
-      input: {
-        projectId: toTrimmedString(project?._id, 120),
-        sourceHash,
-        buildMode: toTrimmedString(projectMeta.project_context_build_mode, 24),
-        currentContextStatus: toTrimmedString(projectMeta.project_context_status, 24),
-      },
-      prompts: {
+      exportedAt: new Date().toISOString(),
+      source: 'project-context.preview',
+      llm_input: {
         model: buildModel,
         systemPrompt,
         userPrompt,
-        requestBody,
-        requestBodySize: buildJsonSizeStats(requestBody),
-        jsonSchemaName: PROJECT_CONTEXT_BUILD_OUTPUT_SCHEMA.name,
-      },
-      builderContext: {
         sourceHash,
+        project: {
+          id: toTrimmedString(project?._id, 120),
+          name: toTrimmedString(project?.name, 200),
+          totalEntities: Number(scopeContext?.totalEntities) || 0,
+        },
         contextData: reducedContextData,
         author: narrativeContext.author,
         narrativeRings: narrativeContext.narrativeRings,
       },
-      fallbackPreview: {
-        analysisMap: fallbackAnalysisMap,
-        compiledDescription: fallbackDescription,
+      llm_output: {
+        mode: 'preview_only',
+        rawReply: '',
+        parsedPayload: null,
+        fallbackUsed: false,
+        error: '',
       },
-      savedProjectContext: {
-        description: toTrimmedString(
-          projectMeta.project_context_compiled_description || projectMeta.description,
-          4000,
-        ),
-        buildMode: toTrimmedString(projectMeta.project_context_build_mode, 24),
-        status: toTrimmedString(projectMeta.project_context_status, 24),
-        analysisMap: toProfile(projectMeta.project_analysis_map),
+      system_postprocess: {
+        previewOnly: true,
+        currentSavedContext: {
+          status: toTrimmedString(projectMeta.project_context_status, 24),
+          buildMode: toTrimmedString(projectMeta.project_context_build_mode, 24),
+        },
+        fallbackResult: {
+          analysisMap: fallbackAnalysisMap,
+          compiledDescription: fallbackDescription,
+        },
       },
     };
   }
@@ -1953,19 +1925,6 @@ function createAiRouter(deps) {
       });
 
       const buildModel = toTrimmedString(OPENAI_MODEL, 120) || toTrimmedString(OPENAI_PROJECT_MODEL, 120) || 'gpt-5';
-      const buildRequestPreview = typeof aiProvider.previewOpenAiAgentRequest === 'function'
-        ? aiProvider.previewOpenAiAgentRequest({
-          systemPrompt,
-          userPrompt,
-          model: buildModel,
-          temperature: 0.1,
-          maxOutputTokens: 1400,
-          timeoutMs: 65_000,
-          reasoningEffort: 'low',
-          verbosity: 'low',
-          jsonSchema: PROJECT_CONTEXT_BUILD_OUTPUT_SCHEMA,
-        })
-        : null;
       let payload = null;
       let buildAiResponse = null;
       try {
@@ -2026,46 +1985,36 @@ function createAiRouter(deps) {
       const buildLog = {
         exportedAt: new Date().toISOString(),
         source: 'project-context.build',
-        scope: {
-          type: scopeContext?.scopeType,
-          projectId: scopeContext?.projectId,
-          projectName: scopeContext?.projectName,
-          totalEntities: Number(scopeContext?.totalEntities) || 0,
-        },
-        input: {
-          projectId,
-          sourceHash,
-          sourceEntityCount: Array.isArray(sourceEntities) ? sourceEntities.length : 0,
-          reducedEntityCount: Array.isArray(reducedContextData?.entities) ? reducedContextData.entities.length : 0,
-          reducedConnectionCount: Array.isArray(reducedContextData?.connections) ? reducedContextData.connections.length : 0,
-          reducedGroupCount: Array.isArray(reducedContextData?.groups) ? reducedContextData.groups.length : 0,
-        },
-        prompts: {
+        llm_input: {
           model: buildModel,
+          sourceHash,
           systemPrompt,
           userPrompt,
-          requestBody: toProfile(buildRequestPreview?.requestBody),
-          requestBodySize: buildJsonSizeStats(toProfile(buildRequestPreview?.requestBody)),
-        },
-        builderContext: {
-          sourceHash,
+          project: {
+            id: projectId,
+            name: toTrimmedString(scopeContext?.projectName, 200),
+            totalEntities: Number(scopeContext?.totalEntities) || 0,
+          },
           contextData: reducedContextData,
           author: narrativeContext.author,
           narrativeRings: narrativeContext.narrativeRings,
         },
-        llmResult: payload._fallbackError
+        llm_output: payload._fallbackError
           ? {
             mode: 'fallback',
+            rawReply: '',
+            parsedPayload: null,
+            fallbackUsed: true,
             error: toTrimmedString(payload._fallbackError, 240),
-            payload,
           }
           : {
             mode: 'llm',
-            reply: toTrimmedString(buildAiResponse?.reply, 20000),
+            rawReply: toTrimmedString(buildAiResponse?.reply, 20000),
             parsedPayload: payload,
-            provider: toProfile(buildAiResponse?.debug),
+            fallbackUsed: false,
+            error: '',
           },
-        normalizedResult: {
+        system_postprocess: {
           analysisMap: normalizedAnalysisMap,
           compiledDescription: nextDescription,
           missing,
