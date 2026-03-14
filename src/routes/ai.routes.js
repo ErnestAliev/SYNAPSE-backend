@@ -1901,7 +1901,7 @@ function createAiRouter(deps) {
           includeRawPayload: true,
           model: buildModel,
           temperature: 0.1,
-          maxOutputTokens: 1400,
+          maxOutputTokens: 25000,
           allowEmptyResponse: false,
           timeoutMs: 65_000,
           reasoningEffort: 'low',
