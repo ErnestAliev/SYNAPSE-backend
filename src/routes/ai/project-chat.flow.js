@@ -1033,8 +1033,8 @@ function createProjectChatFlow({ deps, helpers }) {
     const detectedRole = resolveCompatibleDetectedRole(roleSelection, normalizedRoleHint);
 
     const deepModel =
-      toTrimmedString(OPENAI_DEEP_MODEL, 120) ||
       toTrimmedString(OPENAI_PROJECT_MODEL, 120) ||
+      toTrimmedString(OPENAI_MODEL, 120) ||
       '';
 
     const promptPack = hasQuestion
@@ -1206,8 +1206,8 @@ function createProjectChatFlow({ deps, helpers }) {
     const detectedRole = resolveCompatibleDetectedRole(roleSelection, normalizedRoleHint);
 
     const deepModel =
-      toTrimmedString(OPENAI_DEEP_MODEL, 120) ||
       toTrimmedString(OPENAI_PROJECT_MODEL, 120) ||
+      toTrimmedString(OPENAI_MODEL, 120) ||
       '';
 
     const directPromptPack = buildProjectPlainTextFallbackPrompts({
