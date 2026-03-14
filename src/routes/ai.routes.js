@@ -1885,6 +1885,7 @@ function createAiRouter(deps) {
       });
 
       const buildModel = toTrimmedString(OPENAI_MODEL, 120) || toTrimmedString(OPENAI_PROJECT_MODEL, 120) || 'gpt-5';
+      const buildStartedAt = Date.now();
       let payload = null;
       let buildAiResponse = null;
       try {
@@ -1903,7 +1904,7 @@ function createAiRouter(deps) {
           temperature: 0.1,
           maxOutputTokens: 25000,
           allowEmptyResponse: false,
-          timeoutMs: 65_000,
+          timeoutMs: 180_000,
           reasoningEffort: 'low',
           verbosity: 'low',
           jsonSchema: PROJECT_CONTEXT_BUILD_OUTPUT_SCHEMA,
@@ -1940,6 +1941,9 @@ function createAiRouter(deps) {
 
       const freshMeta = toProfile(freshProject.ai_metadata);
       const nextVersion = Math.max(0, Number(freshMeta.project_context_version) || 0) + 1;
+      const providerDebug = toProfile(buildAiResponse?.debug);
+      const providerResponse = toProfile(providerDebug.response);
+      const providerRawPayload = toProfile(providerDebug.raw_payload);
       const buildLog = {
         exportedAt: new Date().toISOString(),
         source: 'project-context.build',
@@ -1947,6 +1951,7 @@ function createAiRouter(deps) {
           model: buildModel,
           systemPrompt,
           userPayload,
+          timeoutMs: 180000,
         },
         llm_output: payload._fallbackError
           ? {
@@ -1955,6 +1960,9 @@ function createAiRouter(deps) {
             parsedPayload: null,
             fallbackUsed: true,
             error: toTrimmedString(payload._fallbackError, 240),
+            completedInMs: Number(providerResponse.completed_in_ms) || Math.max(1, Date.now() - buildStartedAt),
+            providerStatus: toTrimmedString(providerRawPayload.status, 40) || toTrimmedString(providerResponse.status, 40),
+            incompleteReason: toTrimmedString(toProfile(providerRawPayload.incomplete_details).reason, 120),
           }
           : {
             mode: 'llm',
@@ -1962,6 +1970,9 @@ function createAiRouter(deps) {
             parsedPayload: payload,
             fallbackUsed: false,
             error: '',
+            completedInMs: Number(providerResponse.completed_in_ms) || Math.max(1, Date.now() - buildStartedAt),
+            providerStatus: toTrimmedString(providerRawPayload.status, 40) || toTrimmedString(providerResponse.status, 40),
+            incompleteReason: toTrimmedString(toProfile(providerRawPayload.incomplete_details).reason, 120),
           },
       };
       freshProject.ai_metadata = {
