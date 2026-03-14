@@ -1999,7 +1999,6 @@ function createAiRouter(deps) {
       } catch (error) {
         payload = buildProjectContextFallbackResult({
           scopeContext,
-          aggregatedEntityFields,
           sourceEntities,
           connections: contextData?.connections,
         });
