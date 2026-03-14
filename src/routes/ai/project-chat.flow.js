@@ -84,6 +84,7 @@ const FINAL_ANSWER_FORBIDDEN_FIELD_LABELS = Object.freeze([
 const PROJECT_DEEP_REASONING_MAX_CALLS = 2;
 const PROJECT_DEEP_REASONING_MIN_OUTPUT_TOKENS = 3200;
 const PROJECT_DEEP_REASONING_MIN_TIMEOUT_MS = 130_000;
+const EMPTY_PROJECT_REPLY_FALLBACK = 'Пустой ответ от модели. Уточните запрос или повторите через несколько секунд.';
 
 function createProjectChatFlow({ deps, helpers }) {
   const {
@@ -590,6 +591,122 @@ function createProjectChatFlow({ deps, helpers }) {
     };
   }
 
+  function isEmptyProjectReplyFallback(text) {
+    return toTrimmedString(text, 240) === EMPTY_PROJECT_REPLY_FALLBACK;
+  }
+
+  function buildProjectPlainTextFallbackPrompts({ contextData, message }) {
+    const payloadContext = toProfile(contextData);
+    const projectContext = toProfile(payloadContext.projectContext);
+    const latestHistory = (Array.isArray(payloadContext.history) ? payloadContext.history : [])
+      .slice(-6)
+      .map((item) => {
+        const row = toProfile(item);
+        return `${row.role === 'assistant' ? 'Ассистент' : 'Пользователь'}: ${toTrimmedString(row.text, 800)}`;
+      })
+      .filter(Boolean)
+      .join('\n');
+
+    const systemPrompt = [
+      'Ты Synapse12 Project Chat Analyst.',
+      'Отвечай только по projectContext.description.',
+      'Не выдумывай факты вне контекста.',
+      'Пиши обычным человеческим языком, без официоза и без корпоративного тона.',
+      'Ответ должен быть коротким и живым: 1-3 коротких абзаца.',
+      'Если данных не хватает, скажи это прямо и задай не больше одного короткого уточняющего вопроса.',
+      'Если видишь пробел в контексте, можешь коротко предложить обновить контекст или добавить конкретный факт на дашборд.',
+      'Не используй markdown-списки, не пиши JSON.',
+    ].join('\n');
+
+    const userPrompt = [
+      'Контекст проекта:',
+      toTrimmedString(projectContext.description, 12000),
+      latestHistory ? '' : '',
+      latestHistory ? 'Короткая история диалога:' : '',
+      latestHistory || '',
+      '',
+      'Вопрос пользователя:',
+      toTrimmedString(message, 2400),
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    return { systemPrompt, userPrompt };
+  }
+
+  async function requestProjectPlainTextFallback({
+    ownerId,
+    deepModel,
+    includeDebug,
+    scopeContext,
+    message,
+    history,
+    attachments,
+    contextData,
+    llmSerializationTrace,
+  }) {
+    const requestConfig = resolveProjectDeepReasoningRequestConfig();
+    const fallbackPrompts = buildProjectPlainTextFallbackPrompts({ contextData, message });
+    const requestPreview = typeof aiProvider.previewOpenAiAgentRequest === 'function'
+      ? aiProvider.previewOpenAiAgentRequest({
+        model: deepModel,
+        systemPrompt: fallbackPrompts.systemPrompt,
+        userPrompt: fallbackPrompts.userPrompt,
+        temperature: requestConfig.temperature,
+        maxOutputTokens: Math.max(1400, Math.floor(requestConfig.maxOutputTokens * 0.6)),
+        timeoutMs: requestConfig.timeoutMs,
+        reasoningEffort: requestConfig.reasoningEffort,
+        verbosity: requestConfig.verbosity,
+      })
+      : null;
+
+    const payloadSize = buildRequestBodySize(toProfile(requestPreview?.requestBody));
+    const traceMeta = {
+      label: 'agent-chat.project.plain-text-fallback',
+      ownerId,
+      model: deepModel,
+      scope: {
+        type: scopeContext.scopeType,
+        entityType: scopeContext.entityType,
+        projectId: scopeContext.projectId,
+      },
+      promptLengths: {
+        system: fallbackPrompts.systemPrompt.length,
+        user: fallbackPrompts.userPrompt.length,
+      },
+      messageLength: message.length,
+      historyLength: history.length,
+      attachmentsCount: attachments.length,
+      llmPayload: llmSerializationTrace?.payloadSize || { chars: 0, bytes: 0 },
+      includeDebug,
+      requestBodySize: payloadSize,
+    };
+
+    const aiResponse = await withAiTrace(traceMeta, () => aiProvider.requestOpenAiAgentReply({
+      systemPrompt: fallbackPrompts.systemPrompt,
+      userPrompt: fallbackPrompts.userPrompt,
+      includeRawPayload: includeDebug,
+      model: deepModel,
+      temperature: requestConfig.temperature,
+      maxOutputTokens: Math.max(1400, Math.floor(requestConfig.maxOutputTokens * 0.6)),
+      allowEmptyResponse: false,
+      timeoutMs: requestConfig.timeoutMs,
+      reasoningEffort: requestConfig.reasoningEffort,
+      verbosity: requestConfig.verbosity,
+      singleRequest: true,
+    }));
+
+    return {
+      reply: toTrimmedString(aiResponse.reply, 8000),
+      usage: aiResponse.usage || null,
+      model: toTrimmedString(aiResponse?.debug?.response?.model, 120) || deepModel,
+      debug: aiResponse.debug || {},
+      prompts: fallbackPrompts,
+      requestPreview,
+      payloadSize,
+    };
+  }
+
   function buildInsufficientDataStructuredAnswer(nextQuestion) {
     const base = 'Сейчас контекста недостаточно для сильного ответа без риска промаха.';
     if (!nextQuestion) return base;
@@ -1078,7 +1195,29 @@ function createProjectChatFlow({ deps, helpers }) {
       contextData,
     );
 
-    const finalReply = buildStructuredFinalAnswer(selectedCandidate, nextQuestionDecision);
+    let finalReply = buildStructuredFinalAnswer(selectedCandidate, nextQuestionDecision);
+    let plainTextFallbackResult = null;
+    const needsPlainTextFallback =
+      selectedAttempt?.parsedResult?.parseError === 'empty_reply'
+      || isEmptyProjectReplyFallback(selectedAttempt?.aiResponse?.reply)
+      || isEmptyProjectReplyFallback(finalReply);
+
+    if (needsPlainTextFallback) {
+      plainTextFallbackResult = await requestProjectPlainTextFallback({
+        ownerId,
+        deepModel,
+        includeDebug,
+        scopeContext,
+        message,
+        history,
+        attachments,
+        contextData,
+        llmSerializationTrace,
+      });
+      if (toTrimmedString(plainTextFallbackResult.reply, 8000)) {
+        finalReply = toTrimmedString(plainTextFallbackResult.reply, 8000);
+      }
+    }
     const questionGateResult = aiPrompts.inspectAgentReplyQuestionGate({
       reply: finalReply,
       questionGate,
@@ -1182,6 +1321,14 @@ function createProjectChatFlow({ deps, helpers }) {
             usage: attempt?.aiResponse?.usage || null,
             payloadSize: attempt?.payloadSize || { chars: 0, bytes: 0 },
           })),
+          plainTextFallback: plainTextFallbackResult
+            ? {
+              used: true,
+              model: plainTextFallbackResult.model,
+              payloadSize: plainTextFallbackResult.payloadSize,
+              prompts: plainTextFallbackResult.prompts,
+            }
+            : { used: false },
         },
         response: {
           reply: finalReply,
