@@ -604,6 +604,22 @@ function createAiRouter(deps) {
     return values;
   }
 
+  function normalizeProjectEntityId(rawValue, maxLength = 120) {
+    if (typeof rawValue === 'string') {
+      return toTrimmedString(rawValue, maxLength);
+    }
+    if (typeof rawValue === 'number' && Number.isFinite(rawValue)) {
+      return toTrimmedString(String(rawValue), maxLength);
+    }
+    if (rawValue && typeof rawValue === 'object' && typeof rawValue.toString === 'function') {
+      const serialized = rawValue.toString();
+      if (serialized && serialized !== '[object Object]') {
+        return toTrimmedString(serialized, maxLength);
+      }
+    }
+    return '';
+  }
+
   function clampProjectScore(rawValue, fallbackValue = 0) {
     const numeric = Number(rawValue);
     if (!Number.isFinite(numeric)) {
@@ -820,7 +836,7 @@ function createAiRouter(deps) {
   function deriveProjectEntityGoalRelation(entity, goalEntityIds) {
     const type = toTrimmedString(entity?.type, 24);
     if (type === 'goal' || type === 'result') return 'Формирует цель проекта';
-    if (goalEntityIds.has(toTrimmedString(entity?._id || entity?.id, 120))) return 'Напрямую связан с целевым контуром';
+    if (goalEntityIds.has(normalizeProjectEntityId(entity?._id || entity?.id, 120))) return 'Напрямую связан с целевым контуром';
     const metrics = getProjectEntityFieldList(entity, 'metrics', 1, 120);
     if (metrics.length) return `Поддерживает цель через метрику: ${metrics[0]}`;
     const outcomes = getProjectEntityFieldList(entity, 'outcomes', 1, 120);
@@ -831,11 +847,15 @@ function createAiRouter(deps) {
   function deriveProjectEntityAuthorRelation(entity, authorEntity, pairLabels) {
     const row = toProfile(entity);
     if (!authorEntity) return '';
-    if (row._id === authorEntity._id || row.id === authorEntity.id || row.is_me === true || row.is_mine === true) {
+    if (
+      normalizeProjectEntityId(row._id || row.id, 120) === normalizeProjectEntityId(authorEntity._id || authorEntity.id, 120)
+      || row.is_me === true
+      || row.is_mine === true
+    ) {
       return 'Это и есть личный контур автора';
     }
-    const entityId = toTrimmedString(row._id || row.id, 120);
-    const authorId = toTrimmedString(authorEntity._id || authorEntity.id, 120);
+    const entityId = normalizeProjectEntityId(row._id || row.id, 120);
+    const authorId = normalizeProjectEntityId(authorEntity._id || authorEntity.id, 120);
     const relationLabels = normalizeProjectAnalysisList(pairLabels.get(`${authorId}|${entityId}`) || [], {
       maxItems: 2,
       maxLength: 96,
@@ -875,17 +895,17 @@ function createAiRouter(deps) {
     const goalEntityIds = new Set(
       entities
         .filter((entity) => ['goal', 'result'].includes(toTrimmedString(entity?.type, 24)))
-        .map((entity) => toTrimmedString(entity?._id || entity?.id, 120))
+        .map((entity) => normalizeProjectEntityId(entity?._id || entity?.id, 120))
         .filter(Boolean),
     );
 
     const entityMap = entities
       .map((entity) => {
         const row = toProfile(entity);
-        const entityId = toTrimmedString(row._id || row.id, 120);
+        const entityId = normalizeProjectEntityId(row._id || row.id, 120);
         const name = toTrimmedString(row.name, 120);
         if (!entityId || !name) return null;
-        const relationLabels = normalizeProjectAnalysisList(pairLabels.get(`${entityId}|${toTrimmedString(authorEntity?._id || authorEntity?.id, 120)}`) || [], {
+        const relationLabels = normalizeProjectAnalysisList(pairLabels.get(`${entityId}|${normalizeProjectEntityId(authorEntity?._id || authorEntity?.id, 120)}`) || [], {
           maxItems: 2,
           maxLength: 96,
         });
@@ -956,7 +976,7 @@ function createAiRouter(deps) {
 
     const authorContext = authorEntity
       ? {
-          entity_id: toTrimmedString(authorEntity._id || authorEntity.id, 120),
+          entity_id: normalizeProjectEntityId(authorEntity._id || authorEntity.id, 120),
           name: toTrimmedString(authorEntity.name, 120),
           role_in_project: deriveProjectEntityRole(authorEntity, authorEntity),
           why_matters: deriveProjectEntityWhyNow(authorEntity, {
@@ -1082,7 +1102,7 @@ function createAiRouter(deps) {
       .map((fallbackEntity) => {
         const fallbackProfile = toProfile(fallbackEntity);
         return normalizeProjectAnalysisEntity(
-          rawEntityById.get(toTrimmedString(fallbackProfile.entity_id, 120)),
+          rawEntityById.get(normalizeProjectEntityId(fallbackProfile.entity_id, 120)),
           fallbackEntity,
         );
       })
@@ -1106,7 +1126,7 @@ function createAiRouter(deps) {
     return {
       project_name: toTrimmedString(raw.project_name, 160) || toTrimmedString(fallback.project_name, 160) || 'Проект',
       author_context: {
-        entity_id: toTrimmedString(toProfile(raw.author_context).entity_id, 120) || toTrimmedString(toProfile(fallback.author_context).entity_id, 120),
+        entity_id: normalizeProjectEntityId(toProfile(raw.author_context).entity_id, 120) || normalizeProjectEntityId(toProfile(fallback.author_context).entity_id, 120),
         name: toTrimmedString(toProfile(raw.author_context).name, 120) || toTrimmedString(toProfile(fallback.author_context).name, 120),
         role_in_project: toTrimmedString(toProfile(raw.author_context).role_in_project, 180) || toTrimmedString(toProfile(fallback.author_context).role_in_project, 180),
         why_matters: toTrimmedString(toProfile(raw.author_context).why_matters, 240) || toTrimmedString(toProfile(fallback.author_context).why_matters, 240),
@@ -1186,7 +1206,7 @@ function createAiRouter(deps) {
     };
 
     return {
-      id: toTrimmedString(row._id, 120),
+      id: normalizeProjectEntityId(row._id, 120),
       name,
       type: toTrimmedString(row.type, 24),
       isAuthor: row.is_me === true || row.is_mine === true,
@@ -1751,7 +1771,7 @@ function createAiRouter(deps) {
             const row = toProfile(entity);
             const meta = toProfile(row.ai_metadata);
             return {
-              id: toTrimmedString(row._id || row.id, 120),
+              id: normalizeProjectEntityId(row._id || row.id, 120),
               type: toTrimmedString(row.type, 24),
               name: toTrimmedString(row.name, 120),
               description: toTrimmedString(meta.description, 2400),
