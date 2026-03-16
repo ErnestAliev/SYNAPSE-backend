@@ -179,6 +179,27 @@ function createAiProvider(deps) {
     return 502;
   }
 
+  function normalizeProviderErrorMessage(status, providerMessage, providerCode = '') {
+    const normalizedStatus = toProviderStatus(status);
+    const message = toTrimmedString(providerMessage, 400);
+    const code = toTrimmedString(providerCode, 80).toLowerCase();
+    const lowerMessage = message.toLowerCase();
+
+    const isQuotaError =
+      normalizedStatus === 429 && (
+        code === 'insufficient_quota' ||
+        lowerMessage.includes('quota') ||
+        lowerMessage.includes('billing') ||
+        lowerMessage.includes('insufficient_quota')
+      );
+
+    if (isQuotaError) {
+      return 'Лимит OpenAI API исчерпан. Проверьте биллинг, квоты и доступные кредиты для текущего проекта.';
+    }
+
+    return message || 'AI provider error';
+  }
+
   function extractOpenAiResponseText(payload) {
     if (payload && typeof payload.output_text === 'string' && payload.output_text.trim()) {
       return payload.output_text.trim();
@@ -359,7 +380,11 @@ function createAiProvider(deps) {
     }
 
     if (!response.ok) {
-      const providerMessage = toTrimmedString(payload?.error?.message, 300) || 'AI provider error';
+      const providerMessage = normalizeProviderErrorMessage(
+        response.status,
+        payload?.error?.message,
+        payload?.error?.code,
+      );
       throw Object.assign(new Error(providerMessage), { status: toProviderStatus(response.status) });
     }
 
@@ -485,7 +510,11 @@ function createAiProvider(deps) {
       }
 
       if (!response.ok) {
-        const nextProviderMessage = toTrimmedString(body?.error?.message, 300) || 'AI provider error';
+        const nextProviderMessage = normalizeProviderErrorMessage(
+          response.status,
+          body?.error?.message,
+          body?.error?.code,
+        );
         throw Object.assign(new Error(nextProviderMessage), { status: toProviderStatus(response.status) });
       }
 
