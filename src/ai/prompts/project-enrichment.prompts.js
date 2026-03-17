@@ -68,6 +68,70 @@ function createProjectEnrichmentPrompts(deps) {
           .map((member) => toTrimmedString(member, 160))
           .filter(Boolean)
           .filter((value, index, source) => source.indexOf(value) === index);
+        const memberEntities = (Array.isArray(row.memberEntities) ? row.memberEntities : [])
+          .map((entity) => {
+            const entityRow = toProfile(entity);
+            const entityId = toTrimmedString(entityRow.id, 80);
+            const entityName = toTrimmedString(entityRow.name, 160);
+            if (!entityId && !entityName) return null;
+            return {
+              id: entityId,
+              type: toTrimmedString(entityRow.type, 40),
+              name: entityName,
+              description: toTrimmedString(entityRow.description, 2400),
+              nodeIds: (Array.isArray(entityRow.nodeIds) ? entityRow.nodeIds : [])
+                .map((nodeId) => toTrimmedString(nodeId, 80))
+                .filter(Boolean),
+            };
+          })
+          .filter(Boolean);
+        const directConnections = (Array.isArray(row.directConnections) ? row.directConnections : [])
+          .map((connection) => {
+            const connectionRow = toProfile(connection);
+            return {
+              id: toTrimmedString(connectionRow.id, 80),
+              sourceAnchorId: toTrimmedString(connectionRow.sourceAnchorId, 80),
+              targetAnchorId: toTrimmedString(connectionRow.targetAnchorId, 80),
+              sourceTitle: toTrimmedString(connectionRow.sourceTitle, 160),
+              targetTitle: toTrimmedString(connectionRow.targetTitle, 160),
+              sourceKind: toTrimmedString(connectionRow.sourceKind, 32),
+              targetKind: toTrimmedString(connectionRow.targetKind, 32),
+              label: toTrimmedString(connectionRow.label, 160),
+              description: toTrimmedString(connectionRow.description, 1200),
+              relationType: toTrimmedString(connectionRow.relationType, 64),
+              relationMode: toTrimmedString(connectionRow.relationMode, 32),
+              direction: toTrimmedString(connectionRow.direction, 64),
+              directedFrom: toTrimmedString(connectionRow.directedFrom, 160),
+              directedTo: toTrimmedString(connectionRow.directedTo, 160),
+            };
+          })
+          .filter((connection) => connection.sourceTitle && connection.targetTitle);
+        const effectiveConnections = (Array.isArray(row.effectiveConnections) ? row.effectiveConnections : [])
+          .map((connection) => {
+            const connectionRow = toProfile(connection);
+            return {
+              id: toTrimmedString(connectionRow.id, 80),
+              rawConnectionId: toTrimmedString(connectionRow.rawConnectionId, 80),
+              sourceEntityId: toTrimmedString(connectionRow.sourceEntityId, 80),
+              targetEntityId: toTrimmedString(connectionRow.targetEntityId, 80),
+              sourceTitle: toTrimmedString(connectionRow.sourceTitle, 160),
+              targetTitle: toTrimmedString(connectionRow.targetTitle, 160),
+              label: toTrimmedString(connectionRow.label, 160),
+              description: toTrimmedString(connectionRow.description, 1200),
+              relationType: toTrimmedString(connectionRow.relationType, 64),
+              relationMode: toTrimmedString(connectionRow.relationMode, 32),
+              direction: toTrimmedString(connectionRow.direction, 64),
+              directedFrom: toTrimmedString(connectionRow.directedFrom, 160),
+              directedTo: toTrimmedString(connectionRow.directedTo, 160),
+              isInheritedFromGroup: connectionRow.isInheritedFromGroup === true,
+              inheritanceMode: toTrimmedString(connectionRow.inheritanceMode, 40),
+              inheritedViaSourceGroupId: toTrimmedString(connectionRow.inheritedViaSourceGroupId, 80),
+              inheritedViaSourceGroupTitle: toTrimmedString(connectionRow.inheritedViaSourceGroupTitle, 160),
+              inheritedViaTargetGroupId: toTrimmedString(connectionRow.inheritedViaTargetGroupId, 80),
+              inheritedViaTargetGroupTitle: toTrimmedString(connectionRow.inheritedViaTargetGroupTitle, 160),
+            };
+          })
+          .filter((connection) => connection.sourceTitle && connection.targetTitle);
         if (!id || (nodeIds.length < 2 && members.length < 2)) return null;
         return {
           id,
@@ -75,6 +139,9 @@ function createProjectEnrichmentPrompts(deps) {
           ...(nodeIds.length ? { nodeIds } : {}),
           ...(memberEntityIds.length ? { memberEntityIds } : {}),
           ...(members.length ? { members } : {}),
+          ...(memberEntities.length ? { memberEntities } : {}),
+          ...(directConnections.length ? { directConnections } : {}),
+          ...(effectiveConnections.length ? { effectiveConnections } : {}),
         };
       })
       .filter(Boolean);
@@ -163,6 +230,31 @@ function createProjectEnrichmentPrompts(deps) {
         };
       })
       .filter((connection) => connection.sourceTitle && connection.targetTitle);
+    const compactRawConnections = (Array.isArray(contextData?.rawConnections) ? contextData.rawConnections : [])
+      .map((connection) => {
+        const row = toProfile(connection);
+        return {
+          id: toTrimmedString(row.id, 80),
+          sourceAnchorId: toTrimmedString(row.sourceAnchorId, 80),
+          targetAnchorId: toTrimmedString(row.targetAnchorId, 80),
+          sourceEntityId: toTrimmedString(row.sourceEntityId || row.from, 80),
+          targetEntityId: toTrimmedString(row.targetEntityId || row.to, 80),
+          sourceKind: toTrimmedString(row.sourceKind, 32),
+          targetKind: toTrimmedString(row.targetKind, 32),
+          sourceType: toTrimmedString(row.sourceType, 40),
+          targetType: toTrimmedString(row.targetType, 40),
+          sourceTitle: toTrimmedString(row.sourceTitle || row.fromTitle, 160),
+          targetTitle: toTrimmedString(row.targetTitle || row.toTitle, 160),
+          label: toTrimmedString(row.label, 160),
+          description: toTrimmedString(row.description, 1200),
+          relationType: toTrimmedString(row.relationType || row.type, 64),
+          relationMode: toTrimmedString(row.relationMode, 32),
+          direction: toTrimmedString(row.direction, 64),
+          directedFrom: toTrimmedString(row.directedFrom, 160),
+          directedTo: toTrimmedString(row.directedTo, 160),
+        };
+      })
+      .filter((connection) => connection.sourceTitle && connection.targetTitle);
     const compactGroups = buildCompactProjectContextGroups(contextData?.groups);
 
     const authorEntityId = compactEntities.find((entity) => entity.is_me === true)?.id
@@ -178,12 +270,14 @@ function createProjectEnrichmentPrompts(deps) {
       author_neighbor_entity_ids: authorNeighborEntityIds,
       graph_stats: {
         entities: compactEntities.length,
-        connections: compactConnections.length,
+        raw_connections: compactRawConnections.length,
+        effective_connections: compactConnections.length,
         groups: compactGroups.length,
       },
       graph: {
         entities: compactEntities,
         connections: compactConnections,
+        raw_connections: compactRawConnections,
         groups: compactGroups,
       },
     };
@@ -282,12 +376,19 @@ function createProjectEnrichmentPrompts(deps) {
       'Твоя задача: собрать для другой LLM широкий связный контекст проекта.',
       'На входе JSON граф проекта.',
       'Используй только данные из этого JSON.',
-      'Вход содержит: project_name, author_entity_id, isolated_entity_ids, author_neighbor_entity_ids, graph_stats, entities, connections, groups.',
+      'Вход содержит: project_name, author_entity_id, isolated_entity_ids, author_neighbor_entity_ids, graph_stats, entities, connections, raw_connections, groups.',
       'У каждой сущности учитывай только: id, type, name, description, is_me, is_mine, isAuthor.',
-      'У каждой связи учитывай: sourceNodeId, targetNodeId, sourceEntityId, targetEntityId, sourceTitle, targetTitle, sourceKind, targetKind, sourceType, targetType, label, description, relationType, relationMode, direction, directedFrom, directedTo.',
-      'sourceTitle/targetTitle показывают, кто физически соединен на канве. sourceEntityId/targetEntityId показывают, какие entity-карточки стоят за узлами. Если sourceKind или targetKind равны group, это контур или кластер, а не отдельный actor.',
+      'graph.connections — это effective graph для LLM: в нем group-level связи уже развернуты на участников групп.',
+      'graph.raw_connections — это физические ребра канвы в том виде, как они реально нарисованы.',
+      'У каждой effective связи учитывай: sourceNodeId, targetNodeId, sourceEntityId, targetEntityId, sourceTitle, targetTitle, sourceKind, targetKind, sourceType, targetType, label, description, relationType, relationMode, direction, directedFrom, directedTo.',
+      'Если isInheritedFromGroup=true, значит связь не рисовалась напрямую между двумя сущностями, а была унаследована от group-level связи.',
+      'Если у группы есть связи, сначала интерпретируй группу как единый кластер, а затем наследуй этот смысл на всех members группы.',
+      'Группа — это не декоративная рамка, а родительский контур сущностей. Связи группы распространяются на ее members, если для конкретного member нет более точной прямой связи, которая меняет интерпретацию.',
+      'Если есть и прямая member-level связь, и inherited group-level связь, считай прямую связь более точной.',
+      'sourceTitle/targetTitle показывают, кто физически соединен на канве или в effective graph. sourceEntityId/targetEntityId показывают, какие entity-карточки стоят за узлами.',
       'Описание сущности — это общий профиль карточки. Роль сущности именно в проекте определяй в первую очередь по графу связей, их названиям и направлению стрелок.',
       'Название связи, relationType и направление обязательны для интерпретации смысла. Не считай связь симметричной, если это не подтверждено relationMode/direction.',
+      'Сначала прочитай groups и raw_connections, чтобы понять контуры и кластеры. Затем используй effective graph (connections), чтобы понять, как group-level смысл распространяется на отдельных участников.',
       'Не присваивай автору проекта цели, ресурсы, финансовые метрики, ограничения или мотивы других сущностей без явного основания в графе.',
       'Жёстко различай: личный контур автора, цели отдельных компаний, цели отдельных персон, цели специальных goal/result/task сущностей.',
       'Если сущность попала в isolated_entity_ids или не имеет рабочих связей, описывай её как отдельный узел на канве, а не как встроенный элемент активного контура.',

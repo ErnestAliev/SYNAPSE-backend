@@ -671,6 +671,17 @@ function createAiRouter(deps) {
           }
         }
 
+        const memberEntities = memberEntityIds
+          .map((entityId) => entityById.get(entityId))
+          .filter(Boolean)
+          .map((entity) => ({
+            id: entity.id,
+            type: entity.type,
+            name: entity.name,
+            description: entity.description,
+            nodeIds: Array.isArray(entity.nodeIds) ? entity.nodeIds : [],
+          }));
+
         const normalized = {
           id: groupId,
           name: toTrimmedString(row.name, 160) || 'Группа',
@@ -678,6 +689,7 @@ function createAiRouter(deps) {
           nodeIds,
           memberEntityIds,
           memberTitles,
+          memberEntities,
         };
         anchorById.set(groupId, {
           anchorId: groupId,
@@ -717,6 +729,7 @@ function createAiRouter(deps) {
           row.description || row.meaning || row.semanticMeaning || row.summary || row.label,
           1200,
         );
+        const relationType = resolveProjectGraphRelationType(edge);
 
         return {
           id: toTrimmedString(row.id, 120),
@@ -738,7 +751,7 @@ function createAiRouter(deps) {
           toTitle: toTrimmedString(targetAnchor.title, 160),
           label,
           description,
-          relationType: resolveProjectGraphRelationType(edge),
+          relationType,
           ...directionMeta,
           arrows: {
             source: row.arrowLeft === true,
@@ -749,6 +762,187 @@ function createAiRouter(deps) {
       })
       .filter(Boolean);
 
+    const groupsById = new Map(normalizedGroups.map((group) => [group.id, group]));
+
+    function expandConnectionEndpoint(anchorId, anchorKind, anchorTitle, anchorEntityId, anchorType) {
+      if (anchorKind === 'group') {
+        const group = groupsById.get(anchorId);
+        const memberEntityIds = Array.isArray(group?.memberEntityIds) ? group.memberEntityIds : [];
+        return memberEntityIds
+          .map((entityId) => entityById.get(entityId))
+          .filter(Boolean)
+          .map((entity) => ({
+            kind: 'entity',
+            nodeId: Array.isArray(entity.nodeIds) ? toTrimmedString(entity.nodeIds[0], 120) : '',
+            entityId: entity.id,
+            type: entity.type,
+            title: entity.name,
+            viaGroupId: toTrimmedString(group?.id, 120),
+            viaGroupTitle: toTrimmedString(group?.name, 160),
+          }));
+      }
+
+      if (anchorKind === 'entity' && anchorEntityId) {
+        const entity = entityById.get(anchorEntityId);
+        if (!entity) return [];
+        return [{
+          kind: 'entity',
+          nodeId: Array.isArray(entity.nodeIds) ? toTrimmedString(entity.nodeIds[0], 120) : '',
+          entityId: entity.id,
+          type: entity.type,
+          title: entity.name,
+          viaGroupId: '',
+          viaGroupTitle: '',
+        }];
+      }
+
+      return [{
+        kind: anchorKind || 'unknown',
+        nodeId: '',
+        entityId: '',
+        type: toTrimmedString(anchorType, 40),
+        title: toTrimmedString(anchorTitle, 160),
+        viaGroupId: '',
+        viaGroupTitle: '',
+      }];
+    }
+
+    const effectiveConnections = [];
+    const effectiveConnectionDedup = new Set();
+
+    for (const rawConnection of normalizedConnections) {
+      const sourceEndpoints = expandConnectionEndpoint(
+        rawConnection.sourceAnchorId,
+        rawConnection.sourceKind,
+        rawConnection.sourceTitle,
+        rawConnection.sourceEntityId,
+        rawConnection.sourceType,
+      );
+      const targetEndpoints = expandConnectionEndpoint(
+        rawConnection.targetAnchorId,
+        rawConnection.targetKind,
+        rawConnection.targetTitle,
+        rawConnection.targetEntityId,
+        rawConnection.targetType,
+      );
+
+      for (const sourceEndpoint of sourceEndpoints) {
+        for (const targetEndpoint of targetEndpoints) {
+          if (!sourceEndpoint.entityId || !targetEndpoint.entityId) continue;
+          if (sourceEndpoint.entityId === targetEndpoint.entityId) continue;
+
+          const directionMeta = resolveProjectGraphDirectionMeta({
+            arrowLeft: rawConnection.arrows?.source === true,
+            arrowRight: rawConnection.arrows?.target === true,
+          }, sourceEndpoint.title, targetEndpoint.title);
+          const inheritanceMode = rawConnection.sourceKind === 'group' && rawConnection.targetKind === 'group'
+            ? 'group_to_group'
+            : rawConnection.sourceKind === 'group'
+              ? 'source_group'
+              : rawConnection.targetKind === 'group'
+                ? 'target_group'
+                : 'direct';
+          const isInheritedFromGroup = inheritanceMode !== 'direct';
+          const effectiveId = [
+            rawConnection.id || 'edge',
+            sourceEndpoint.entityId || sourceEndpoint.title,
+            targetEndpoint.entityId || targetEndpoint.title,
+          ].join('::');
+          const dedupKey = [
+            rawConnection.id,
+            sourceEndpoint.entityId,
+            targetEndpoint.entityId,
+            rawConnection.label,
+            rawConnection.relationType,
+            rawConnection.direction,
+            inheritanceMode,
+          ].join('|');
+          if (effectiveConnectionDedup.has(dedupKey)) continue;
+          effectiveConnectionDedup.add(dedupKey);
+
+          effectiveConnections.push({
+            id: effectiveId,
+            rawConnectionId: rawConnection.id,
+            sourceNodeId: sourceEndpoint.nodeId,
+            targetNodeId: targetEndpoint.nodeId,
+            sourceEntityId: sourceEndpoint.entityId,
+            targetEntityId: targetEndpoint.entityId,
+            from: sourceEndpoint.entityId,
+            to: targetEndpoint.entityId,
+            sourceKind: 'entity',
+            targetKind: 'entity',
+            sourceType: toTrimmedString(sourceEndpoint.type, 40),
+            targetType: toTrimmedString(targetEndpoint.type, 40),
+            sourceTitle: toTrimmedString(sourceEndpoint.title, 160),
+            targetTitle: toTrimmedString(targetEndpoint.title, 160),
+            fromTitle: toTrimmedString(sourceEndpoint.title, 160),
+            toTitle: toTrimmedString(targetEndpoint.title, 160),
+            label: rawConnection.label,
+            description: rawConnection.description,
+            relationType: rawConnection.relationType,
+            relationMode: directionMeta.relationMode,
+            direction: directionMeta.direction,
+            directedFrom: directionMeta.directedFrom,
+            directedTo: directionMeta.directedTo,
+            isInheritedFromGroup,
+            inheritanceMode,
+            inheritedViaSourceGroupId: toTrimmedString(sourceEndpoint.viaGroupId, 120),
+            inheritedViaSourceGroupTitle: toTrimmedString(sourceEndpoint.viaGroupTitle, 160),
+            inheritedViaTargetGroupId: toTrimmedString(targetEndpoint.viaGroupId, 120),
+            inheritedViaTargetGroupTitle: toTrimmedString(targetEndpoint.viaGroupTitle, 160),
+            rawSourceKind: rawConnection.sourceKind,
+            rawTargetKind: rawConnection.targetKind,
+            rawSourceTitle: rawConnection.sourceTitle,
+            rawTargetTitle: rawConnection.targetTitle,
+            rawSourceAnchorId: rawConnection.sourceAnchorId,
+            rawTargetAnchorId: rawConnection.targetAnchorId,
+            arrows: rawConnection.arrows,
+            color: rawConnection.color,
+          });
+        }
+      }
+    }
+
+    const directConnectionSignatures = new Set(
+      effectiveConnections
+        .filter((connection) => connection.isInheritedFromGroup !== true)
+        .map((connection) => [
+          connection.sourceEntityId,
+          connection.targetEntityId,
+          connection.label,
+          connection.relationType,
+          connection.direction,
+        ].join('|')),
+    );
+    const normalizedEffectiveConnections = effectiveConnections.filter((connection) => {
+      if (connection.isInheritedFromGroup !== true) return true;
+      const signature = [
+        connection.sourceEntityId,
+        connection.targetEntityId,
+        connection.label,
+        connection.relationType,
+        connection.direction,
+      ].join('|');
+      return !directConnectionSignatures.has(signature);
+    });
+
+    const enrichedGroups = normalizedGroups.map((group) => {
+      const directConnections = normalizedConnections.filter(
+        (connection) => connection.sourceAnchorId === group.id || connection.targetAnchorId === group.id,
+      );
+      const effectiveGroupConnections = normalizedEffectiveConnections.filter(
+        (connection) =>
+          connection.inheritedViaSourceGroupId === group.id
+          || connection.inheritedViaTargetGroupId === group.id,
+      );
+
+      return {
+        ...group,
+        directConnections,
+        effectiveConnections: effectiveGroupConnections,
+      };
+    });
+
     return {
       scope: {
         type: 'project',
@@ -756,17 +950,19 @@ function createAiRouter(deps) {
         projectId: toTrimmedString(scope.projectId, 120),
         projectName: toTrimmedString(scope.projectName, 160),
         totalEntities: normalizedEntities.length,
-        totalConnections: normalizedConnections.length,
-        totalGroups: normalizedGroups.length,
+        totalConnections: normalizedEffectiveConnections.length,
+        totalGroups: enrichedGroups.length,
         graphMode: 'full_project_canvas',
       },
       entities: normalizedEntities,
-      connections: normalizedConnections,
-      groups: normalizedGroups,
+      connections: normalizedEffectiveConnections,
+      rawConnections: normalizedConnections,
+      groups: enrichedGroups,
       graphStats: {
         entityCount: normalizedEntities.length,
-        connectionCount: normalizedConnections.length,
-        groupCount: normalizedGroups.length,
+        rawConnectionCount: normalizedConnections.length,
+        effectiveConnectionCount: normalizedEffectiveConnections.length,
+        groupCount: enrichedGroups.length,
       },
     };
   }
