@@ -964,6 +964,19 @@ function createAiRouter(deps) {
       contextData: reducedContextData,
     });
     const buildModel = toTrimmedString(OPENAI_MODEL, 120) || toTrimmedString(OPENAI_PROJECT_MODEL, 120) || 'gpt-5';
+    const requestPreview = typeof aiProvider.previewOpenAiAgentRequest === 'function'
+      ? aiProvider.previewOpenAiAgentRequest({
+        model: buildModel,
+        systemPrompt,
+        userPrompt,
+        temperature: 0.1,
+        maxOutputTokens: 25000,
+        timeoutMs: 180_000,
+        reasoningEffort: 'low',
+        verbosity: 'low',
+        jsonSchema: PROJECT_CONTEXT_BUILD_OUTPUT_SCHEMA,
+      })
+      : null;
     return {
       exportedAt: new Date().toISOString(),
       source: 'project-context.preview',
@@ -971,6 +984,10 @@ function createAiRouter(deps) {
         model: buildModel,
         systemPrompt,
         userPayload,
+        userPrompt,
+        requestConfig: toProfile(requestPreview?.requestConfig),
+        requestBody: toProfile(requestPreview?.requestBody),
+        contextData: reducedContextData,
       },
       llm_output: {
         mode: 'preview_only',
@@ -1243,6 +1260,19 @@ function createAiRouter(deps) {
       });
 
       const buildModel = toTrimmedString(OPENAI_MODEL, 120) || toTrimmedString(OPENAI_PROJECT_MODEL, 120) || 'gpt-5';
+      const requestPreview = typeof aiProvider.previewOpenAiAgentRequest === 'function'
+        ? aiProvider.previewOpenAiAgentRequest({
+          model: buildModel,
+          systemPrompt,
+          userPrompt,
+          temperature: 0.1,
+          maxOutputTokens: 25000,
+          timeoutMs: 180_000,
+          reasoningEffort: 'low',
+          verbosity: 'low',
+          jsonSchema: PROJECT_CONTEXT_BUILD_OUTPUT_SCHEMA,
+        })
+        : null;
       const buildStartedAt = Date.now();
       let payload = null;
       let buildAiResponse = null;
@@ -1306,6 +1336,10 @@ function createAiRouter(deps) {
           model: buildModel,
           systemPrompt,
           userPayload,
+          userPrompt,
+          requestConfig: toProfile(requestPreview?.requestConfig),
+          requestBody: toProfile(requestPreview?.requestBody),
+          contextData: reducedContextData,
           timeoutMs: 180000,
         },
         llm_output: payload._fallbackError
