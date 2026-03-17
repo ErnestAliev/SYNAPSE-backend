@@ -1089,7 +1089,12 @@ function createAgentPrompts(deps) {
       source,
       target,
       type: toTrimmedString(row.type, 40),
+      relationType: toTrimmedString(row.relationType, 64),
       label: toTrimmedString(row.label, 120),
+      description: toTrimmedString(
+        row.description || row.meaning || row.semanticMeaning || row.summary,
+        1200,
+      ),
       arrowLeft: row.arrowLeft === true,
       arrowRight: row.arrowRight === true,
     };
@@ -1374,7 +1379,9 @@ function createAgentPrompts(deps) {
         from,
         to,
         type: resolveEdgeTypeForLlm(edge),
+        relationType: toTrimmedString(edge.relationType, 64) || resolveEdgeTypeForLlm(edge),
         label: toTrimmedString(edge.label, 120),
+        description: toTrimmedString(edge.description, 1200),
         ...resolveEdgeDirectionForLlm(edge, from, to),
       };
       const dedupKey = `${relation.from}|${relation.to}|${relation.type}|${relation.label}`;

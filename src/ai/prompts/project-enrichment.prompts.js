@@ -54,22 +54,26 @@ function createProjectEnrichmentPrompts(deps) {
 
   function buildCompactProjectContextGroups(groups) {
     return (Array.isArray(groups) ? groups : [])
-      .slice(0, 80)
       .map((group) => {
         const row = toProfile(group);
         const id = toTrimmedString(row.id, 80);
         const nodeIds = (Array.isArray(row.nodeIds) ? row.nodeIds : [])
           .map((nodeId) => toTrimmedString(nodeId, 80))
           .filter(Boolean);
+        const memberEntityIds = (Array.isArray(row.memberEntityIds) ? row.memberEntityIds : [])
+          .map((memberId) => toTrimmedString(memberId, 80))
+          .filter(Boolean);
         const members = (Array.isArray(row.members) ? row.members : [])
+          .concat(Array.isArray(row.memberTitles) ? row.memberTitles : [])
           .map((member) => toTrimmedString(member, 160))
           .filter(Boolean)
-          .slice(0, 24);
+          .filter((value, index, source) => source.indexOf(value) === index);
         if (!id || (nodeIds.length < 2 && members.length < 2)) return null;
         return {
           id,
           name: toTrimmedString(row.name, 120),
           ...(nodeIds.length ? { nodeIds } : {}),
+          ...(memberEntityIds.length ? { memberEntityIds } : {}),
           ...(members.length ? { members } : {}),
         };
       })
@@ -79,8 +83,8 @@ function createProjectEnrichmentPrompts(deps) {
   function deriveIsolatedEntityIds(entities, connections) {
     const connected = new Set();
     for (const connection of Array.isArray(connections) ? connections : []) {
-      const from = toTrimmedString(connection?.from, 80);
-      const to = toTrimmedString(connection?.to, 80);
+      const from = toTrimmedString(connection?.sourceEntityId || connection?.from, 80);
+      const to = toTrimmedString(connection?.targetEntityId || connection?.to, 80);
       if (from) connected.add(from);
       if (to) connected.add(to);
     }
@@ -97,8 +101,8 @@ function createProjectEnrichmentPrompts(deps) {
 
     const neighbors = new Set();
     for (const connection of Array.isArray(connections) ? connections : []) {
-      const from = toTrimmedString(connection?.from, 80);
-      const to = toTrimmedString(connection?.to, 80);
+      const from = toTrimmedString(connection?.sourceEntityId || connection?.from, 80);
+      const to = toTrimmedString(connection?.targetEntityId || connection?.to, 80);
       if (!from || !to) continue;
       if (from === authorId && to !== authorId) neighbors.add(to);
       if (to === authorId && from !== authorId) neighbors.add(from);
@@ -112,40 +116,53 @@ function createProjectEnrichmentPrompts(deps) {
   }) {
     const scope = toProfile(contextData?.scope);
     const compactEntities = (Array.isArray(contextData?.entities) ? contextData.entities : [])
-      .slice(0, 180)
       .map((entity) => {
         const row = toProfile(entity);
         return {
           id: toTrimmedString(row.id || row._id, 80),
           type: toTrimmedString(row.type, 24),
           name: toTrimmedString(row.name, 120),
-          description: toTrimmedString(row.description || toProfile(row.ai_metadata).description, 2400),
+          description: toTrimmedString(row.description || toProfile(row.ai_metadata).description, 6000),
           isAuthor: row.isAuthor === true || row.is_me === true || row.is_mine === true,
           is_me: row.is_me === true,
           is_mine: row.is_mine === true,
+          nodeIds: (Array.isArray(row.nodeIds) ? row.nodeIds : [])
+            .map((nodeId) => toTrimmedString(nodeId, 80))
+            .filter(Boolean),
         };
       })
       .filter((entity) => entity.id && (entity.name || entity.description));
 
     const compactConnections = (Array.isArray(contextData?.connections) ? contextData.connections : [])
-      .slice(0, 240)
       .map((connection) => {
         const row = toProfile(connection);
         return {
-          from: toTrimmedString(row.from || row.source, 80),
-          to: toTrimmedString(row.to || row.target, 80),
+          id: toTrimmedString(row.id, 80),
+          sourceNodeId: toTrimmedString(row.sourceNodeId || row.sourceAnchorId || row.source, 80),
+          targetNodeId: toTrimmedString(row.targetNodeId || row.targetAnchorId || row.target, 80),
+          sourceEntityId: toTrimmedString(row.sourceEntityId || row.from, 80),
+          targetEntityId: toTrimmedString(row.targetEntityId || row.to, 80),
+          from: toTrimmedString(row.sourceEntityId || row.from, 80),
+          to: toTrimmedString(row.targetEntityId || row.to, 80),
+          sourceKind: toTrimmedString(row.sourceKind, 32),
+          targetKind: toTrimmedString(row.targetKind, 32),
+          sourceType: toTrimmedString(row.sourceType, 40),
+          targetType: toTrimmedString(row.targetType, 40),
+          sourceTitle: toTrimmedString(row.sourceTitle || row.fromTitle || row.from || row.source, 160),
+          targetTitle: toTrimmedString(row.targetTitle || row.toTitle || row.to || row.target, 160),
           label: toTrimmedString(row.label, 160),
           description: toTrimmedString(
             row.description || row.meaning || row.semanticMeaning || row.summary || row.label,
-            600,
+            1200,
           ),
+          relationType: toTrimmedString(row.relationType || row.type, 64),
           relationMode: toTrimmedString(row.relationMode, 32),
           direction: toTrimmedString(row.direction, 64),
-          directedFrom: toTrimmedString(row.directedFrom, 80),
-          directedTo: toTrimmedString(row.directedTo, 80),
+          directedFrom: toTrimmedString(row.directedFrom, 160),
+          directedTo: toTrimmedString(row.directedTo, 160),
         };
       })
-      .filter((connection) => connection.from && connection.to);
+      .filter((connection) => connection.sourceTitle && connection.targetTitle);
     const compactGroups = buildCompactProjectContextGroups(contextData?.groups);
 
     const authorEntityId = compactEntities.find((entity) => entity.is_me === true)?.id
@@ -159,6 +176,11 @@ function createProjectEnrichmentPrompts(deps) {
       author_entity_id: authorEntityId,
       isolated_entity_ids: isolatedEntityIds,
       author_neighbor_entity_ids: authorNeighborEntityIds,
+      graph_stats: {
+        entities: compactEntities.length,
+        connections: compactConnections.length,
+        groups: compactGroups.length,
+      },
       graph: {
         entities: compactEntities,
         connections: compactConnections,
@@ -260,11 +282,12 @@ function createProjectEnrichmentPrompts(deps) {
       'Твоя задача: собрать для другой LLM широкий связный контекст проекта.',
       'На входе JSON граф проекта.',
       'Используй только данные из этого JSON.',
-      'Вход содержит: project_name, author_entity_id, isolated_entity_ids, author_neighbor_entity_ids, entities, connections, groups.',
+      'Вход содержит: project_name, author_entity_id, isolated_entity_ids, author_neighbor_entity_ids, graph_stats, entities, connections, groups.',
       'У каждой сущности учитывай только: id, type, name, description, is_me, is_mine, isAuthor.',
-      'У каждой связи учитывай только: from, to, label, description, relationMode, direction, directedFrom, directedTo.',
+      'У каждой связи учитывай: sourceNodeId, targetNodeId, sourceEntityId, targetEntityId, sourceTitle, targetTitle, sourceKind, targetKind, sourceType, targetType, label, description, relationType, relationMode, direction, directedFrom, directedTo.',
+      'sourceTitle/targetTitle показывают, кто физически соединен на канве. sourceEntityId/targetEntityId показывают, какие entity-карточки стоят за узлами. Если sourceKind или targetKind равны group, это контур или кластер, а не отдельный actor.',
       'Описание сущности — это общий профиль карточки. Роль сущности именно в проекте определяй в первую очередь по графу связей, их названиям и направлению стрелок.',
-      'Название связи и направление обязательны для интерпретации смысла. Не считай связь симметричной, если это не подтверждено relationMode/direction.',
+      'Название связи, relationType и направление обязательны для интерпретации смысла. Не считай связь симметричной, если это не подтверждено relationMode/direction.',
       'Не присваивай автору проекта цели, ресурсы, финансовые метрики, ограничения или мотивы других сущностей без явного основания в графе.',
       'Жёстко различай: личный контур автора, цели отдельных компаний, цели отдельных персон, цели специальных goal/result/task сущностей.',
       'Если сущность попала в isolated_entity_ids или не имеет рабочих связей, описывай её как отдельный узел на канве, а не как встроенный элемент активного контура.',

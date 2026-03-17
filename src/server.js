@@ -504,6 +504,12 @@ function normalizeProjectCanvasData(canvasData) {
     const source = typeof edge.source === 'string' ? edge.source : '';
     const target = typeof edge.target === 'string' ? edge.target : '';
     const label = typeof edge.label === 'string' ? edge.label : undefined;
+    const type = typeof edge.type === 'string' ? edge.type : undefined;
+    const relationType = typeof edge.relationType === 'string' ? edge.relationType : undefined;
+    const description = typeof edge.description === 'string' ? edge.description : undefined;
+    const meaning = typeof edge.meaning === 'string' ? edge.meaning : undefined;
+    const semanticMeaning = typeof edge.semanticMeaning === 'string' ? edge.semanticMeaning : undefined;
+    const summary = typeof edge.summary === 'string' ? edge.summary : undefined;
     const color = typeof edge.color === 'string' && edge.color.trim() ? edge.color : undefined;
     const arrowLeft = typeof edge.arrowLeft === 'boolean' ? edge.arrowLeft : undefined;
     const arrowRight = typeof edge.arrowRight === 'boolean' ? edge.arrowRight : undefined;
@@ -512,7 +518,21 @@ function normalizeProjectCanvasData(canvasData) {
       return [];
     }
 
-    return [{ id, source, target, label, color, arrowLeft, arrowRight }];
+    return [{
+      id,
+      source,
+      target,
+      label,
+      type,
+      relationType,
+      description,
+      meaning,
+      semanticMeaning,
+      summary,
+      color,
+      arrowLeft,
+      arrowRight,
+    }];
   });
 
   const nodeIdSet = new Set(nodes.map((node) => node.id));
@@ -1694,6 +1714,7 @@ function buildProjectGroups(canvasData, entitiesById) {
 async function resolveAgentScopeContext(ownerId, rawScope) {
   const scope = toProfile(rawScope);
   const scopeType = toTrimmedString(scope.type, 24).toLowerCase();
+  const preserveFullGraph = scope.preserveFullGraph === true;
 
   if (scopeType === 'collection') {
     const entityType = toTrimmedString(scope.entityType, 24);
@@ -1753,25 +1774,27 @@ async function resolveAgentScopeContext(ownerId, rawScope) {
       ),
     );
 
-    const limitedEntityIds = uniqueEntityIds.slice(0, AI_CONTEXT_ENTITY_LIMIT);
-    const entities = limitedEntityIds.length
+    const scopedEntityIds = preserveFullGraph
+      ? uniqueEntityIds
+      : uniqueEntityIds.slice(0, AI_CONTEXT_ENTITY_LIMIT);
+    const entities = scopedEntityIds.length
       ? await Entity.find({
           owner_id: ownerId,
-          _id: { $in: limitedEntityIds },
+          _id: { $in: scopedEntityIds },
         }).lean()
       : [];
 
     const entityById = new Map(entities.map((entity) => [String(entity._id), entity]));
-    const limitedEntityIdSet = new Set(limitedEntityIds);
+    const scopedEntityIdSet = new Set(scopedEntityIds);
     const sharedEntityIds = new Set();
 
-    if (limitedEntityIds.length) {
+    if (!preserveFullGraph && scopedEntityIds.length) {
       const siblingProjects = await Entity.find(
         {
           owner_id: ownerId,
           type: 'project',
           _id: { $ne: project._id },
-          'canvas_data.nodes.entityId': { $in: limitedEntityIds },
+          'canvas_data.nodes.entityId': { $in: scopedEntityIds },
         },
         { _id: 1, canvas_data: 1 },
       ).lean();
@@ -1781,29 +1804,31 @@ async function resolveAgentScopeContext(ownerId, rawScope) {
         for (const node of siblingCanvas.nodes) {
           const entityId = toTrimmedString(node.entityId, 80);
           if (!entityId) continue;
-          if (!limitedEntityIdSet.has(entityId)) continue;
+          if (!scopedEntityIdSet.has(entityId)) continue;
           sharedEntityIds.add(entityId);
         }
       }
     }
 
     const currentProjectId = String(project._id);
-    const sourceEntities = limitedEntityIds
+    const sourceEntities = scopedEntityIds
       .map((id) => entityById.get(id))
       .filter(Boolean);
-    const orderedEntities = limitedEntityIds
-      .map((id) => entityById.get(id))
-      .filter(Boolean)
-      .filter((entity) => {
-        const entityId = String(entity._id);
-        if (entity.type === 'project' && entityId !== currentProjectId) {
-          return false;
-        }
-        if (sharedEntityIds.has(entityId) && entityId !== currentProjectId) {
-          return false;
-        }
-        return true;
-      });
+    const orderedEntities = preserveFullGraph
+      ? sourceEntities
+      : scopedEntityIds
+        .map((id) => entityById.get(id))
+        .filter(Boolean)
+        .filter((entity) => {
+          const entityId = String(entity._id);
+          if (entity.type === 'project' && entityId !== currentProjectId) {
+            return false;
+          }
+          if (sharedEntityIds.has(entityId) && entityId !== currentProjectId) {
+            return false;
+          }
+          return true;
+        });
 
     const connections = buildProjectConnections(canvasData, orderedEntities);
     const groups = buildProjectGroups(canvasData, orderedEntities);

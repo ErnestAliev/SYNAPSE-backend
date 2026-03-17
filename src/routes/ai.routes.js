@@ -547,6 +547,230 @@ function createAiRouter(deps) {
     return '';
   }
 
+  function resolveProjectGraphRelationType(edge) {
+    const row = toProfile(edge);
+    const explicitType = toTrimmedString(row.relationType || row.type, 64).toLowerCase();
+    if (explicitType) return explicitType;
+    if (row.arrowLeft === true && row.arrowRight === true) return 'bidirectional';
+    if (row.arrowRight === true) return 'directed';
+    if (row.arrowLeft === true) return 'directed_reverse';
+    return 'undirected';
+  }
+
+  function resolveProjectGraphDirectionMeta(edge, sourceTitle, targetTitle) {
+    const row = toProfile(edge);
+    const from = toTrimmedString(sourceTitle, 160);
+    const to = toTrimmedString(targetTitle, 160);
+
+    if (row.arrowLeft === true && row.arrowRight !== true) {
+      return {
+        relationMode: 'directed',
+        direction: 'target_to_source',
+        directedFrom: to,
+        directedTo: from,
+      };
+    }
+
+    if (row.arrowLeft !== true && row.arrowRight === true) {
+      return {
+        relationMode: 'directed',
+        direction: 'source_to_target',
+        directedFrom: from,
+        directedTo: to,
+      };
+    }
+
+    return {
+      relationMode: 'equivalent',
+      direction: row.arrowLeft === true && row.arrowRight === true ? 'bidirectional' : 'equivalent',
+      directedFrom: '',
+      directedTo: '',
+    };
+  }
+
+  function buildProjectContextBuilderData({ scopeContext, sourceEntities }) {
+    const scope = toProfile(scopeContext);
+    const entities = Array.isArray(sourceEntities) ? sourceEntities : [];
+    const sourceNodes = Array.isArray(scope.sourceNodes) ? scope.sourceNodes : [];
+    const sourceEdges = Array.isArray(scope.sourceEdges) ? scope.sourceEdges : [];
+    const sourceGroups = Array.isArray(scope.sourceGroups) ? scope.sourceGroups : [];
+
+    const entityById = new Map();
+    const entityNodeIds = new Map();
+    const anchorById = new Map();
+
+    for (const node of sourceNodes) {
+      const row = toProfile(node);
+      const nodeId = toTrimmedString(row.id, 120);
+      const entityId = normalizeProjectEntityId(row.entityId, 120);
+      if (!nodeId || !entityId) continue;
+      if (!entityNodeIds.has(entityId)) {
+        entityNodeIds.set(entityId, []);
+      }
+      entityNodeIds.get(entityId).push(nodeId);
+    }
+
+    const normalizedEntities = entities
+      .map((entity) => {
+        const row = toProfile(entity);
+        const meta = toProfile(row.ai_metadata);
+        const entityId = normalizeProjectEntityId(row._id || row.id, 120);
+        const name = toTrimmedString(row.name, 160);
+        if (!entityId || !name) return null;
+        const normalized = {
+          id: entityId,
+          type: toTrimmedString(row.type, 24) || 'shape',
+          name,
+          description: toTrimmedString(meta.description || row.description, 6000),
+          is_me: row.is_me === true,
+          is_mine: row.is_mine === true,
+          nodeIds: Array.isArray(entityNodeIds.get(entityId)) ? entityNodeIds.get(entityId) : [],
+        };
+        entityById.set(entityId, normalized);
+        return normalized;
+      })
+      .filter(Boolean);
+
+    for (const node of sourceNodes) {
+      const row = toProfile(node);
+      const nodeId = toTrimmedString(row.id, 120);
+      const entityId = normalizeProjectEntityId(row.entityId, 120);
+      const entity = entityById.get(entityId);
+      if (!nodeId || !entity) continue;
+      anchorById.set(nodeId, {
+        anchorId: nodeId,
+        kind: 'entity',
+        entityId,
+        title: entity.name,
+        entityType: entity.type,
+      });
+    }
+
+    const normalizedGroups = sourceGroups
+      .map((group) => {
+        const row = toProfile(group);
+        const groupId = toTrimmedString(row.id, 120);
+        const nodeIds = (Array.isArray(row.nodeIds) ? row.nodeIds : [])
+          .map((nodeId) => toTrimmedString(nodeId, 120))
+          .filter(Boolean);
+        if (!groupId || nodeIds.length < 2) return null;
+
+        const memberEntityIds = [];
+        const memberTitles = [];
+        const seenMemberEntityIds = new Set();
+
+        for (const nodeId of nodeIds) {
+          const anchor = anchorById.get(nodeId);
+          if (!anchor) continue;
+          if (anchor.entityId && !seenMemberEntityIds.has(anchor.entityId)) {
+            seenMemberEntityIds.add(anchor.entityId);
+            memberEntityIds.push(anchor.entityId);
+          }
+          if (anchor.title && !memberTitles.includes(anchor.title)) {
+            memberTitles.push(anchor.title);
+          }
+        }
+
+        const normalized = {
+          id: groupId,
+          name: toTrimmedString(row.name, 160) || 'Группа',
+          color: toTrimmedString(row.color, 32),
+          nodeIds,
+          memberEntityIds,
+          memberTitles,
+        };
+        anchorById.set(groupId, {
+          anchorId: groupId,
+          kind: 'group',
+          entityId: '',
+          title: normalized.name,
+          entityType: 'group',
+        });
+        return normalized;
+      })
+      .filter(Boolean);
+
+    const normalizedConnections = sourceEdges
+      .map((edge) => {
+        const row = toProfile(edge);
+        const sourceAnchorId = toTrimmedString(row.source, 120);
+        const targetAnchorId = toTrimmedString(row.target, 120);
+        if (!sourceAnchorId || !targetAnchorId) return null;
+
+        const sourceAnchor = anchorById.get(sourceAnchorId) || {
+          anchorId: sourceAnchorId,
+          kind: 'unknown',
+          entityId: '',
+          title: sourceAnchorId,
+          entityType: 'unknown',
+        };
+        const targetAnchor = anchorById.get(targetAnchorId) || {
+          anchorId: targetAnchorId,
+          kind: 'unknown',
+          entityId: '',
+          title: targetAnchorId,
+          entityType: 'unknown',
+        };
+        const directionMeta = resolveProjectGraphDirectionMeta(edge, sourceAnchor.title, targetAnchor.title);
+        const label = toTrimmedString(row.label, 160);
+        const description = toTrimmedString(
+          row.description || row.meaning || row.semanticMeaning || row.summary || row.label,
+          1200,
+        );
+
+        return {
+          id: toTrimmedString(row.id, 120),
+          sourceAnchorId,
+          targetAnchorId,
+          sourceNodeId: sourceAnchor.kind === 'entity' ? sourceAnchorId : '',
+          targetNodeId: targetAnchor.kind === 'entity' ? targetAnchorId : '',
+          sourceEntityId: sourceAnchor.entityId,
+          targetEntityId: targetAnchor.entityId,
+          sourceKind: sourceAnchor.kind,
+          targetKind: targetAnchor.kind,
+          sourceType: toTrimmedString(sourceAnchor.entityType, 40),
+          targetType: toTrimmedString(targetAnchor.entityType, 40),
+          sourceTitle: toTrimmedString(sourceAnchor.title, 160),
+          targetTitle: toTrimmedString(targetAnchor.title, 160),
+          from: sourceAnchor.entityId,
+          to: targetAnchor.entityId,
+          fromTitle: toTrimmedString(sourceAnchor.title, 160),
+          toTitle: toTrimmedString(targetAnchor.title, 160),
+          label,
+          description,
+          relationType: resolveProjectGraphRelationType(edge),
+          ...directionMeta,
+          arrows: {
+            source: row.arrowLeft === true,
+            target: row.arrowRight === true,
+          },
+          color: toTrimmedString(row.color, 32),
+        };
+      })
+      .filter(Boolean);
+
+    return {
+      scope: {
+        type: 'project',
+        name: toTrimmedString(scope.scopeName, 160),
+        projectId: toTrimmedString(scope.projectId, 120),
+        projectName: toTrimmedString(scope.projectName, 160),
+        totalEntities: normalizedEntities.length,
+        totalConnections: normalizedConnections.length,
+        totalGroups: normalizedGroups.length,
+        graphMode: 'full_project_canvas',
+      },
+      entities: normalizedEntities,
+      connections: normalizedConnections,
+      groups: normalizedGroups,
+      graphStats: {
+        entityCount: normalizedEntities.length,
+        connectionCount: normalizedConnections.length,
+        groupCount: normalizedGroups.length,
+      },
+    };
+  }
+
   function pickProjectAuthorEntity(sourceEntities) {
     const entities = Array.isArray(sourceEntities) ? sourceEntities : [];
     const authorByMe = entities.find((entity) => entity?.is_me === true);
@@ -901,6 +1125,12 @@ function createAiRouter(deps) {
           source,
           target,
           label: toTrimmedString(row.label, 120),
+          type: toTrimmedString(row.type, 64),
+          relationType: toTrimmedString(row.relationType, 64),
+          description: toTrimmedString(row.description, 240),
+          meaning: toTrimmedString(row.meaning, 240),
+          semanticMeaning: toTrimmedString(row.semanticMeaning, 240),
+          summary: toTrimmedString(row.summary, 240),
           color: toTrimmedString(row.color, 32),
           arrowLeft: row.arrowLeft === true,
           arrowRight: row.arrowRight === true,
@@ -1138,37 +1368,15 @@ function createAiRouter(deps) {
       const scopeContext = await resolveAgentScopeContext(ownerId, {
         type: 'project',
         projectId,
+        preserveFullGraph: true,
       });
       const sourceEntities = Array.isArray(scopeContext.sourceEntities) ? scopeContext.sourceEntities : scopeContext.entities;
-      const scopedEntities = Array.isArray(scopeContext.entities) ? scopeContext.entities : sourceEntities;
-      const llmContextResult = llmContextTools.buildAgentLlmContext({
+      const reducedContextData = buildProjectContextBuilderData({
         scopeContext,
-        history: [],
-        attachments: [],
-        message: 'Собери контекст проекта по текущему dashboard snapshot.',
+        sourceEntities,
       });
-      const contextData = llmContextResult.contextData;
-      const reducedContextData = {
-        ...toProfile(contextData),
-        entities: (Array.isArray(scopedEntities) ? scopedEntities : [])
-          .slice(0, 80)
-          .map((entity) => {
-            const row = toProfile(entity);
-            const meta = toProfile(row.ai_metadata);
-            return {
-              id: normalizeProjectEntityId(row._id || row.id, 120),
-              type: toTrimmedString(row.type, 24),
-              name: toTrimmedString(row.name, 120),
-              description: toTrimmedString(meta.description, 2400),
-              is_me: row.is_me === true,
-              is_mine: row.is_mine === true,
-            };
-          }),
-        connections: (Array.isArray(contextData?.connections) ? contextData.connections : []).slice(0, 120),
-        groups: (Array.isArray(contextData?.groups) ? contextData.groups : []).slice(0, 40),
-      };
       const narrativeContext = buildProjectNarrativeContext({
-        sourceEntities: scopedEntities,
+        sourceEntities,
         connections: reducedContextData.connections,
       });
 
@@ -1179,7 +1387,7 @@ function createAiRouter(deps) {
           sourceHash,
           reducedContextData,
           narrativeContext,
-          contextData,
+          contextData: reducedContextData,
           sourceEntities,
         }),
       );
@@ -1217,37 +1425,15 @@ function createAiRouter(deps) {
       const scopeContext = await resolveAgentScopeContext(ownerId, {
         type: 'project',
         projectId,
+        preserveFullGraph: true,
       });
       const sourceEntities = Array.isArray(scopeContext.sourceEntities) ? scopeContext.sourceEntities : scopeContext.entities;
-      const scopedEntities = Array.isArray(scopeContext.entities) ? scopeContext.entities : sourceEntities;
-      const llmContextResult = llmContextTools.buildAgentLlmContext({
+      const reducedContextData = buildProjectContextBuilderData({
         scopeContext,
-        history: [],
-        attachments: [],
-        message: 'Собери контекст проекта по текущему dashboard snapshot.',
+        sourceEntities,
       });
-      const contextData = llmContextResult.contextData;
-      const reducedContextData = {
-        ...toProfile(contextData),
-        entities: (Array.isArray(scopedEntities) ? scopedEntities : [])
-          .slice(0, 80)
-          .map((entity) => {
-            const row = toProfile(entity);
-            const meta = toProfile(row.ai_metadata);
-            return {
-              id: normalizeProjectEntityId(row._id || row.id, 120),
-              type: toTrimmedString(row.type, 24),
-              name: toTrimmedString(row.name, 120),
-              description: toTrimmedString(meta.description, 2400),
-              is_me: row.is_me === true,
-              is_mine: row.is_mine === true,
-            };
-          }),
-        connections: (Array.isArray(contextData?.connections) ? contextData.connections : []).slice(0, 120),
-        groups: (Array.isArray(contextData?.groups) ? contextData.groups : []).slice(0, 40),
-      };
       const narrativeContext = buildProjectNarrativeContext({
-        sourceEntities: scopedEntities,
+        sourceEntities,
         connections: reducedContextData.connections,
       });
 
@@ -1307,9 +1493,9 @@ function createAiRouter(deps) {
       } catch (error) {
         payload = buildProjectContextFallbackResult({
           scopeContext,
-          sourceEntities: scopedEntities,
-          connections: contextData?.connections,
-          groups: contextData?.groups,
+          sourceEntities,
+          connections: reducedContextData.connections,
+          groups: reducedContextData.groups,
         });
         payload._fallbackError = toTrimmedString(error?.message, 240);
       }
@@ -1379,9 +1565,9 @@ function createAiRouter(deps) {
         project_context_missing: missing,
         project_context_build_mode: payload._fallbackError ? 'degraded_snapshot' : 'llm',
         project_context_last_llm_error: toTrimmedString(payload._fallbackError, 240),
-        project_context_entity_count: Array.isArray(contextData?.entities) ? contextData.entities.length : 0,
-        project_context_connection_count: Array.isArray(contextData?.connections) ? contextData.connections.length : 0,
-        project_context_group_count: Array.isArray(contextData?.groups) ? contextData.groups.length : 0,
+        project_context_entity_count: Array.isArray(reducedContextData?.entities) ? reducedContextData.entities.length : 0,
+        project_context_connection_count: Array.isArray(reducedContextData?.connections) ? reducedContextData.connections.length : 0,
+        project_context_group_count: Array.isArray(reducedContextData?.groups) ? reducedContextData.groups.length : 0,
       };
       await freshProject.save();
       broadcastEntityEvent(ownerId, 'entity.updated', {
