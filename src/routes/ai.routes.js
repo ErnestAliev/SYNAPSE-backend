@@ -1123,6 +1123,7 @@ function createAiRouter(deps) {
         projectId,
       });
       const sourceEntities = Array.isArray(scopeContext.sourceEntities) ? scopeContext.sourceEntities : scopeContext.entities;
+      const scopedEntities = Array.isArray(scopeContext.entities) ? scopeContext.entities : sourceEntities;
       const llmContextResult = llmContextTools.buildAgentLlmContext({
         scopeContext,
         history: [],
@@ -1132,7 +1133,7 @@ function createAiRouter(deps) {
       const contextData = llmContextResult.contextData;
       const reducedContextData = {
         ...toProfile(contextData),
-        entities: (Array.isArray(sourceEntities) ? sourceEntities : [])
+        entities: (Array.isArray(scopedEntities) ? scopedEntities : [])
           .slice(0, 80)
           .map((entity) => {
             const row = toProfile(entity);
@@ -1150,7 +1151,7 @@ function createAiRouter(deps) {
         groups: (Array.isArray(contextData?.groups) ? contextData.groups : []).slice(0, 40),
       };
       const narrativeContext = buildProjectNarrativeContext({
-        sourceEntities,
+        sourceEntities: scopedEntities,
         connections: reducedContextData.connections,
       });
 
@@ -1201,6 +1202,7 @@ function createAiRouter(deps) {
         projectId,
       });
       const sourceEntities = Array.isArray(scopeContext.sourceEntities) ? scopeContext.sourceEntities : scopeContext.entities;
+      const scopedEntities = Array.isArray(scopeContext.entities) ? scopeContext.entities : sourceEntities;
       const llmContextResult = llmContextTools.buildAgentLlmContext({
         scopeContext,
         history: [],
@@ -1210,7 +1212,7 @@ function createAiRouter(deps) {
       const contextData = llmContextResult.contextData;
       const reducedContextData = {
         ...toProfile(contextData),
-        entities: (Array.isArray(sourceEntities) ? sourceEntities : [])
+        entities: (Array.isArray(scopedEntities) ? scopedEntities : [])
           .slice(0, 80)
           .map((entity) => {
             const row = toProfile(entity);
@@ -1228,7 +1230,7 @@ function createAiRouter(deps) {
         groups: (Array.isArray(contextData?.groups) ? contextData.groups : []).slice(0, 40),
       };
       const narrativeContext = buildProjectNarrativeContext({
-        sourceEntities,
+        sourceEntities: scopedEntities,
         connections: reducedContextData.connections,
       });
 
@@ -1275,7 +1277,7 @@ function createAiRouter(deps) {
       } catch (error) {
         payload = buildProjectContextFallbackResult({
           scopeContext,
-          sourceEntities,
+          sourceEntities: scopedEntities,
           connections: contextData?.connections,
           groups: contextData?.groups,
         });

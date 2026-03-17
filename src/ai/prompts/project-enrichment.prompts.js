@@ -29,6 +29,61 @@ function createProjectEnrichmentPrompts(deps) {
     toProfile,
   } = deps;
 
+  function buildCompactProjectContextGroups(groups) {
+    return (Array.isArray(groups) ? groups : [])
+      .slice(0, 80)
+      .map((group) => {
+        const row = toProfile(group);
+        const id = toTrimmedString(row.id, 80);
+        const nodeIds = (Array.isArray(row.nodeIds) ? row.nodeIds : [])
+          .map((nodeId) => toTrimmedString(nodeId, 80))
+          .filter(Boolean);
+        const members = (Array.isArray(row.members) ? row.members : [])
+          .map((member) => toTrimmedString(member, 160))
+          .filter(Boolean)
+          .slice(0, 24);
+        if (!id || (nodeIds.length < 2 && members.length < 2)) return null;
+        return {
+          id,
+          name: toTrimmedString(row.name, 120),
+          ...(nodeIds.length ? { nodeIds } : {}),
+          ...(members.length ? { members } : {}),
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function deriveIsolatedEntityIds(entities, connections) {
+    const connected = new Set();
+    for (const connection of Array.isArray(connections) ? connections : []) {
+      const from = toTrimmedString(connection?.from, 80);
+      const to = toTrimmedString(connection?.to, 80);
+      if (from) connected.add(from);
+      if (to) connected.add(to);
+    }
+
+    return (Array.isArray(entities) ? entities : [])
+      .map((entity) => toTrimmedString(entity?.id, 80))
+      .filter((entityId) => entityId && !connected.has(entityId))
+      .slice(0, 80);
+  }
+
+  function deriveAuthorNeighborEntityIds(authorEntityId, connections) {
+    const authorId = toTrimmedString(authorEntityId, 80);
+    if (!authorId) return [];
+
+    const neighbors = new Set();
+    for (const connection of Array.isArray(connections) ? connections : []) {
+      const from = toTrimmedString(connection?.from, 80);
+      const to = toTrimmedString(connection?.to, 80);
+      if (!from || !to) continue;
+      if (from === authorId && to !== authorId) neighbors.add(to);
+      if (to === authorId && from !== authorId) neighbors.add(from);
+    }
+
+    return Array.from(neighbors).slice(0, 40);
+  }
+
   function buildProjectContextBuildPayload({
     contextData,
   }) {
@@ -61,30 +116,26 @@ function createProjectEnrichmentPrompts(deps) {
             row.description || row.meaning || row.semanticMeaning || row.summary || row.label,
             600,
           ),
+          relationMode: toTrimmedString(row.relationMode, 32),
+          direction: toTrimmedString(row.direction, 64),
+          directedFrom: toTrimmedString(row.directedFrom, 80),
+          directedTo: toTrimmedString(row.directedTo, 80),
         };
       })
       .filter((connection) => connection.from && connection.to);
-
-    const compactGroups = (Array.isArray(contextData?.groups) ? contextData.groups : [])
-      .slice(0, 80)
-      .map((group) => {
-        const row = toProfile(group);
-        const id = toTrimmedString(row.id, 80);
-        const nodeIds = (Array.isArray(row.nodeIds) ? row.nodeIds : [])
-          .map((nodeId) => toTrimmedString(nodeId, 80))
-          .filter(Boolean);
-        if (!id || nodeIds.length < 2) return null;
-        return { id, nodeIds };
-      })
-      .filter(Boolean);
+    const compactGroups = buildCompactProjectContextGroups(contextData?.groups);
 
     const authorEntityId = compactEntities.find((entity) => entity.is_me === true)?.id
       || compactEntities.find((entity) => entity.is_mine === true)?.id
       || '';
+    const isolatedEntityIds = deriveIsolatedEntityIds(compactEntities, compactConnections);
+    const authorNeighborEntityIds = deriveAuthorNeighborEntityIds(authorEntityId, compactConnections);
 
     return {
       project_name: toTrimmedString(scope.projectName || scope.name, 160),
       author_entity_id: authorEntityId,
+      isolated_entity_ids: isolatedEntityIds,
+      author_neighbor_entity_ids: authorNeighborEntityIds,
       graph: {
         entities: compactEntities,
         connections: compactConnections,
@@ -183,18 +234,23 @@ function createProjectEnrichmentPrompts(deps) {
       'Твоя задача: собрать для другой LLM широкий связный контекст проекта.',
       'На входе JSON граф проекта.',
       'Используй только данные из этого JSON.',
-      'Вход содержит: project_name, author_entity_id, entities, connections, groups.',
+      'Вход содержит: project_name, author_entity_id, isolated_entity_ids, author_neighbor_entity_ids, entities, connections, groups.',
       'У каждой сущности учитывай только: id, type, name, description, is_me, is_mine, isAuthor.',
-      'У каждой связи учитывай только: from, to, label, description.',
+      'У каждой связи учитывай только: from, to, label, description, relationMode, direction, directedFrom, directedTo.',
+      'Описание сущности — это общий профиль карточки. Роль сущности именно в проекте определяй в первую очередь по графу связей, их названиям и направлению стрелок.',
+      'Название связи и направление обязательны для интерпретации смысла. Не считай связь симметричной, если это не подтверждено relationMode/direction.',
+      'Не присваивай автору проекта цели, ресурсы, финансовые метрики, ограничения или мотивы других сущностей без явного основания в графе.',
+      'Жёстко различай: личный контур автора, цели отдельных компаний, цели отдельных персон, цели специальных goal/result/task сущностей.',
+      'Если сущность попала в isolated_entity_ids или не имеет рабочих связей, описывай её как отдельный узел на канве, а не как встроенный элемент активного контура.',
       'Верни compiled_context: развернутый, но компактный проектный бриф для другой LLM.',
       'Этот бриф должен логически связывать сущности между собой и двигаться по проекту связно, а не списком.',
-      'Пиши normal prose в 4-8 абзацах с пустой строкой между абзацами.',
-      'Двигайся по логике проекта: автор и его роль -> цель -> активы и объекты -> люди и роли -> юридический/финансовый контур -> системы, каналы, ресурсы и другие важные связи.',
+      'Пиши normal prose с пустой строкой между абзацами.',
+      'Количество абзацев не ограничивай искусственно: сохрани столько деталей, сколько нужно для полной картины проекта.',
+      'Двигайся по логике графа: авторский контур (если есть) -> напрямую связанные с ним сущности -> другие рабочие кластеры -> изолированные узлы.',
       'Не давай советы и не решай за автора, что важно или неважно. Не пиши next steps, bottleneck, leverage или рекомендации.',
       'Не выдумывай факты вне графа, но можно осторожно связать факты между собой, если связь следует из описаний и ребер.',
       'Не сжимай агрессивно: лучше сохранить больше существенных фактов, чем потерять смысл проекта.',
       'Собери настолько полный контекст, насколько нужно для сохранения картины проекта для второй LLM.',
-      'Старайся не превышать 12000 символов и не раздувать текст без необходимости.',
       'Не добавляй поля вне схемы.',
       'Верни только валидный JSON без markdown.',
       'JSON schema:',

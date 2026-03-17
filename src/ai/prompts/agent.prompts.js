@@ -1297,11 +1297,17 @@ function createAgentPrompts(deps) {
     const scope = toProfile(scopeContext);
     const projectMetadata = toProfile(scope.projectMetadata);
     const isProjectScope = scope.scopeType === 'project';
-    const rawEntities = Array.isArray(scope.sourceEntities)
-      ? scope.sourceEntities
-      : Array.isArray(scope.entities)
+    const rawEntities = isProjectScope
+      ? Array.isArray(scope.entities)
         ? scope.entities
-        : [];
+        : Array.isArray(scope.sourceEntities)
+          ? scope.sourceEntities
+          : []
+      : Array.isArray(scope.sourceEntities)
+        ? scope.sourceEntities
+        : Array.isArray(scope.entities)
+          ? scope.entities
+          : [];
     const sourceNodes = (Array.isArray(scope.sourceNodes) ? scope.sourceNodes : [])
       .map((node) => serializeSourceNode(node))
       .filter(Boolean);
@@ -1311,14 +1317,12 @@ function createAgentPrompts(deps) {
 
     const llmNodes = [];
     const llmNodeIdSet = new Set();
-    if (!isProjectScope) {
-      for (const rawEntity of rawEntities) {
-        const serialized = serializeEntityForLlm(rawEntity);
-        if (!serialized) continue;
-        if (llmNodeIdSet.has(serialized.id)) continue;
-        llmNodeIdSet.add(serialized.id);
-        llmNodes.push(serialized);
-      }
+    for (const rawEntity of rawEntities) {
+      const serialized = serializeEntityForLlm(rawEntity);
+      if (!serialized) continue;
+      if (llmNodeIdSet.has(serialized.id)) continue;
+      llmNodeIdSet.add(serialized.id);
+      llmNodes.push(serialized);
     }
 
     const nodeEntityByNodeId = new Map();
@@ -1328,65 +1332,63 @@ function createAgentPrompts(deps) {
 
     const droppedEdges = [];
     const llmEdges = [];
-    if (!isProjectScope) {
-      const llmEdgeDedup = new Set();
-      for (const edge of sourceEdges) {
-        const sourceNodeId = toTrimmedString(edge.source, 120);
-        const targetNodeId = toTrimmedString(edge.target, 120);
-        if (!sourceNodeId || !targetNodeId) {
-          droppedEdges.push({
-            edge,
-            reason: 'invalid_edge_endpoint',
-          });
-          continue;
-        }
+    const llmEdgeDedup = new Set();
+    for (const edge of sourceEdges) {
+      const sourceNodeId = toTrimmedString(edge.source, 120);
+      const targetNodeId = toTrimmedString(edge.target, 120);
+      if (!sourceNodeId || !targetNodeId) {
+        droppedEdges.push({
+          edge,
+          reason: 'invalid_edge_endpoint',
+        });
+        continue;
+      }
 
-        const from =
-          nodeEntityByNodeId.get(sourceNodeId) || (llmNodeIdSet.has(sourceNodeId) ? sourceNodeId : '');
-        const to = nodeEntityByNodeId.get(targetNodeId) || (llmNodeIdSet.has(targetNodeId) ? targetNodeId : '');
+      const from =
+        nodeEntityByNodeId.get(sourceNodeId) || (llmNodeIdSet.has(sourceNodeId) ? sourceNodeId : '');
+      const to = nodeEntityByNodeId.get(targetNodeId) || (llmNodeIdSet.has(targetNodeId) ? targetNodeId : '');
 
-        if (!from || !to) {
-          droppedEdges.push({
-            edge,
-            reason: !from && !to ? 'missing_source_and_target_node_mapping' : !from ? 'missing_source_node_mapping' : 'missing_target_node_mapping',
-          });
-          continue;
-        }
+      if (!from || !to) {
+        droppedEdges.push({
+          edge,
+          reason: !from && !to ? 'missing_source_and_target_node_mapping' : !from ? 'missing_source_node_mapping' : 'missing_target_node_mapping',
+        });
+        continue;
+      }
 
-        if (!llmNodeIdSet.has(from) || !llmNodeIdSet.has(to)) {
-          droppedEdges.push({
-            edge,
-            reason: !llmNodeIdSet.has(from) && !llmNodeIdSet.has(to)
-              ? 'source_and_target_entity_filtered_out'
-              : !llmNodeIdSet.has(from)
-                ? 'source_entity_filtered_out'
-                : 'target_entity_filtered_out',
-            from,
-            to,
-          });
-          continue;
-        }
-
-        const relation = {
+      if (!llmNodeIdSet.has(from) || !llmNodeIdSet.has(to)) {
+        droppedEdges.push({
+          edge,
+          reason: !llmNodeIdSet.has(from) && !llmNodeIdSet.has(to)
+            ? 'source_and_target_entity_filtered_out'
+            : !llmNodeIdSet.has(from)
+              ? 'source_entity_filtered_out'
+              : 'target_entity_filtered_out',
           from,
           to,
-          type: resolveEdgeTypeForLlm(edge),
-          label: toTrimmedString(edge.label, 120),
-          ...resolveEdgeDirectionForLlm(edge, from, to),
-        };
-        const dedupKey = `${relation.from}|${relation.to}|${relation.type}|${relation.label}`;
-        if (llmEdgeDedup.has(dedupKey)) {
-          droppedEdges.push({
-            edge,
-            reason: 'duplicate_relation',
-            from,
-            to,
-          });
-          continue;
-        }
-        llmEdgeDedup.add(dedupKey);
-        llmEdges.push(relation);
+        });
+        continue;
       }
+
+      const relation = {
+        from,
+        to,
+        type: resolveEdgeTypeForLlm(edge),
+        label: toTrimmedString(edge.label, 120),
+        ...resolveEdgeDirectionForLlm(edge, from, to),
+      };
+      const dedupKey = `${relation.from}|${relation.to}|${relation.type}|${relation.label}`;
+      if (llmEdgeDedup.has(dedupKey)) {
+        droppedEdges.push({
+          edge,
+          reason: 'duplicate_relation',
+          from,
+          to,
+        });
+        continue;
+      }
+      llmEdgeDedup.add(dedupKey);
+      llmEdges.push(relation);
     }
 
     const historyContext = normalizeAgentHistoryForLlm(history);
@@ -1424,7 +1426,7 @@ function createAgentPrompts(deps) {
       ...(projectContext ? { projectContext } : {}),
       entities: llmNodes,
       connections: llmEdges,
-      groups: isProjectScope ? [] : Array.isArray(scope.groups) ? scope.groups : [],
+      groups: Array.isArray(scope.groups) ? scope.groups : [],
       attachments: attachmentContext.llmAttachments,
       history: historyContext.llmHistory,
       stateSnapshot,
