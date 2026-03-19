@@ -489,12 +489,21 @@ function normalizeProjectCanvasData(canvasData) {
     const y = typeof node.y === 'number' && Number.isFinite(node.y) ? node.y : null;
     const scaleRaw = typeof node.scale === 'number' && Number.isFinite(node.scale) ? node.scale : undefined;
     const scale = typeof scaleRaw === 'number' ? Math.min(1.2, Math.max(0.8, scaleRaw)) : undefined;
+    const massRaw = typeof node.mass === 'number' && Number.isFinite(node.mass) ? node.mass : undefined;
+    const mass = typeof massRaw === 'number' ? Math.max(0, Math.min(10, Math.round(massRaw))) : undefined;
 
     if (!id || !entityId || x === null || y === null) {
       return [];
     }
 
-    return [{ id, entityId, x, y, ...(typeof scale === 'number' ? { scale } : {}) }];
+    return [{
+      id,
+      entityId,
+      x,
+      y,
+      ...(typeof scale === 'number' ? { scale } : {}),
+      ...(typeof mass === 'number' ? { mass } : {}),
+    }];
   });
 
   const edges = rawEdges.flatMap((edge) => {
@@ -595,6 +604,46 @@ function normalizeProjectCanvasData(canvasData) {
     ...(viewport ? { viewport } : {}),
     ...(rawBackground ? { background: rawBackground } : {}),
   };
+}
+
+function buildProjectCanvasContentVersion(canvasData) {
+  const normalized = normalizeProjectCanvasData(canvasData);
+  let fingerprint = 2166136261;
+  const hashChunk = (value) => {
+    const chunk = typeof value === 'string' ? value : String(value ?? '');
+    for (let index = 0; index < chunk.length; index += 1) {
+      fingerprint ^= chunk.charCodeAt(index);
+      fingerprint = Math.imul(fingerprint, 16777619);
+    }
+  };
+
+  for (const node of normalized.nodes) {
+    const scale = typeof node.scale === 'number' ? node.scale : 1;
+    const mass = typeof node.mass === 'number' ? node.mass : 5;
+    hashChunk(
+      `${node.id}|${node.entityId}|${Math.round(node.x * 100)}|${Math.round(node.y * 100)}|${Math.round(
+        scale * 1000,
+      )}|${Math.round(mass * 1000)};`,
+    );
+  }
+  for (const edge of normalized.edges) {
+    hashChunk(
+      `${edge.id}|${edge.source}|${edge.target}|${edge.label || ''}|${edge.color || ''}|${
+        edge.arrowLeft ? 1 : 0
+      }|${edge.arrowRight ? 1 : 0};`,
+    );
+  }
+  for (const group of normalized.groups) {
+    hashChunk(`${group.id}|${group.name}|${group.color || ''}|${group.nodeIds.join(',')};`);
+  }
+
+  return [
+    normalized.groups.length,
+    normalized.nodes.length,
+    normalized.edges.length,
+    normalized.background || 'default',
+    String(fingerprint >>> 0),
+  ].join('|');
 }
 
 function toProfile(value) {
@@ -1176,6 +1225,7 @@ function stripEntityUpdateControlFields(rawPayload) {
 
   const payload = { ...rawPayload };
   delete payload.expectedUpdatedAt;
+  delete payload.expectedCanvasVersion;
   return payload;
 }
 
@@ -1193,6 +1243,14 @@ function readExpectedEntityUpdatedAt(rawPayload) {
   }
 
   return new Date(parsed).toISOString();
+}
+
+function readExpectedCanvasVersion(rawPayload) {
+  if (!rawPayload || typeof rawPayload !== 'object') {
+    return '';
+  }
+
+  return toTrimmedString(rawPayload.expectedCanvasVersion, 240);
 }
 
 function normalizeMineFlagsInPayload(payload, entityType, options = {}) {
@@ -5358,12 +5416,13 @@ app.put('/api/entities/:id', async (req, res, next) => {
   try {
     const ownerId = requireOwnerId(req);
     const expectedUpdatedAt = readExpectedEntityUpdatedAt(req.body);
+    const expectedCanvasVersion = readExpectedCanvasVersion(req.body);
     const existingEntity = await Entity.findOne(
       {
         _id: req.params.id,
         owner_id: ownerId,
       },
-      { ai_metadata: 1, type: 1, name: 1, updatedAt: 1 },
+      { ai_metadata: 1, type: 1, name: 1, updatedAt: 1, canvas_data: 1 },
     ).lean();
     if (!existingEntity) {
       return res.status(404).json({ message: 'Entity not found' });
@@ -5378,6 +5437,23 @@ app.put('/api/entities/:id', async (req, res, next) => {
       typeof payload.type === 'string' && ENTITY_TYPES.has(payload.type) ? payload.type : existingEntity.type;
     payload = normalizeMineFlagsInPayload(payload, payloadEntityType, { mode: 'update' });
     payload.owner_id = ownerId;
+
+    if (expectedCanvasVersion && payloadEntityType === 'project' && Object.prototype.hasOwnProperty.call(payload, 'canvas_data')) {
+      const currentCanvasVersion = buildProjectCanvasContentVersion(existingEntity.canvas_data);
+      if (currentCanvasVersion !== expectedCanvasVersion) {
+        const currentEntity = await Entity.findOne({
+          _id: req.params.id,
+          owner_id: ownerId,
+        });
+        if (currentEntity) {
+          return res.status(409).json({
+            message: 'Project canvas has a newer server version',
+            code: 'entity_conflict',
+            entity: currentEntity.toObject(),
+          });
+        }
+      }
+    }
 
     const updateFilter = {
       _id: req.params.id,
