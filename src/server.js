@@ -1169,6 +1169,32 @@ function normalizeIncomingEntityPayload(rawPayload, options = {}) {
   return payload;
 }
 
+function stripEntityUpdateControlFields(rawPayload) {
+  if (!rawPayload || typeof rawPayload !== 'object') {
+    return {};
+  }
+
+  const payload = { ...rawPayload };
+  delete payload.expectedUpdatedAt;
+  return payload;
+}
+
+function readExpectedEntityUpdatedAt(rawPayload) {
+  if (!rawPayload || typeof rawPayload !== 'object') {
+    return '';
+  }
+
+  const normalized = toTrimmedString(rawPayload.expectedUpdatedAt, 80);
+  if (!normalized) return '';
+
+  const parsed = Date.parse(normalized);
+  if (!Number.isFinite(parsed)) {
+    return '';
+  }
+
+  return new Date(parsed).toISOString();
+}
+
 function normalizeMineFlagsInPayload(payload, entityType, options = {}) {
   const mode = options.mode === 'update' ? 'update' : 'create';
   if (!payload || typeof payload !== 'object') {
@@ -5331,18 +5357,19 @@ app.post('/api/entities', async (req, res, next) => {
 app.put('/api/entities/:id', async (req, res, next) => {
   try {
     const ownerId = requireOwnerId(req);
+    const expectedUpdatedAt = readExpectedEntityUpdatedAt(req.body);
     const existingEntity = await Entity.findOne(
       {
         _id: req.params.id,
         owner_id: ownerId,
       },
-      { ai_metadata: 1, type: 1, name: 1 },
+      { ai_metadata: 1, type: 1, name: 1, updatedAt: 1 },
     ).lean();
     if (!existingEntity) {
       return res.status(404).json({ message: 'Entity not found' });
     }
 
-    let payload = normalizeIncomingEntityPayload(req.body, {
+    let payload = normalizeIncomingEntityPayload(stripEntityUpdateControlFields(req.body), {
       existingMetadata: existingEntity.ai_metadata,
       existingName: existingEntity.name,
       source: 'manual',
@@ -5352,11 +5379,16 @@ app.put('/api/entities/:id', async (req, res, next) => {
     payload = normalizeMineFlagsInPayload(payload, payloadEntityType, { mode: 'update' });
     payload.owner_id = ownerId;
 
+    const updateFilter = {
+      _id: req.params.id,
+      owner_id: ownerId,
+    };
+    if (expectedUpdatedAt) {
+      updateFilter.updatedAt = new Date(expectedUpdatedAt);
+    }
+
     const updatedEntity = await Entity.findOneAndUpdate(
-      {
-        _id: req.params.id,
-        owner_id: ownerId,
-      },
+      updateFilter,
       payload,
       {
         returnDocument: 'after',
@@ -5365,6 +5397,19 @@ app.put('/api/entities/:id', async (req, res, next) => {
     );
 
     if (!updatedEntity) {
+      if (expectedUpdatedAt) {
+        const currentEntity = await Entity.findOne({
+          _id: req.params.id,
+          owner_id: ownerId,
+        });
+        if (currentEntity) {
+          return res.status(409).json({
+            message: 'Entity has a newer server version',
+            code: 'entity_conflict',
+            entity: currentEntity.toObject(),
+          });
+        }
+      }
       return res.status(404).json({ message: 'Entity not found' });
     }
 
