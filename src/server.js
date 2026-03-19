@@ -5488,29 +5488,7 @@ app.delete('/api/entities/:id', async (req, res, next) => {
     const entityId = String(entityToDelete._id);
     const removedEntityIds = new Set([entityId]);
 
-    if (entityToDelete.type === 'project') {
-      const projectCanvas = normalizeProjectCanvasData(entityToDelete.canvas_data);
-      const nodeEntityIds = Array.from(
-        new Set(
-          projectCanvas.nodes
-            .map((node) => node.entityId)
-            .filter((id) => id && id !== entityId),
-        ),
-      );
-      for (const nodeEntityId of nodeEntityIds) {
-        removedEntityIds.add(nodeEntityId);
-      }
-
-      await removeEntitiesFromProjectCanvases([entityId, ...nodeEntityIds], ownerId);
-      if (nodeEntityIds.length) {
-        await Entity.deleteMany({
-          _id: { $in: nodeEntityIds },
-          owner_id: ownerId,
-        });
-      }
-    } else {
-      await removeEntityFromProjectCanvases(entityId, ownerId);
-    }
+    await removeEntityFromProjectCanvases(entityId, ownerId);
 
     await Entity.deleteOne({
       _id: entityToDelete._id,
