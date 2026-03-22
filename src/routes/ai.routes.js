@@ -246,6 +246,7 @@ function createAiRouter(deps) {
   const WEB_SEARCH_FIELD_SUGGESTION_TIMEOUT_MS = 90_000;
   const WEB_SEARCH_FIELD_SUGGESTION_MAX_OUTPUT_TOKENS = 1200;
   const WEB_IMAGE_SEARCH_TIMEOUT_MS = 8_000;
+  const WEB_IMAGE_SEARCH_QUERY_LIMIT = 4;
   const WEB_IMAGE_SEARCH_RESULT_LIMIT = 10;
   const WEB_IMAGE_IMPORT_TIMEOUT_MS = 15_000;
   const WEB_IMAGE_IMPORT_URL_MAX_LENGTH = 2048;
@@ -565,6 +566,100 @@ function createAiRouter(deps) {
     return text;
   }
 
+  function normalizeWebSearchQuerySegment(rawValue, maxLength = 160) {
+    return toTrimmedString(
+      String(rawValue || '')
+        .replace(/\s+/g, ' ')
+        .replace(/^[,;:|/\\+\-–—\s]+|[,;:|/\\+\-–—\s]+$/g, ''),
+      maxLength,
+    );
+  }
+
+  function parseWebSearchQuery(rawValue) {
+    const raw = toTrimmedString(rawValue, WEB_SEARCH_MAX_QUERY_LENGTH)
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!raw) {
+      return {
+        raw: '',
+        subject: '',
+        contextHints: [],
+        hasContext: false,
+        displayQuery: '',
+        disambiguatedQuery: '',
+        quotedSubject: '',
+      };
+    }
+
+    const segments = [];
+    let buffer = '';
+    for (let index = 0; index < raw.length; index += 1) {
+      const char = raw[index];
+      const prev = raw[index - 1] || '';
+      const next = raw[index + 1] || '';
+      const isStandalonePlus = char === '+' && prev !== '+' && next !== '+';
+      if (isStandalonePlus) {
+        const segment = normalizeWebSearchQuerySegment(buffer);
+        if (segment) segments.push(segment);
+        buffer = '';
+        continue;
+      }
+      buffer += char;
+    }
+
+    const tail = normalizeWebSearchQuerySegment(buffer);
+    if (tail) segments.push(tail);
+
+    const uniqueSegments = [];
+    const seenSegments = new Set();
+    for (const segment of segments.length ? segments : [raw]) {
+      const normalized = normalizeWebSearchQuerySegment(segment);
+      const key = normalized.toLowerCase();
+      if (!normalized || seenSegments.has(key)) continue;
+      seenSegments.add(key);
+      uniqueSegments.push(normalized);
+    }
+
+    const subject = uniqueSegments[0] || raw;
+    const contextHints = uniqueSegments.slice(1, 6);
+    const quotedSubjectBase = subject.replace(/"/g, '').trim();
+    const quotedSubject = quotedSubjectBase.includes(' ') ? `"${quotedSubjectBase}"` : quotedSubjectBase;
+
+    return {
+      raw,
+      subject,
+      contextHints,
+      hasContext: contextHints.length > 0,
+      displayQuery: [subject, ...contextHints].filter(Boolean).join(' + '),
+      disambiguatedQuery: [subject, ...contextHints].filter(Boolean).join(' ').trim(),
+      quotedSubject,
+    };
+  }
+
+  function buildWebSearchInput(rawQuery) {
+    const parsedQuery = typeof rawQuery === 'string' ? parseWebSearchQuery(rawQuery) : rawQuery;
+    if (!parsedQuery?.raw) return '';
+
+    const lines = [
+      `Пользовательский запрос: ${parsedQuery.raw}`,
+      `Основной объект поиска: ${parsedQuery.subject || parsedQuery.raw}`,
+    ];
+
+    if (parsedQuery.hasContext) {
+      lines.push(`Контекст для сужения: ${parsedQuery.contextHints.join('; ')}`);
+      lines.push('Используй контекст для выбора одного правильного объекта и не смешивай его с тезками или одноименными компаниями.');
+    } else {
+      lines.push('Если имя или название неоднозначно, не смешивай нескольких людей, компаний или событий в одну сводку.');
+    }
+
+    lines.push(
+      'Если надежно выбрать один объект нельзя, прямо укажи, что запрос неоднозначен, и кратко перечисли наиболее вероятные варианты отдельно, без смешивания фактов.',
+      'Считай контекст после знака "+" обязательными уточнениями, а не декоративными словами.',
+    );
+
+    return lines.join('\n');
+  }
+
   function getWebSourceDomain(sourceUrl) {
     try {
       return new URL(sourceUrl).hostname.replace(/^www\./i, '');
@@ -856,6 +951,12 @@ function createAiRouter(deps) {
       .filter(Boolean);
   }
 
+  function tokenizeWebImageSearchText(text) {
+    return Array.from((toTrimmedString(text, 8_000) || '').matchAll(/[A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9-]{1,}/g))
+      .map((match) => normalizeWebSearchKeywordLabel(match[0]))
+      .filter(Boolean);
+  }
+
   function normalizeWebSearchKeywordLabel(token) {
     const value = toTrimmedString(token, 48);
     if (!value) return '';
@@ -886,6 +987,165 @@ function createAiRouter(deps) {
       })
       .slice(0, limit)
       .map(([token]) => token);
+  }
+
+  function buildWebImageSearchTokens(rawValue, { filterStopwords = true } = {}) {
+    const source = Array.isArray(rawValue) ? rawValue : [rawValue];
+    const dedup = new Set();
+    const tokens = [];
+
+    for (const item of source) {
+      for (const token of tokenizeWebImageSearchText(item)) {
+        if (!token) continue;
+        if (filterStopwords && WEB_SEARCH_KEYWORD_STOPWORDS.has(token)) continue;
+        if (dedup.has(token)) continue;
+        dedup.add(token);
+        tokens.push(token);
+      }
+    }
+
+    return tokens;
+  }
+
+  function appendUniqueWebImageSearchQuery(result, seen, rawValue) {
+    const query = normalizeWebSearchQuerySegment(rawValue, WEB_SEARCH_MAX_QUERY_LENGTH);
+    if (!query) return;
+    const key = query.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    result.push(query);
+  }
+
+  function buildWebImageSearchQueries(rawQuery, { entityType = 'shape', toolSearchQueries = [] } = {}) {
+    const parsedQuery = typeof rawQuery === 'string' ? parseWebSearchQuery(rawQuery) : rawQuery;
+    if (!parsedQuery?.subject && !parsedQuery?.raw) return [];
+
+    const result = [];
+    const seen = new Set();
+    const subject = parsedQuery.subject || parsedQuery.raw;
+    const contextText = parsedQuery.contextHints.join(' ');
+    const primaryWithContext = [parsedQuery.quotedSubject || subject, contextText].filter(Boolean).join(' ').trim();
+
+    appendUniqueWebImageSearchQuery(result, seen, primaryWithContext || subject);
+    appendUniqueWebImageSearchQuery(result, seen, parsedQuery.disambiguatedQuery || subject);
+
+    for (const toolQuery of Array.isArray(toolSearchQueries) ? toolSearchQueries : []) {
+      appendUniqueWebImageSearchQuery(result, seen, toolQuery);
+      if (result.length >= WEB_IMAGE_SEARCH_QUERY_LIMIT) break;
+    }
+
+    appendUniqueWebImageSearchQuery(result, seen, subject);
+
+    if (entityType === 'person') {
+      appendUniqueWebImageSearchQuery(
+        result,
+        seen,
+        [parsedQuery.quotedSubject || subject, contextText, 'portrait'].filter(Boolean).join(' '),
+      );
+      appendUniqueWebImageSearchQuery(result, seen, `${subject} photo`);
+    } else if (entityType === 'company') {
+      appendUniqueWebImageSearchQuery(
+        result,
+        seen,
+        [parsedQuery.quotedSubject || subject, contextText, 'logo'].filter(Boolean).join(' '),
+      );
+      appendUniqueWebImageSearchQuery(result, seen, `${subject} logo`);
+    }
+
+    return result.slice(0, WEB_IMAGE_SEARCH_QUERY_LIMIT);
+  }
+
+  function scoreWebImageSearchResult(image, {
+    parsedQuery,
+    entityType = 'shape',
+    toolSearchQueries = [],
+    queryRank = 0,
+  } = {}) {
+    const text = [
+      image?.title,
+      image?.domain,
+      image?.sourcePageUrl,
+      image?.imageUrl,
+      ...(Array.isArray(toolSearchQueries) ? toolSearchQueries.slice(0, 2) : []),
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase();
+    const subject = toTrimmedString(parsedQuery?.subject, 240).toLowerCase();
+    const subjectTokens = buildWebImageSearchTokens(parsedQuery?.subject);
+    const contextTokens = buildWebImageSearchTokens(parsedQuery?.contextHints || []);
+    const domain = toTrimmedString(image?.domain, 160).toLowerCase();
+
+    let score = Math.max(0, WEB_IMAGE_SEARCH_QUERY_LIMIT - queryRank) * 6;
+    let matchedSubjectTokens = 0;
+
+    if (subject && text.includes(subject)) {
+      score += 26;
+    }
+
+    for (const token of subjectTokens) {
+      if (text.includes(token)) {
+        matchedSubjectTokens += 1;
+        score += 8;
+      }
+    }
+
+    if (subjectTokens.length && matchedSubjectTokens === 0) {
+      score -= 28;
+    }
+
+    for (const token of contextTokens) {
+      if (text.includes(token)) {
+        score += 4;
+      }
+    }
+
+    if (entityType === 'person') {
+      if (image?.height > image?.width) score += 3;
+      if (/portrait|headshot|profile|official|biography|wikipedia|wikimedia|person/i.test(text)) {
+        score += 3;
+      }
+    }
+
+    if (entityType === 'company' && /\blogo\b|brand|corporate|company/i.test(text)) {
+      score += 4;
+    }
+
+    if (/(pinterest|shutterstock|depositphotos|alamy|gettyimages|dreamstime|istockphoto|freepik)\./.test(domain)) {
+      score -= 7;
+    }
+
+    if (!image?.sourcePageUrl) {
+      score -= 3;
+    }
+
+    score += Math.min(4, Math.floor(Math.max(Number(image?.width) || 0, Number(image?.height) || 0) / 420));
+    return score;
+  }
+
+  function rerankWebImageSearchResults(entries, { rawQuery, entityType = 'shape', toolSearchQueries = [] } = {}) {
+    const parsedQuery = typeof rawQuery === 'string' ? parseWebSearchQuery(rawQuery) : rawQuery;
+
+    return (Array.isArray(entries) ? entries : [])
+      .map((entry, index) => {
+        const image = entry?.image || entry;
+        return {
+          image,
+          score: scoreWebImageSearchResult(image, {
+            parsedQuery,
+            entityType,
+            toolSearchQueries,
+            queryRank: Math.max(0, Number(entry?.queryRank) || 0),
+          }),
+          index,
+        };
+      })
+      .sort((left, right) => {
+        if (right.score !== left.score) return right.score - left.score;
+        return left.index - right.index;
+      })
+      .map((entry) => entry.image)
+      .slice(0, WEB_IMAGE_SEARCH_RESULT_LIMIT);
   }
 
   function extractWebSearchPatternLabels(text, patternConfigs, limit = 6) {
@@ -1176,6 +1436,7 @@ function createAiRouter(deps) {
             'Приоритет источников: официальные реестры, регуляторы, суды, парламентские и государственные публикации, корпоративные раскрытия, затем авторитетные независимые СМИ и расследовательские издания, затем профильные базы данных и аналитические площадки. Собственные сайты, PR-материалы и рекламные публикации используй только как одну из сторон, а не как единственную версию.',
             'Если есть существенные сведения о конфликтах интересов, расследованиях, санкциях, судебных спорах, регуляторных претензиях, аффилированных лицах, бенефициарных связях, активах родственников, цепочках владения или деловых связях — включай их нейтрально, если они отражены в источниках.',
             'Если источники противоречат друг другу, кратко укажи это и не делай вид, что вопрос закрыт.',
+            'Не смешивай в одной сводке нескольких людей, компаний или событий с одинаковым именем. Если объект неоднозначен, лучше явно отметить неоднозначность, чем угадывать.',
             'Четко различай подтвержденные факты, заявления сторон, сообщения СМИ, версии, обвинения и неподтвержденные утверждения.',
             'Если независимых подтверждений мало, прямо скажи, что часть сведений опирается в основном на самоописание субъекта или ограниченный набор публикаций.',
             'Используй абсолютные даты, если в ответе есть даты.',
@@ -1232,11 +1493,12 @@ function createAiRouter(deps) {
   }
 
   async function requestWebSearch(query) {
+    const searchInput = buildWebSearchInput(query);
     let lastError = null;
 
     for (const [index, toolType] of WEB_SEARCH_TOOL_TYPES.entries()) {
       try {
-        return await callOpenAiWebSearch({ query, toolType });
+        return await callOpenAiWebSearch({ query: searchInput, toolType });
       } catch (error) {
         lastError = error;
         if (index !== 0 || !shouldRetryWebSearchWithLegacyTool(error)) {
@@ -1287,7 +1549,7 @@ function createAiRouter(deps) {
     return match?.[1] ? String(match[1]).trim() : '';
   }
 
-  async function requestWebImageSearch(query) {
+  async function requestDuckDuckGoImageSearch(query) {
     const normalizedQuery = toTrimmedString(query, WEB_SEARCH_MAX_QUERY_LENGTH);
     if (!normalizedQuery) return [];
 
@@ -1315,6 +1577,34 @@ function createAiRouter(deps) {
 
     const payload = await response.json().catch(() => ({}));
     return normalizeWebSearchImages(Array.isArray(payload?.results) ? payload.results : []);
+  }
+
+  async function requestWebImageSearch(query, { entityType = 'shape', toolSearchQueries = [] } = {}) {
+    const parsedQuery = parseWebSearchQuery(query);
+    const imageQueries = buildWebImageSearchQueries(parsedQuery, { entityType, toolSearchQueries });
+    if (!imageQueries.length) return [];
+
+    const settledResults = await Promise.all(
+      imageQueries.map((imageQuery) => requestDuckDuckGoImageSearch(imageQuery).catch(() => [])),
+    );
+
+    const dedup = new Set();
+    const merged = [];
+
+    settledResults.forEach((images, queryRank) => {
+      for (const image of Array.isArray(images) ? images : []) {
+        const key = toTrimmedString(image?.imageUrl || image?.thumbnailUrl || image?.sourcePageUrl, 2048);
+        if (!key || dedup.has(key)) continue;
+        dedup.add(key);
+        merged.push({ image, queryRank });
+      }
+    });
+
+    return rerankWebImageSearchResults(merged, {
+      rawQuery: parsedQuery,
+      entityType,
+      toolSearchQueries,
+    });
   }
 
   async function fetchRemoteImageAsDataUrl(rawUrl) {
@@ -3075,7 +3365,10 @@ function createAiRouter(deps) {
             },
           });
 
-          imageResults = await requestWebImageSearch(query).catch(() => []);
+          imageResults = await requestWebImageSearch(query, {
+            entityType: entity.type,
+            toolSearchQueries: normalizedPayload.searchQueries,
+          }).catch(() => []);
           const imagesAt = new Date().toISOString();
           await saveEntityWebSearchState({
             ownerId,
