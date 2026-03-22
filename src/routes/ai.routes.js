@@ -760,8 +760,10 @@ function createAiRouter(deps) {
     metadata.web_search = buildProjectWebSearchState(nextState);
     project.ai_metadata = metadata;
     await project.save();
-    broadcastEntityEvent(ownerId, 'entity.updated', {
-      entity: project.toObject(),
+    broadcastEntityEvent(ownerId, 'project.web_search.updated', {
+      projectId: String(project._id || ''),
+      updatedAt: toTrimmedString(project.updatedAt, 80),
+      webSearch: metadata.web_search,
     });
     return project;
   }
