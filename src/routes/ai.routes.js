@@ -236,7 +236,7 @@ function createAiRouter(deps) {
     },
   });
   const WEB_SEARCH_TOOL_TYPES = Object.freeze(['web_search', 'web_search_preview']);
-  const WEB_SEARCH_TIMEOUT_MS = 130_000;
+  const WEB_SEARCH_TIMEOUT_MS = 210_000;
   const WEB_SEARCH_MAX_QUERY_LENGTH = 400;
   const WEB_SEARCH_MAX_OUTPUT_TOKENS = 5200;
   const WEB_SEARCH_RESULT_SNIPPET_MAX_LENGTH = 420;
