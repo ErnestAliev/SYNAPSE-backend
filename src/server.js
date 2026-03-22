@@ -5385,6 +5385,24 @@ app.get('/api/entities', async (req, res, next) => {
   }
 });
 
+app.get('/api/entities/:id', async (req, res, next) => {
+  try {
+    const ownerId = requireOwnerId(req);
+    const entity = await Entity.findOne({
+      _id: req.params.id,
+      owner_id: ownerId,
+    }).lean();
+
+    if (!entity) {
+      return res.status(404).json({ message: 'Entity not found' });
+    }
+
+    return res.json(entity);
+  } catch (error) {
+    return next(error);
+  }
+});
+
 app.post('/api/entities', async (req, res, next) => {
   try {
     const ownerId = requireOwnerId(req);
