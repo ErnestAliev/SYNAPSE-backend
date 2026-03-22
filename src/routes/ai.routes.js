@@ -243,8 +243,8 @@ function createAiRouter(deps) {
   const WEB_PAGE_PREVIEW_URL_MAX_LENGTH = 2048;
   const WEB_SEARCH_SUMMARY_MAX_LENGTH = 18000;
   const WEB_SEARCH_HISTORY_LIMIT = 12;
-  const WEB_SEARCH_FIELD_SUGGESTION_TIMEOUT_MS = 45_000;
-  const WEB_SEARCH_FIELD_SUGGESTION_MAX_OUTPUT_TOKENS = 1600;
+  const WEB_SEARCH_FIELD_SUGGESTION_TIMEOUT_MS = 90_000;
+  const WEB_SEARCH_FIELD_SUGGESTION_MAX_OUTPUT_TOKENS = 1200;
   const WEB_IMAGE_SEARCH_TIMEOUT_MS = 8_000;
   const WEB_IMAGE_SEARCH_RESULT_LIMIT = 10;
   const WEB_IMAGE_IMPORT_TIMEOUT_MS = 15_000;
@@ -1027,13 +1027,14 @@ function createAiRouter(deps) {
       return heuristicSuggestion;
     }
 
+    const compactSummary = trimProjectContextAtNaturalBoundary(normalizedSummary, 7000);
     const compactSources = (Array.isArray(sources) ? sources : [])
-      .slice(0, 6)
+      .slice(0, 4)
       .map((source, index) => {
         const row = toProfile(source);
         const title = toTrimmedString(row.title, 200) || `Источник ${index + 1}`;
         const domain = toTrimmedString(row.domain, 120);
-        const snippet = toTrimmedString(row.snippet, WEB_SEARCH_RESULT_SNIPPET_MAX_LENGTH);
+        const snippet = toTrimmedString(row.snippet, 220);
         return [
           `${index + 1}. ${title}${domain ? ` (${domain})` : ''}`,
           snippet || 'Без сниппета',
@@ -1042,45 +1043,75 @@ function createAiRouter(deps) {
       .join('\n\n');
 
     const suggestionModel = toTrimmedString(OPENAI_MODEL, 120) || OPENAI_WEB_SEARCH_MODEL || 'gpt-5';
-    const baseEntityPrompt =
-      typeof aiPrompts?.buildEntityAnalyzerSystemPrompt === 'function'
-        ? aiPrompts.buildEntityAnalyzerSystemPrompt(entityType)
-        : '';
     const systemPrompt = [
-      baseEntityPrompt,
-      'РЕЖИМ WEB SEARCH FIELD EXTRACTION:',
-      'Ты НЕ обновляешь description и не анализируешь историю редактирования.',
-      'Считай, что краткая сводка уже собрана. Твоя задача: разложить только summary по полям fields.',
-      'Верхние поля ответа, не относящиеся к fields, можно оставлять пустыми или нейтральными, но приоритет только fields.',
-      'Не используй URL как tags, roles, skills или markers. URL допустимы только в fields.links.',
-      'Не тяни в roles длинные описания функций, черты характера и пересказ биографии. roles = короткие роли 1-3 слова.',
-      'Не превращай все summary в tags. tags = короткие темы и ярлыки; skills = только навыки; markers = только внешний контекст.',
-      'Если факт явно не следует из summary, оставь поле пустым.',
+      'Ты раскладываешь уже готовую сводку по полям сущности.',
+      'Верни только JSON по схеме { fields: ... }.',
+      `Тип сущности: ${entityType}. Разрешенные поля: ${allowedFields.join(', ')}.`,
+      'Опирайся прежде всего на summary. Источники используй только как короткую проверку.',
+      'Не придумывай факты и не переноси в поля все подряд.',
+      'tags: только короткие темы и ярлыки 1-3 слова.',
+      'markers: только внешний контекст, страна, город, среда, событие.',
+      'roles: только краткие социальные, профессиональные или бизнес-роли 1-3 слова.',
+      'skills: только прикладные навыки 1-3 слова.',
+      'industry, stage, status, risks, owners, participants, outcomes, resources, departments, metrics, date, location заполняй только если это явно видно в summary.',
+      'links: только валидные URL. phones: только телефоны. importance: только Низкая, Средняя, Высокая.',
+      'Не используй URL как tags, roles, skills или markers.',
+      'Не тяни в roles длинные описания обязанностей, биографию, пересказ расследований или отношения с другими лицами.',
+      'Если по полю нет четкого подтверждения, верни [].',
+      'Не дублируй одно и то же значение в разных полях.',
     ].filter(Boolean).join('\n\n');
-    const userPrompt = [
-      `Запрос: ${toTrimmedString(query, WEB_SEARCH_MAX_QUERY_LENGTH)}`,
-      `Тип сущности: ${entityType}`,
-      `Разрешенные поля: ${allowedFields.join(', ')}`,
-      `Уже подтвержденные URL: ${JSON.stringify(heuristicSuggestion.fields.links || [])}`,
-      `Уже подтвержденные телефоны: ${JSON.stringify(heuristicSuggestion.fields.phones || [])}`,
-      'Готовая сводка для разложения по полям:',
-      normalizedSummary,
-      compactSources ? `Источники:\n${compactSources}` : '',
-      'Нужно вернуть объект fields. Сначала опирайся на summary, источники используй только как проверку.',
-    ].filter(Boolean).join('\n\n');
-    const aiResponse = await aiProvider.requestOpenAiAgentReply({
-      systemPrompt,
-      userPrompt,
-      model: suggestionModel,
-      temperature: 0.1,
-      maxOutputTokens: WEB_SEARCH_FIELD_SUGGESTION_MAX_OUTPUT_TOKENS,
-      timeoutMs: WEB_SEARCH_FIELD_SUGGESTION_TIMEOUT_MS,
-      jsonSchema: WEB_SEARCH_FIELD_SUGGESTION_OUTPUT_SCHEMA,
-      reasoningEffort: 'low',
-      verbosity: 'low',
-    });
+    const promptAttempts = [
+      {
+        summary: compactSummary,
+        sources: compactSources,
+      },
+      {
+        summary: trimProjectContextAtNaturalBoundary(compactSummary, 4200),
+        sources: '',
+      },
+    ];
 
-    const parsed = extractJsonObjectFromText(aiResponse.reply);
+    let aiResponse = null;
+    let parsed = null;
+    let lastError = null;
+    for (const attempt of promptAttempts) {
+      const userPrompt = [
+        `Запрос: ${toTrimmedString(query, WEB_SEARCH_MAX_QUERY_LENGTH)}`,
+        `Тип сущности: ${entityType}`,
+        `Разрешенные поля: ${allowedFields.join(', ')}`,
+        `Уже подтвержденные URL: ${JSON.stringify(heuristicSuggestion.fields.links || [])}`,
+        `Уже подтвержденные телефоны: ${JSON.stringify(heuristicSuggestion.fields.phones || [])}`,
+        'Summary для разложения по полям:',
+        attempt.summary,
+        attempt.sources ? `Источники:\n${attempt.sources}` : '',
+        'Нужно вернуть объект fields.',
+      ].filter(Boolean).join('\n\n');
+
+      try {
+        aiResponse = await aiProvider.requestOpenAiAgentReply({
+          systemPrompt,
+          userPrompt,
+          model: suggestionModel,
+          temperature: 0.1,
+          maxOutputTokens: WEB_SEARCH_FIELD_SUGGESTION_MAX_OUTPUT_TOKENS,
+          timeoutMs: WEB_SEARCH_FIELD_SUGGESTION_TIMEOUT_MS,
+          jsonSchema: WEB_SEARCH_FIELD_SUGGESTION_OUTPUT_SCHEMA,
+          reasoningEffort: 'low',
+          verbosity: 'low',
+        });
+        parsed = extractJsonObjectFromText(aiResponse.reply);
+        if (parsed && typeof parsed === 'object') {
+          break;
+        }
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    if (!parsed || typeof parsed !== 'object') {
+      throw lastError || Object.assign(new Error('Field suggestion extraction failed'), { status: 502 });
+    }
+
     const normalizedFields = filterToAllowedFields(entityType, parsed?.fields);
     const mergedFields = {
       ...buildEmptyWebSearchFieldSuggestion(entityType).fields,
