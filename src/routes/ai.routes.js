@@ -246,12 +246,47 @@ function createAiRouter(deps) {
   const WEB_SEARCH_FIELD_SUGGESTION_TIMEOUT_MS = 90_000;
   const WEB_SEARCH_FIELD_SUGGESTION_MAX_OUTPUT_TOKENS = 1200;
   const WEB_IMAGE_SEARCH_TIMEOUT_MS = 8_000;
-  const WEB_IMAGE_SEARCH_QUERY_LIMIT = 4;
+  const WEB_IMAGE_SEARCH_QUERY_LIMIT = 6;
   const WEB_IMAGE_SEARCH_RESULT_LIMIT = 10;
   const WEB_IMAGE_IMPORT_TIMEOUT_MS = 15_000;
   const WEB_IMAGE_IMPORT_URL_MAX_LENGTH = 2048;
   const WEB_IMAGE_IMPORT_MAX_BYTES = 1_200_000;
   const WEB_IMAGE_IMPORT_MAX_DIMENSION_PX = 1280;
+  const CYRILLIC_TO_LATIN_MAP = Object.freeze({
+    а: 'a',
+    б: 'b',
+    в: 'v',
+    г: 'g',
+    д: 'd',
+    е: 'e',
+    ё: 'yo',
+    ж: 'zh',
+    з: 'z',
+    и: 'i',
+    й: 'y',
+    к: 'k',
+    л: 'l',
+    м: 'm',
+    н: 'n',
+    о: 'o',
+    п: 'p',
+    р: 'r',
+    с: 's',
+    т: 't',
+    у: 'u',
+    ф: 'f',
+    х: 'kh',
+    ц: 'ts',
+    ч: 'ch',
+    ш: 'sh',
+    щ: 'shch',
+    ъ: '',
+    ы: 'y',
+    ь: '',
+    э: 'e',
+    ю: 'yu',
+    я: 'ya',
+  });
 
   const IMPORTANCE_VALUE_MAP = Object.freeze({
     низкая: 'Низкая',
@@ -573,6 +608,66 @@ function createAiRouter(deps) {
         .replace(/^[,;:|/\\+\-–—\s]+|[,;:|/\\+\-–—\s]+$/g, ''),
       maxLength,
     );
+  }
+
+  function containsCyrillicCharacters(rawValue) {
+    return /[А-Яа-яЁё]/.test(toTrimmedString(rawValue, 400));
+  }
+
+  function transliterateCyrillicToLatin(rawValue) {
+    const normalized = normalizeWebSearchQuerySegment(rawValue, WEB_SEARCH_MAX_QUERY_LENGTH);
+    if (!normalized || !containsCyrillicCharacters(normalized)) return '';
+
+    return normalized
+      .split('')
+      .map((char) => {
+        const lower = char.toLowerCase();
+        if (!(lower in CYRILLIC_TO_LATIN_MAP)) return char;
+        return CYRILLIC_TO_LATIN_MAP[lower];
+      })
+      .join('')
+      .replace(/[^a-z0-9\s"'-.]/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function buildPhoneticLatinNameVariant(rawValue) {
+    const latin = transliterateCyrillicToLatin(rawValue);
+    if (!latin) return '';
+
+    return latin
+      .replace(/([aeiouy])v(?=[aeiouy])/gi, '$1w')
+      .replace(/([aeiouy])u(?=[aeiouy])/gi, '$1w')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function buildLatinizedWebSearchVariants(rawValue) {
+    const normalized = normalizeWebSearchQuerySegment(rawValue, WEB_SEARCH_MAX_QUERY_LENGTH);
+    if (!normalized) return [];
+
+    const candidates = [];
+    const seen = new Set([normalized.toLowerCase()]);
+    const transliterated = transliterateCyrillicToLatin(normalized);
+    const phonetic = buildPhoneticLatinNameVariant(normalized);
+
+    for (const candidate of [transliterated, phonetic]) {
+      const value = normalizeWebSearchQuerySegment(candidate, WEB_SEARCH_MAX_QUERY_LENGTH);
+      const key = value.toLowerCase();
+      if (!value || seen.has(key)) continue;
+      seen.add(key);
+      candidates.push(value);
+    }
+
+    return candidates;
+  }
+
+  function quoteWebSearchSubject(rawValue) {
+    const value = normalizeWebSearchQuerySegment(rawValue, WEB_SEARCH_MAX_QUERY_LENGTH);
+    if (!value) return '';
+    const bare = value.replace(/"/g, '').trim();
+    if (!bare) return '';
+    return bare.includes(' ') ? `"${bare}"` : bare;
   }
 
   function parseWebSearchQuery(rawValue) {
@@ -1082,17 +1177,31 @@ function createAiRouter(deps) {
     const seen = new Set();
     const subject = parsedQuery.subject || parsedQuery.raw;
     const contextText = parsedQuery.contextHints.join(' ');
+    const latinSubjectVariants = buildLatinizedWebSearchVariants(subject);
+    const latinContextVariants = buildLatinizedWebSearchVariants(contextText);
     const primaryWithContext = [parsedQuery.quotedSubject || subject, contextText].filter(Boolean).join(' ').trim();
+    const latinPrimaryQueries = latinSubjectVariants.map((subjectVariant, index) => {
+      const contextVariant = latinContextVariants[index] || latinContextVariants[0] || contextText;
+      return [quoteWebSearchSubject(subjectVariant), contextVariant].filter(Boolean).join(' ').trim();
+    });
 
     appendUniqueWebImageSearchQuery(result, seen, primaryWithContext || subject);
+    for (const latinQuery of latinPrimaryQueries) {
+      appendUniqueWebImageSearchQuery(result, seen, latinQuery);
+      if (result.length >= WEB_IMAGE_SEARCH_QUERY_LIMIT) break;
+    }
+
     appendUniqueWebImageSearchQuery(result, seen, parsedQuery.disambiguatedQuery || subject);
+    appendUniqueWebImageSearchQuery(result, seen, subject);
+    for (const subjectVariant of latinSubjectVariants) {
+      appendUniqueWebImageSearchQuery(result, seen, subjectVariant);
+      if (result.length >= WEB_IMAGE_SEARCH_QUERY_LIMIT) break;
+    }
 
     for (const toolQuery of Array.isArray(toolSearchQueries) ? toolSearchQueries : []) {
       appendUniqueWebImageSearchQuery(result, seen, toolQuery);
       if (result.length >= WEB_IMAGE_SEARCH_QUERY_LIMIT) break;
     }
-
-    appendUniqueWebImageSearchQuery(result, seen, subject);
 
     if (entityType === 'person') {
       appendUniqueWebImageSearchQuery(
@@ -1101,6 +1210,10 @@ function createAiRouter(deps) {
         [parsedQuery.quotedSubject || subject, contextText, 'portrait'].filter(Boolean).join(' '),
       );
       appendUniqueWebImageSearchQuery(result, seen, `${subject} photo`);
+      for (const subjectVariant of latinSubjectVariants) {
+        appendUniqueWebImageSearchQuery(result, seen, `${subjectVariant} photo`);
+        if (result.length >= WEB_IMAGE_SEARCH_QUERY_LIMIT) break;
+      }
     } else if (entityType === 'company') {
       appendUniqueWebImageSearchQuery(
         result,
@@ -1108,6 +1221,10 @@ function createAiRouter(deps) {
         [parsedQuery.quotedSubject || subject, contextText, 'logo'].filter(Boolean).join(' '),
       );
       appendUniqueWebImageSearchQuery(result, seen, `${subject} logo`);
+      for (const subjectVariant of latinSubjectVariants) {
+        appendUniqueWebImageSearchQuery(result, seen, `${subjectVariant} logo`);
+        if (result.length >= WEB_IMAGE_SEARCH_QUERY_LIMIT) break;
+      }
     }
 
     return result.slice(0, WEB_IMAGE_SEARCH_QUERY_LIMIT);
@@ -1129,16 +1246,28 @@ function createAiRouter(deps) {
       .filter(Boolean)
       .join(' ')
       .toLowerCase();
-    const subject = toTrimmedString(parsedQuery?.subject, 240).toLowerCase();
-    const subjectTokens = buildWebImageSearchTokens(parsedQuery?.subject);
-    const contextTokens = buildWebImageSearchTokens(parsedQuery?.contextHints || []);
+    const subjectVariants = [
+      parsedQuery?.subject,
+      ...buildLatinizedWebSearchVariants(parsedQuery?.subject),
+    ]
+      .map((value) => toTrimmedString(value, 240).toLowerCase())
+      .filter(Boolean);
+    const subject = subjectVariants[0] || '';
+    const subjectTokens = buildWebImageSearchTokens(subjectVariants);
+    const contextTokens = buildWebImageSearchTokens([
+      ...(Array.isArray(parsedQuery?.contextHints) ? parsedQuery.contextHints : []),
+      ...buildLatinizedWebSearchVariants((Array.isArray(parsedQuery?.contextHints) ? parsedQuery.contextHints : []).join(' ')),
+    ]);
     const domain = toTrimmedString(image?.domain, 160).toLowerCase();
 
     let score = Math.max(0, WEB_IMAGE_SEARCH_QUERY_LIMIT - queryRank) * 6;
     let matchedSubjectTokens = 0;
 
-    if (subject && text.includes(subject)) {
-      score += 26;
+    for (const phrase of subjectVariants) {
+      if (!phrase) continue;
+      if (text.includes(phrase)) {
+        score += phrase === subject ? 26 : 18;
+      }
     }
 
     for (const token of subjectTokens) {
