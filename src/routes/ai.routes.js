@@ -751,17 +751,82 @@ function createAiRouter(deps) {
     };
   }
 
+  function extractWebSearchPhoneCandidates(rawText) {
+    const text = toTrimmedString(rawText, 24_000);
+    if (!text) return [];
+
+    const matches = [];
+    const phonePattern = /(?:\+\d[\d\s().-]{7,}\d|\b\d[\d\s().-]{8,}\d\b)/g;
+    for (const match of text.matchAll(phonePattern)) {
+      const value = toTrimmedString(match[0].replace(/\s+/g, ' '), 40);
+      if (value) {
+        matches.push(value);
+      }
+    }
+
+    return matches;
+  }
+
+  function buildHeuristicWebSearchFieldSuggestion(entityType, summary, sources) {
+    const allowedFieldsSource =
+      typeof getEntityAnalyzerFields === 'function' ? getEntityAnalyzerFields(entityType) : [];
+    const allowedFields = Array.isArray(allowedFieldsSource) ? allowedFieldsSource : [];
+    const allowedFieldSet = new Set(allowedFields);
+    const base = buildEmptyWebSearchFieldSuggestion(entityType);
+    const sourceList = Array.isArray(sources) ? sources : [];
+
+    if (allowedFieldSet.has('links')) {
+      base.fields.links = normalizeEntityFieldList(
+        sourceList
+          .map((source) => {
+            const row = toProfile(source);
+            return toTrimmedString(row.url || row.sourcePageUrl, ENTITY_ANALYSIS_FIELD_CONFIGS.links.itemMaxLength);
+          })
+          .filter(Boolean),
+        ENTITY_ANALYSIS_FIELD_CONFIGS.links,
+      );
+    }
+
+    if (allowedFieldSet.has('phones')) {
+      const phoneText = [
+        toTrimmedString(summary, WEB_SEARCH_SUMMARY_MAX_LENGTH),
+        ...sourceList.flatMap((source) => {
+          const row = toProfile(source);
+          return [
+            toTrimmedString(row.title, 200),
+            toTrimmedString(row.snippet, WEB_SEARCH_RESULT_SNIPPET_MAX_LENGTH),
+          ];
+        }),
+      ]
+        .filter(Boolean)
+        .join('\n');
+      base.fields.phones = normalizeEntityFieldList(
+        extractWebSearchPhoneCandidates(phoneText),
+        ENTITY_ANALYSIS_FIELD_CONFIGS.phones,
+      );
+    }
+
+    const hasValues = allowedFields.some((fieldKey) => Array.isArray(base.fields[fieldKey]) && base.fields[fieldKey].length);
+    return {
+      status: hasValues ? 'ready' : 'idle',
+      fields: base.fields,
+      updatedAt: hasValues ? new Date().toISOString() : '',
+      model: hasValues ? 'heuristic:web-search' : '',
+    };
+  }
+
   async function requestWebSearchFieldSuggestion({ entityType, query, summary, sources }) {
     const allowedFieldsSource =
       typeof getEntityAnalyzerFields === 'function' ? getEntityAnalyzerFields(entityType) : [];
     const allowedFields = Array.isArray(allowedFieldsSource) ? allowedFieldsSource : [];
+    const heuristicSuggestion = buildHeuristicWebSearchFieldSuggestion(entityType, summary, sources);
     if (!allowedFields.length) {
-      return buildEmptyWebSearchFieldSuggestion(entityType);
+      return heuristicSuggestion;
     }
 
     const normalizedSummary = toTrimmedString(summary, WEB_SEARCH_SUMMARY_MAX_LENGTH);
     if (!normalizedSummary) {
-      return buildEmptyWebSearchFieldSuggestion(entityType);
+      return heuristicSuggestion;
     }
 
     const compactSources = (Array.isArray(sources) ? sources : [])
@@ -778,26 +843,44 @@ function createAiRouter(deps) {
       })
       .join('\n\n');
 
-    const systemPrompt = [
-      'Ты выделяешь кандидаты для полей сущности по итогам веб-поиска.',
-      'Опирайся только на переданную сводку и источники.',
-      'Не выдумывай факты и не заполняй поля догадками.',
-      'Если значение не подтверждено явно, оставь поле пустым.',
-      'Не дублируй одно и то же значение в разных полях.',
-      'Возвращай короткие, пригодные для вставки в поля сущности значения.',
-    ].join('\n');
-
-    const userPrompt = [
-      `Тип сущности: ${entityType}`,
-      `Разрешенные поля: ${allowedFields.join(', ')}`,
+    const promptMessage = [
+      'Ниже материалы веб-поиска для предварительного заполнения полей сущности.',
+      'Нужны только подтвержденные значения. Не заполняй поля догадками.',
+      'Описание можно оставить пустым, приоритет именно у полей.',
       `Запрос: ${toTrimmedString(query, WEB_SEARCH_MAX_QUERY_LENGTH)}`,
       'Сводка:',
       normalizedSummary,
       compactSources ? `Источники:\n${compactSources}` : '',
-      'Нужно вернуть только кандидаты для полей сущности.',
     ].filter(Boolean).join('\n\n');
 
     const suggestionModel = toTrimmedString(OPENAI_MODEL, 120) || OPENAI_WEB_SEARCH_MODEL || 'gpt-5';
+    const pseudoEntity = {
+      _id: `web-search-${entityType}`,
+      type: entityType,
+      name: toTrimmedString(query, 120) || 'Результат веб-поиска',
+      ai_metadata: {},
+    };
+    const systemPrompt =
+      typeof aiPrompts?.buildEntityAnalyzerSystemPrompt === 'function'
+        ? aiPrompts.buildEntityAnalyzerSystemPrompt(entityType)
+        : [
+            'Ты выделяешь кандидаты для полей сущности по итогам веб-поиска.',
+            'Опирайся только на переданную сводку и источники.',
+            'Не выдумывай факты и не заполняй поля догадками.',
+            'Если значение не подтверждено явно, оставь поле пустым.',
+          ].join('\n');
+    const userPrompt =
+      typeof aiPrompts?.buildEntityAnalyzerUserPrompt === 'function'
+        ? aiPrompts.buildEntityAnalyzerUserPrompt({
+            entity: pseudoEntity,
+            message: promptMessage,
+            history: [],
+            attachments: [],
+            currentFields: buildEntityAnalyzerCurrentFields(entityType, {}),
+            voiceInput: '',
+            documents: [],
+          })
+        : promptMessage;
     const aiResponse = await aiProvider.requestOpenAiAgentReply({
       systemPrompt,
       userPrompt,
@@ -805,27 +888,41 @@ function createAiRouter(deps) {
       temperature: 0.1,
       maxOutputTokens: WEB_SEARCH_FIELD_SUGGESTION_MAX_OUTPUT_TOKENS,
       timeoutMs: WEB_SEARCH_FIELD_SUGGESTION_TIMEOUT_MS,
-      jsonSchema: WEB_SEARCH_FIELD_SUGGESTION_OUTPUT_SCHEMA,
-      allowEmptyResponse: true,
-      emptyResponseFallback: '',
+      jsonSchema: ENTITY_ANALYSIS_OUTPUT_SCHEMA,
+      reasoningEffort: 'low',
+      verbosity: 'low',
     });
-
-    if (!aiResponse.reply) {
-      return buildEmptyWebSearchFieldSuggestion(entityType);
-    }
 
     const parsed = extractJsonObjectFromText(aiResponse.reply);
     const normalizedFields = filterToAllowedFields(entityType, parsed?.fields);
-    const hasValues = allowedFields.some((fieldKey) => Array.isArray(normalizedFields[fieldKey]) && normalizedFields[fieldKey].length);
+    const mergedFields = {
+      ...buildEmptyWebSearchFieldSuggestion(entityType).fields,
+      ...normalizedFields,
+    };
+
+    if (Array.isArray(mergedFields.links)) {
+      mergedFields.links = normalizeEntityFieldList(
+        [...(heuristicSuggestion.fields.links || []), ...mergedFields.links],
+        ENTITY_ANALYSIS_FIELD_CONFIGS.links,
+      );
+    }
+    if (Array.isArray(mergedFields.phones)) {
+      mergedFields.phones = normalizeEntityFieldList(
+        [...(heuristicSuggestion.fields.phones || []), ...mergedFields.phones],
+        ENTITY_ANALYSIS_FIELD_CONFIGS.phones,
+      );
+    }
+
+    const hasValues = allowedFields.some((fieldKey) => Array.isArray(mergedFields[fieldKey]) && mergedFields[fieldKey].length);
+    if (!hasValues) {
+      return heuristicSuggestion;
+    }
 
     return {
-      status: hasValues ? 'ready' : 'idle',
-      fields: {
-        ...buildEmptyWebSearchFieldSuggestion(entityType).fields,
-        ...normalizedFields,
-      },
+      status: 'ready',
+      fields: mergedFields,
       updatedAt: new Date().toISOString(),
-      model: toTrimmedString(aiResponse?.model, 120) || suggestionModel,
+      model: toTrimmedString(aiResponse?.debug?.response?.model, 120) || suggestionModel,
     };
   }
 
@@ -2711,7 +2808,11 @@ function createAiRouter(deps) {
             };
           }).then((result) => result?.suggestion || buildEmptyWebSearchFieldSuggestion(entity.type));
         } catch {
-          fieldSuggestion = buildEmptyWebSearchFieldSuggestion(entity.type);
+          fieldSuggestion = buildHeuristicWebSearchFieldSuggestion(
+            entity.type,
+            normalizedPayload.answer,
+            normalizedPayload.sources,
+          );
         }
       }
 
