@@ -4,6 +4,7 @@ const { registerEntityProtectedRoutes } = require('./ai/entity-protected.routes'
 const { createScopeContextService } = require('./ai/scope-context');
 const { createHistoryService } = require('./ai/history-service');
 const { createBuildLlmContext } = require('./ai/build-llm-context');
+const { parseResourceLink } = require('../ai/resource-link-parser');
 
 function createAiRouter(deps) {
   const {
@@ -16,6 +17,7 @@ function createAiRouter(deps) {
     OPENAI_PROJECT_MODEL,
     OPENAI_ROUTER_MODEL,
     OPENAI_DEEP_MODEL,
+    OPENAI_WEB_SEARCH_MODEL,
     Entity,
     resolveAgentScopeContext,
     buildEntityAnalyzerCurrentFields,
@@ -207,6 +209,12 @@ function createAiRouter(deps) {
       },
     },
   });
+  const WEB_SEARCH_TOOL_TYPES = Object.freeze(['web_search', 'web_search_preview']);
+  const WEB_SEARCH_TIMEOUT_MS = 95_000;
+  const WEB_SEARCH_MAX_QUERY_LENGTH = 400;
+  const WEB_SEARCH_MAX_OUTPUT_TOKENS = 1800;
+  const WEB_SEARCH_RESULT_SNIPPET_MAX_LENGTH = 420;
+  const WEB_PAGE_PREVIEW_URL_MAX_LENGTH = 2048;
 
   const IMPORTANCE_VALUE_MAP = Object.freeze({
     низкая: 'Низкая',
@@ -404,6 +412,271 @@ function createAiRouter(deps) {
       });
       throw error;
     }
+  }
+
+  function normalizeWebUrl(rawValue) {
+    const raw = toTrimmedString(rawValue, 4096);
+    if (!raw) return '';
+
+    try {
+      const url = new URL(raw);
+      for (const key of Array.from(url.searchParams.keys())) {
+        if (key.toLowerCase().startsWith('utm_')) {
+          url.searchParams.delete(key);
+        }
+      }
+      return url.toString().slice(0, 2048);
+    } catch {
+      return '';
+    }
+  }
+
+  function getWebSourceDomain(sourceUrl) {
+    try {
+      return new URL(sourceUrl).hostname.replace(/^www\./i, '');
+    } catch {
+      return '';
+    }
+  }
+
+  function buildWebSourceTitle(sourceUrl, rawTitle = '') {
+    const title = toTrimmedString(rawTitle, 240);
+    if (title) return title;
+    return getWebSourceDomain(sourceUrl) || 'Источник';
+  }
+
+  function collectWebSearchToolSources(payload) {
+    const outputs = Array.isArray(payload?.output) ? payload.output : [];
+    const dedup = new Map();
+
+    for (const item of outputs) {
+      if (!item || item.type !== 'web_search_call') continue;
+      const candidates = [
+        ...(Array.isArray(item.sources) ? item.sources : []),
+        ...(Array.isArray(item?.action?.sources) ? item.action.sources : []),
+        ...(Array.isArray(item.results) ? item.results : []),
+      ];
+
+      for (const candidate of candidates) {
+        const url = normalizeWebUrl(candidate?.url);
+        if (!url || dedup.has(url)) continue;
+        dedup.set(url, {
+          url,
+          title: buildWebSourceTitle(url, candidate?.title || candidate?.name),
+          snippet: toTrimmedString(
+            candidate?.snippet || candidate?.summary || candidate?.description || candidate?.text,
+            WEB_SEARCH_RESULT_SNIPPET_MAX_LENGTH,
+          ),
+          domain: getWebSourceDomain(url),
+        });
+      }
+    }
+
+    return Array.from(dedup.values());
+  }
+
+  function extractWebSearchOutput(payload) {
+    const outputs = Array.isArray(payload?.output) ? payload.output : [];
+    const textParts = [];
+    const rawAnnotations = [];
+
+    for (const item of outputs) {
+      if (!item || item.type !== 'message') continue;
+      const contentItems = Array.isArray(item.content) ? item.content : [];
+      for (const content of contentItems) {
+        if (content?.type !== 'output_text') continue;
+        const text = typeof content.text === 'string' ? content.text : '';
+        if (text) {
+          textParts.push(text);
+        }
+        const annotations = Array.isArray(content.annotations) ? content.annotations : [];
+        for (const annotation of annotations) {
+          if (annotation?.type === 'url_citation') {
+            rawAnnotations.push(annotation);
+          }
+        }
+      }
+    }
+
+    return {
+      answer: textParts.join('\n').trim(),
+      rawAnnotations,
+    };
+  }
+
+  function buildWebSearchPayload(payload) {
+    const { answer, rawAnnotations } = extractWebSearchOutput(payload);
+    const toolSources = collectWebSearchToolSources(payload);
+    const sourcesByUrl = new Map();
+
+    for (const source of toolSources) {
+      if (!source?.url || sourcesByUrl.has(source.url)) continue;
+      sourcesByUrl.set(source.url, {
+        url: source.url,
+        title: source.title,
+        snippet: source.snippet,
+        domain: source.domain,
+      });
+    }
+
+    for (const annotation of rawAnnotations) {
+      const url = normalizeWebUrl(annotation?.url);
+      if (!url || sourcesByUrl.has(url)) continue;
+      sourcesByUrl.set(url, {
+        url,
+        title: buildWebSourceTitle(url, annotation?.title),
+        snippet: '',
+        domain: getWebSourceDomain(url),
+      });
+    }
+
+    const sources = Array.from(sourcesByUrl.values()).map((source, index) => ({
+      id: `source-${index + 1}`,
+      index: index + 1,
+      url: source.url,
+      title: source.title,
+      snippet: source.snippet,
+      domain: source.domain,
+    }));
+    const sourceIndexByUrl = new Map(sources.map((source) => [source.url, source.index]));
+
+    const citations = rawAnnotations
+      .map((annotation, index) => {
+        const url = normalizeWebUrl(annotation?.url);
+        if (!url) return null;
+        const sourceIndex = sourceIndexByUrl.get(url);
+        if (!sourceIndex) return null;
+
+        const startIndex = Number(annotation?.start_index);
+        const endIndex = Number(annotation?.end_index);
+        return {
+          id: `citation-${index + 1}`,
+          sourceIndex,
+          title: buildWebSourceTitle(url, annotation?.title),
+          url,
+          domain: getWebSourceDomain(url),
+          startIndex: Number.isFinite(startIndex) ? Math.max(0, Math.floor(startIndex)) : 0,
+          endIndex: Number.isFinite(endIndex) ? Math.max(0, Math.floor(endIndex)) : 0,
+        };
+      })
+      .filter((item) => Boolean(item))
+      .sort((left, right) => {
+        if (left.endIndex !== right.endIndex) return left.endIndex - right.endIndex;
+        return left.sourceIndex - right.sourceIndex;
+      });
+
+    const outputs = Array.isArray(payload?.output) ? payload.output : [];
+    const searchQueries = outputs
+      .filter((item) => item?.type === 'web_search_call')
+      .flatMap((item) => (Array.isArray(item?.queries) ? item.queries : []))
+      .map((query) => toTrimmedString(query, 240))
+      .filter(Boolean)
+      .slice(0, 12);
+
+    return {
+      answer,
+      citations,
+      sources,
+      searchQueries,
+    };
+  }
+
+  function shouldRetryWebSearchWithLegacyTool(error) {
+    const status = Number(error?.status) || 0;
+    if (status < 400 || status >= 500) return false;
+    const message = toTrimmedString(error?.message, 400).toLowerCase();
+    if (!message) return false;
+    return (
+      message.includes('tool') &&
+      message.includes('web_search')
+    ) || message.includes('unsupported') || message.includes('invalid value');
+  }
+
+  async function callOpenAiWebSearch({ query, toolType }) {
+    if (!process.env.OPENAI_API_KEY) {
+      throw Object.assign(new Error('OPENAI_API_KEY is not configured'), { status: 503 });
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), WEB_SEARCH_TIMEOUT_MS);
+    try {
+      const response = await fetch('https://api.openai.com/v1/responses', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY || ''}`,
+        },
+        body: JSON.stringify({
+          model: OPENAI_WEB_SEARCH_MODEL || OPENAI_MODEL,
+          instructions: [
+            'Ты встроенный веб-поиск внутри сервиса для исследования компаний, людей, событий и проектов.',
+            'Отвечай на русском языке.',
+            'Дай короткую, копируемую сводку по запросу без воды.',
+            'Используй абсолютные даты, когда это важно.',
+            'Опирайся только на найденные веб-источники и не выдумывай факты.',
+          ].join('\n'),
+          input: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'input_text',
+                  text: query,
+                },
+              ],
+            },
+          ],
+          tools: [
+            {
+              type: toolType,
+              search_context_size: 'medium',
+            },
+          ],
+          include: ['web_search_call.results', 'web_search_call.action.sources'],
+          max_output_tokens: WEB_SEARCH_MAX_OUTPUT_TOKENS,
+          reasoning: { effort: 'low' },
+          text: { verbosity: 'low' },
+        }),
+        signal: controller.signal,
+      });
+
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const error = new Error(toTrimmedString(payload?.error?.message, 320) || 'Web search failed');
+        error.status = response.status;
+        throw error;
+      }
+
+      return {
+        payload,
+        model: toTrimmedString(payload?.model, 120) || OPENAI_WEB_SEARCH_MODEL || OPENAI_MODEL,
+        toolType,
+      };
+    } catch (error) {
+      if (error?.name === 'AbortError') {
+        throw Object.assign(new Error('Web search timeout'), { status: 504 });
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async function requestWebSearch(query) {
+    let lastError = null;
+
+    for (const [index, toolType] of WEB_SEARCH_TOOL_TYPES.entries()) {
+      try {
+        return await callOpenAiWebSearch({ query, toolType });
+      } catch (error) {
+        lastError = error;
+        if (index !== 0 || !shouldRetryWebSearchWithLegacyTool(error)) {
+          throw error;
+        }
+      }
+    }
+
+    throw lastError || Object.assign(new Error('Web search failed'), { status: 502 });
   }
   function normalizeProjectEnrichmentFieldValue(fieldKey, rawValue, itemMaxLength) {
     const str = typeof rawValue === 'string' ? rawValue.trim() : '';
@@ -1804,6 +2077,80 @@ function createAiRouter(deps) {
         }
       }
 
+      return next(error);
+    }
+  });
+
+  router.post('/web-search', requireAuth, async (req, res, next) => {
+    try {
+      const query = toTrimmedString(req.body?.query, WEB_SEARCH_MAX_QUERY_LENGTH);
+      if (!query) {
+        return res.status(400).json({ message: 'query is required' });
+      }
+
+      const webSearchResult = await withAiTrace({
+        label: 'web-search.query',
+        model: OPENAI_WEB_SEARCH_MODEL || OPENAI_MODEL,
+        queryLength: query.length,
+      }, async () => {
+        const response = await requestWebSearch(query);
+        return {
+          reply: buildWebSearchPayload(response.payload).answer,
+          debug: {
+            response: {
+              model: response.model,
+            },
+          },
+          response,
+        };
+      });
+
+      const responsePayload = webSearchResult?.response?.payload || {};
+      const normalizedPayload = buildWebSearchPayload(responsePayload);
+      if (!normalizedPayload.answer && !normalizedPayload.sources.length) {
+        return res.status(422).json({
+          message: 'Поиск не вернул полезных данных. Попробуйте уточнить запрос.',
+        });
+      }
+
+      return res.json({
+        query,
+        answer: normalizedPayload.answer,
+        citations: normalizedPayload.citations,
+        sources: normalizedPayload.sources,
+        searchQueries: normalizedPayload.searchQueries,
+        model: toTrimmedString(webSearchResult?.response?.model, 120) || OPENAI_WEB_SEARCH_MODEL || OPENAI_MODEL,
+      });
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  router.post('/web-page-preview', requireAuth, async (req, res, next) => {
+    try {
+      const sourceUrl = toTrimmedString(req.body?.url, WEB_PAGE_PREVIEW_URL_MAX_LENGTH);
+      if (!sourceUrl) {
+        return res.status(400).json({ message: 'url is required' });
+      }
+
+      try {
+        const preview = await parseResourceLink(sourceUrl);
+        return res.json({
+          sourceUrl: preview.sourceUrl,
+          finalUrl: preview.finalUrl,
+          hostname: preview.hostname,
+          siteLabel: preview.siteLabel,
+          sourceKind: preview.sourceKind,
+          title: preview.title,
+          description: preview.description,
+          textSnippet: preview.textSnippet,
+          preparedText: preview.preparedText,
+        });
+      } catch (error) {
+        const safeMessage = toTrimmedString(error?.message, 240) || 'Не удалось открыть источник';
+        return res.status(422).json({ message: safeMessage });
+      }
+    } catch (error) {
       return next(error);
     }
   });

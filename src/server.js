@@ -79,6 +79,7 @@ const OPENAI_MODEL = String(process.env.OPENAI_MODEL || 'gpt-5').trim();
 const OPENAI_PROJECT_MODEL = String(process.env.OPENAI_PROJECT_MODEL || 'gpt-5').trim();
 const OPENAI_ROUTER_MODEL = String(process.env.OPENAI_ROUTER_MODEL || 'gpt-5').trim();
 const OPENAI_DEEP_MODEL = String(process.env.OPENAI_DEEP_MODEL || OPENAI_PROJECT_MODEL || 'gpt-5').trim();
+const OPENAI_WEB_SEARCH_MODEL = String(process.env.OPENAI_WEB_SEARCH_MODEL || OPENAI_MODEL || 'gpt-5').trim();
 const OPENAI_TRANSCRIBE_MODEL = String(process.env.OPENAI_TRANSCRIBE_MODEL || 'gpt-4o-transcribe').trim();
 const OPENAI_TRANSCRIBE_MAX_AUDIO_BYTES = Math.max(
   512_000,
@@ -5302,6 +5303,7 @@ const aiRouter = createAiRouter({
   OPENAI_PROJECT_MODEL,
   OPENAI_ROUTER_MODEL,
   OPENAI_DEEP_MODEL,
+  OPENAI_WEB_SEARCH_MODEL,
   Entity,
   resolveAgentScopeContext,
   buildEntityAnalyzerCurrentFields,
