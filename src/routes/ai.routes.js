@@ -431,6 +431,27 @@ function createAiRouter(deps) {
     }
   }
 
+  function sanitizeWebText(rawValue, { stripUrls = false } = {}) {
+    let text = typeof rawValue === 'string' ? rawValue : '';
+    if (!text) return '';
+
+    text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/gi, '$1');
+    text = text.replace(/<\s*(https?:\/\/[^>\s]+)\s*>/gi, (_, url) => normalizeWebUrl(url));
+    text = text.replace(/https?:\/\/[^\s)>\]}]+/gi, (match) => {
+      const normalizedUrl = normalizeWebUrl(match);
+      if (stripUrls) return '';
+      return normalizedUrl || '';
+    });
+    text = text
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .replace(/[ \t]{2,}/g, ' ')
+      .replace(/\(\s*\)/g, '')
+      .trim();
+
+    return text;
+  }
+
   function getWebSourceDomain(sourceUrl) {
     try {
       return new URL(sourceUrl).hostname.replace(/^www\./i, '');
@@ -440,7 +461,7 @@ function createAiRouter(deps) {
   }
 
   function buildWebSourceTitle(sourceUrl, rawTitle = '') {
-    const title = toTrimmedString(rawTitle, 240);
+    const title = toTrimmedString(sanitizeWebText(rawTitle, { stripUrls: true }), 240);
     if (title) return title;
     return getWebSourceDomain(sourceUrl) || 'Источник';
   }
@@ -464,7 +485,9 @@ function createAiRouter(deps) {
           url,
           title: buildWebSourceTitle(url, candidate?.title || candidate?.name),
           snippet: toTrimmedString(
-            candidate?.snippet || candidate?.summary || candidate?.description || candidate?.text,
+            sanitizeWebText(candidate?.snippet || candidate?.summary || candidate?.description || candidate?.text, {
+              stripUrls: true,
+            }),
             WEB_SEARCH_RESULT_SNIPPET_MAX_LENGTH,
           ),
           domain: getWebSourceDomain(url),
@@ -499,7 +522,7 @@ function createAiRouter(deps) {
     }
 
     return {
-      answer: textParts.join('\n').trim(),
+      answer: sanitizeWebText(textParts.join('\n').trim(), { stripUrls: true }),
       rawAnnotations,
     };
   }
@@ -2136,8 +2159,8 @@ function createAiRouter(deps) {
       try {
         const preview = await parseResourceLink(sourceUrl);
         return res.json({
-          sourceUrl: preview.sourceUrl,
-          finalUrl: preview.finalUrl,
+          sourceUrl: normalizeWebUrl(preview.sourceUrl) || preview.sourceUrl,
+          finalUrl: normalizeWebUrl(preview.finalUrl) || preview.finalUrl,
           hostname: preview.hostname,
           siteLabel: preview.siteLabel,
           sourceKind: preview.sourceKind,
