@@ -212,9 +212,10 @@ function createAiRouter(deps) {
   const WEB_SEARCH_TOOL_TYPES = Object.freeze(['web_search', 'web_search_preview']);
   const WEB_SEARCH_TIMEOUT_MS = 95_000;
   const WEB_SEARCH_MAX_QUERY_LENGTH = 400;
-  const WEB_SEARCH_MAX_OUTPUT_TOKENS = 1800;
+  const WEB_SEARCH_MAX_OUTPUT_TOKENS = 5200;
   const WEB_SEARCH_RESULT_SNIPPET_MAX_LENGTH = 420;
   const WEB_PAGE_PREVIEW_URL_MAX_LENGTH = 2048;
+  const WEB_SEARCH_SUMMARY_MAX_LENGTH = 26000;
 
   const IMPORTANCE_VALUE_MAP = Object.freeze({
     низкая: 'Низкая',
@@ -634,9 +635,12 @@ function createAiRouter(deps) {
           instructions: [
             'Ты встроенный веб-поиск внутри сервиса для исследования компаний, людей, событий и проектов.',
             'Отвечай на русском языке.',
-            'Дай короткую, копируемую сводку по запросу без воды.',
+            'Собери плотную, содержательную и полезную сводку, а не короткий ответ.',
             'Используй абсолютные даты, когда это важно.',
             'Опирайся только на найденные веб-источники и не выдумывай факты.',
+            'Не вставляй сырые URL, домены, utm-метки и служебные хвосты в текст ответа.',
+            'Сделай единый исследовательский бриф: кто или что это, чем важно, ключевые факты, роли, связи, даты, недавние изменения, риски или спорные моменты, если они есть.',
+            'Пиши так, чтобы текст было удобно целиком копировать на канву.',
           ].join('\n'),
           input: [
             {
@@ -652,13 +656,13 @@ function createAiRouter(deps) {
           tools: [
             {
               type: toolType,
-              search_context_size: 'medium',
+              search_context_size: 'high',
             },
           ],
           include: ['web_search_call.results', 'web_search_call.action.sources'],
           max_output_tokens: WEB_SEARCH_MAX_OUTPUT_TOKENS,
-          reasoning: { effort: 'low' },
-          text: { verbosity: 'low' },
+          reasoning: { effort: 'medium' },
+          text: { verbosity: 'high' },
         }),
         signal: controller.signal,
       });
@@ -700,6 +704,66 @@ function createAiRouter(deps) {
     }
 
     throw lastError || Object.assign(new Error('Web search failed'), { status: 502 });
+  }
+
+  function normalizeWebSearchCitations(rawValue) {
+    const source = Array.isArray(rawValue) ? rawValue : [];
+    return source
+      .map((item, index) => {
+        const row = toProfile(item);
+        const url = normalizeWebUrl(row.url);
+        if (!url) return null;
+        const sourceIndex = Math.max(1, Number(row.sourceIndex) || index + 1);
+        return {
+          id: toTrimmedString(row.id, 80) || `citation-${index + 1}`,
+          sourceIndex,
+          title: buildWebSourceTitle(url, row.title),
+          url,
+          domain: getWebSourceDomain(url),
+          startIndex: Math.max(0, Number(row.startIndex) || 0),
+          endIndex: Math.max(0, Number(row.endIndex) || 0),
+        };
+      })
+      .filter((item) => Boolean(item))
+      .slice(0, 80);
+  }
+
+  function buildProjectWebSearchState(rawValue) {
+    const row = toProfile(rawValue);
+    const status = toTrimmedString(row.status, 24).toLowerCase();
+    const normalizedStatus = ['searching', 'ready', 'failed'].includes(status) ? status : 'idle';
+    return {
+      status: normalizedStatus,
+      query: toTrimmedString(row.query, WEB_SEARCH_MAX_QUERY_LENGTH),
+      summary: toTrimmedString(sanitizeWebText(row.summary), WEB_SEARCH_SUMMARY_MAX_LENGTH),
+      citations: normalizeWebSearchCitations(row.citations),
+      errorMessage: toTrimmedString(row.errorMessage, 320),
+      startedAt: toTrimmedString(row.startedAt, 80),
+      completedAt: toTrimmedString(row.completedAt, 80),
+      updatedAt: toTrimmedString(row.updatedAt, 80),
+      model: toTrimmedString(row.model, 120),
+      sourceCount: Math.max(0, Number(row.sourceCount) || 0),
+      searchQueries: (Array.isArray(row.searchQueries) ? row.searchQueries : [])
+        .map((item) => toTrimmedString(item, 240))
+        .filter(Boolean)
+        .slice(0, 12),
+    };
+  }
+
+  async function saveProjectWebSearchState({ ownerId, projectId, nextState }) {
+    const project = await Entity.findOne({ _id: projectId, owner_id: ownerId });
+    if (!project || project.type !== 'project') {
+      throw Object.assign(new Error('Project not found'), { status: 404 });
+    }
+
+    const metadata = toProfile(project.ai_metadata);
+    metadata.web_search = buildProjectWebSearchState(nextState);
+    project.ai_metadata = metadata;
+    await project.save();
+    broadcastEntityEvent(ownerId, 'entity.updated', {
+      entity: project.toObject(),
+    });
+    return project;
   }
   function normalizeProjectEnrichmentFieldValue(fieldKey, rawValue, itemMaxLength) {
     const str = typeof rawValue === 'string' ? rawValue.trim() : '';
@@ -2106,10 +2170,34 @@ function createAiRouter(deps) {
 
   router.post('/web-search', requireAuth, async (req, res, next) => {
     try {
+      const ownerId = requireOwnerId(req);
+      const projectId = toTrimmedString(req.body?.projectId, 80);
       const query = toTrimmedString(req.body?.query, WEB_SEARCH_MAX_QUERY_LENGTH);
+      if (!projectId) {
+        return res.status(400).json({ message: 'projectId is required' });
+      }
       if (!query) {
         return res.status(400).json({ message: 'query is required' });
       }
+
+      const startedAt = new Date().toISOString();
+      await saveProjectWebSearchState({
+        ownerId,
+        projectId,
+        nextState: {
+          status: 'searching',
+          query,
+          summary: '',
+          citations: [],
+          errorMessage: '',
+          startedAt,
+          completedAt: '',
+          updatedAt: startedAt,
+          model: OPENAI_WEB_SEARCH_MODEL || OPENAI_MODEL,
+          sourceCount: 0,
+          searchQueries: [],
+        },
+      });
 
       const webSearchResult = await withAiTrace({
         label: 'web-search.query',
@@ -2131,20 +2219,86 @@ function createAiRouter(deps) {
       const responsePayload = webSearchResult?.response?.payload || {};
       const normalizedPayload = buildWebSearchPayload(responsePayload);
       if (!normalizedPayload.answer && !normalizedPayload.sources.length) {
+        const failedAt = new Date().toISOString();
+        await saveProjectWebSearchState({
+          ownerId,
+          projectId,
+          nextState: {
+            status: 'failed',
+            query,
+            summary: '',
+            citations: [],
+            errorMessage: 'Поиск не вернул полезных данных. Попробуйте уточнить запрос.',
+            startedAt,
+            completedAt: failedAt,
+            updatedAt: failedAt,
+            model: toTrimmedString(webSearchResult?.response?.model, 120) || OPENAI_WEB_SEARCH_MODEL || OPENAI_MODEL,
+            sourceCount: 0,
+            searchQueries: normalizedPayload.searchQueries,
+          },
+        });
         return res.status(422).json({
           message: 'Поиск не вернул полезных данных. Попробуйте уточнить запрос.',
         });
       }
 
+      const completedAt = new Date().toISOString();
+      const savedProject = await saveProjectWebSearchState({
+        ownerId,
+        projectId,
+        nextState: {
+          status: 'ready',
+          query,
+          summary: normalizedPayload.answer,
+          citations: normalizedPayload.citations,
+          errorMessage: '',
+          startedAt,
+          completedAt,
+          updatedAt: completedAt,
+          model: toTrimmedString(webSearchResult?.response?.model, 120) || OPENAI_WEB_SEARCH_MODEL || OPENAI_MODEL,
+          sourceCount: normalizedPayload.sources.length,
+          searchQueries: normalizedPayload.searchQueries,
+        },
+      });
+      const savedState = buildProjectWebSearchState(toProfile(toProfile(savedProject.ai_metadata).web_search));
+
       return res.json({
-        query,
-        answer: normalizedPayload.answer,
-        citations: normalizedPayload.citations,
-        sources: normalizedPayload.sources,
-        searchQueries: normalizedPayload.searchQueries,
-        model: toTrimmedString(webSearchResult?.response?.model, 120) || OPENAI_WEB_SEARCH_MODEL || OPENAI_MODEL,
+        webSearch: savedState,
       });
     } catch (error) {
+      const ownerId = (() => {
+        try {
+          return requireOwnerId(req);
+        } catch {
+          return '';
+        }
+      })();
+      const projectId = toTrimmedString(req.body?.projectId, 80);
+      const query = toTrimmedString(req.body?.query, WEB_SEARCH_MAX_QUERY_LENGTH);
+      if (ownerId && projectId) {
+        try {
+          const failedAt = new Date().toISOString();
+          await saveProjectWebSearchState({
+            ownerId,
+            projectId,
+            nextState: {
+              status: 'failed',
+              query,
+              summary: '',
+              citations: [],
+              errorMessage: toTrimmedString(error?.message, 320) || 'Не удалось выполнить веб-поиск.',
+              startedAt: failedAt,
+              completedAt: failedAt,
+              updatedAt: failedAt,
+              model: OPENAI_WEB_SEARCH_MODEL || OPENAI_MODEL,
+              sourceCount: 0,
+              searchQueries: [],
+            },
+          });
+        } catch {
+          // Ignore secondary persistence failures.
+        }
+      }
       return next(error);
     }
   });
