@@ -10,6 +10,7 @@ const { OAuth2Client } = require('google-auth-library');
 
 const connectDB = require('./config/db');
 const Entity = require('./models/Entity');
+const EntityWebSearch = require('./models/EntityWebSearch');
 const User = require('./models/User');
 const EntityVector = require('./models/EntityVector');
 const AgentChatHistory = require('./models/AgentChatHistory');
@@ -5306,6 +5307,7 @@ const aiRouter = createAiRouter({
   OPENAI_WEB_SEARCH_MODEL,
   sharp,
   Entity,
+  EntityWebSearch,
   resolveAgentScopeContext,
   buildEntityAnalyzerCurrentFields,
   getEntityAnalyzerFields,

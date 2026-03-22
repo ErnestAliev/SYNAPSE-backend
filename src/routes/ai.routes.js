@@ -20,6 +20,7 @@ function createAiRouter(deps) {
     OPENAI_WEB_SEARCH_MODEL,
     sharp,
     Entity,
+    EntityWebSearch,
     resolveAgentScopeContext,
     buildEntityAnalyzerCurrentFields,
     getEntityAnalyzerFields,
@@ -217,6 +218,7 @@ function createAiRouter(deps) {
   const WEB_SEARCH_RESULT_SNIPPET_MAX_LENGTH = 420;
   const WEB_PAGE_PREVIEW_URL_MAX_LENGTH = 2048;
   const WEB_SEARCH_SUMMARY_MAX_LENGTH = 12000;
+  const WEB_SEARCH_HISTORY_LIMIT = 12;
   const WEB_IMAGE_SEARCH_TIMEOUT_MS = 8_000;
   const WEB_IMAGE_SEARCH_RESULT_LIMIT = 10;
   const WEB_IMAGE_IMPORT_TIMEOUT_MS = 15_000;
@@ -949,7 +951,7 @@ function createAiRouter(deps) {
       .slice(0, 80);
   }
 
-  function buildProjectWebSearchState(rawValue) {
+  function buildWebSearchStateEntry(rawValue) {
     const row = toProfile(rawValue);
     const status = toTrimmedString(row.status, 24).toLowerCase();
     const normalizedStatus = ['searching', 'ready', 'failed'].includes(status) ? status : 'idle';
@@ -972,22 +974,94 @@ function createAiRouter(deps) {
     };
   }
 
-  async function saveProjectWebSearchState({ ownerId, projectId, nextState }) {
-    const project = await Entity.findOne({ _id: projectId, owner_id: ownerId });
-    if (!project || project.type !== 'project') {
-      throw Object.assign(new Error('Project not found'), { status: 404 });
+  function buildWebSearchHistory(rawValue) {
+    const source = Array.isArray(rawValue) ? rawValue : [];
+    return source
+      .map((item) => buildWebSearchStateEntry(item))
+      .filter((item) => item.query || item.summary || item.status !== 'idle')
+      .slice(0, WEB_SEARCH_HISTORY_LIMIT);
+  }
+
+  function buildEntityWebSearchStatePayload(rawValue) {
+    const row = toProfile(rawValue);
+    const current = buildWebSearchStateEntry(row.current || row);
+    return {
+      ...current,
+      history: buildWebSearchHistory(row.history),
+    };
+  }
+
+  function mergeEntityWebSearchHistory(historyRaw, nextEntry) {
+    const history = buildWebSearchHistory(historyRaw);
+    if (!nextEntry?.query || !['ready', 'failed'].includes(nextEntry.status)) {
+      return history;
     }
 
-    const metadata = toProfile(project.ai_metadata);
-    metadata.web_search = buildProjectWebSearchState(nextState);
-    project.ai_metadata = metadata;
-    await project.save();
-    broadcastEntityEvent(ownerId, 'project.web_search.updated', {
-      projectId: String(project._id || ''),
-      updatedAt: toTrimmedString(project.updatedAt, 80),
-      webSearch: metadata.web_search,
+    const nextKey = [
+      nextEntry.status,
+      nextEntry.query,
+      nextEntry.updatedAt || nextEntry.completedAt || nextEntry.startedAt,
+    ].join('|');
+
+    const filtered = history.filter((item) => {
+      const itemKey = [
+        item.status,
+        item.query,
+        item.updatedAt || item.completedAt || item.startedAt,
+      ].join('|');
+      return itemKey !== nextKey;
     });
-    return project;
+
+    return [nextEntry, ...filtered].slice(0, WEB_SEARCH_HISTORY_LIMIT);
+  }
+
+  async function saveEntityWebSearchState({ ownerId, entityId, projectId, nextState }) {
+    const entity = await Entity.findOne({ _id: entityId, owner_id: ownerId }, { _id: 1, type: 1 }).lean();
+    if (!entity) {
+      throw Object.assign(new Error('Entity not found'), { status: 404 });
+    }
+
+    const nextEntry = buildWebSearchStateEntry(nextState);
+    const existing = await EntityWebSearch.findOne({ owner_id: ownerId, entity_id: entityId });
+    const nextHistory = mergeEntityWebSearchHistory(existing?.history, nextEntry);
+    const normalizedProjectId = toTrimmedString(projectId, 80) || toTrimmedString(existing?.project_id, 80);
+
+    const saved = await EntityWebSearch.findOneAndUpdate(
+      { owner_id: ownerId, entity_id: entityId },
+      {
+        $set: {
+          project_id: normalizedProjectId,
+          current: nextEntry,
+          history: nextHistory,
+        },
+      },
+      {
+        upsert: true,
+        new: true,
+        runValidators: true,
+        setDefaultsOnInsert: true,
+      },
+    );
+
+    const webSearch = buildEntityWebSearchStatePayload(saved?.toObject ? saved.toObject() : saved);
+    broadcastEntityEvent(ownerId, 'entity.web_search.updated', {
+      entityId: String(entity._id || entityId),
+      projectId: normalizedProjectId,
+      updatedAt: toTrimmedString(webSearch.updatedAt, 80),
+      webSearch,
+    });
+
+    return webSearch;
+  }
+
+  async function loadEntityWebSearchState({ ownerId, entityId }) {
+    const entity = await Entity.findOne({ _id: entityId, owner_id: ownerId }, { _id: 1 }).lean();
+    if (!entity) {
+      throw Object.assign(new Error('Entity not found'), { status: 404 });
+    }
+
+    const doc = await EntityWebSearch.findOne({ owner_id: ownerId, entity_id: entityId }).lean();
+    return buildEntityWebSearchStatePayload(doc || {});
   }
   function normalizeProjectEnrichmentFieldValue(fieldKey, rawValue, itemMaxLength) {
     const str = typeof rawValue === 'string' ? rawValue.trim() : '';
@@ -2392,21 +2466,38 @@ function createAiRouter(deps) {
     }
   });
 
+  router.get('/web-search-state', requireAuth, async (req, res, next) => {
+    try {
+      const ownerId = requireOwnerId(req);
+      const entityId = toTrimmedString(req.query?.entityId, 80);
+      if (!entityId) {
+        return res.status(400).json({ message: 'entityId is required' });
+      }
+
+      const webSearch = await loadEntityWebSearchState({ ownerId, entityId });
+      return res.json({ webSearch });
+    } catch (error) {
+      return next(error);
+    }
+  });
+
   router.post('/web-search', requireAuth, async (req, res, next) => {
     try {
       const ownerId = requireOwnerId(req);
       const projectId = toTrimmedString(req.body?.projectId, 80);
+      const entityId = toTrimmedString(req.body?.entityId, 80);
       const query = toTrimmedString(req.body?.query, WEB_SEARCH_MAX_QUERY_LENGTH);
-      if (!projectId) {
-        return res.status(400).json({ message: 'projectId is required' });
+      if (!entityId) {
+        return res.status(400).json({ message: 'entityId is required' });
       }
       if (!query) {
         return res.status(400).json({ message: 'query is required' });
       }
 
       const startedAt = new Date().toISOString();
-      await saveProjectWebSearchState({
+      await saveEntityWebSearchState({
         ownerId,
+        entityId,
         projectId,
         nextState: {
           status: 'searching',
@@ -2448,8 +2539,9 @@ function createAiRouter(deps) {
       const normalizedPayload = buildWebSearchPayload(responsePayload);
       if (!normalizedPayload.answer && !normalizedPayload.sources.length) {
         const failedAt = new Date().toISOString();
-        await saveProjectWebSearchState({
+        await saveEntityWebSearchState({
           ownerId,
+          entityId,
           projectId,
           nextState: {
             status: 'failed',
@@ -2472,8 +2564,9 @@ function createAiRouter(deps) {
       }
 
       const completedAt = new Date().toISOString();
-      const savedProject = await saveProjectWebSearchState({
+      const savedState = await saveEntityWebSearchState({
         ownerId,
+        entityId,
         projectId,
         nextState: {
           status: 'ready',
@@ -2490,7 +2583,6 @@ function createAiRouter(deps) {
           searchQueries: normalizedPayload.searchQueries,
         },
       });
-      const savedState = buildProjectWebSearchState(toProfile(toProfile(savedProject.ai_metadata).web_search));
 
       return res.json({
         webSearch: savedState,
@@ -2504,12 +2596,14 @@ function createAiRouter(deps) {
         }
       })();
       const projectId = toTrimmedString(req.body?.projectId, 80);
+      const entityId = toTrimmedString(req.body?.entityId, 80);
       const query = toTrimmedString(req.body?.query, WEB_SEARCH_MAX_QUERY_LENGTH);
-      if (ownerId && projectId) {
+      if (ownerId && entityId) {
         try {
           const failedAt = new Date().toISOString();
-          await saveProjectWebSearchState({
+          await saveEntityWebSearchState({
             ownerId,
+            entityId,
             projectId,
             nextState: {
               status: 'failed',
