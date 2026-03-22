@@ -5304,6 +5304,7 @@ const aiRouter = createAiRouter({
   OPENAI_ROUTER_MODEL,
   OPENAI_DEEP_MODEL,
   OPENAI_WEB_SEARCH_MODEL,
+  sharp,
   Entity,
   resolveAgentScopeContext,
   buildEntityAnalyzerCurrentFields,

@@ -18,6 +18,7 @@ function createAiRouter(deps) {
     OPENAI_ROUTER_MODEL,
     OPENAI_DEEP_MODEL,
     OPENAI_WEB_SEARCH_MODEL,
+    sharp,
     Entity,
     resolveAgentScopeContext,
     buildEntityAnalyzerCurrentFields,
@@ -216,6 +217,12 @@ function createAiRouter(deps) {
   const WEB_SEARCH_RESULT_SNIPPET_MAX_LENGTH = 420;
   const WEB_PAGE_PREVIEW_URL_MAX_LENGTH = 2048;
   const WEB_SEARCH_SUMMARY_MAX_LENGTH = 12000;
+  const WEB_IMAGE_SEARCH_TIMEOUT_MS = 8_000;
+  const WEB_IMAGE_SEARCH_RESULT_LIMIT = 10;
+  const WEB_IMAGE_IMPORT_TIMEOUT_MS = 15_000;
+  const WEB_IMAGE_IMPORT_URL_MAX_LENGTH = 2048;
+  const WEB_IMAGE_IMPORT_MAX_BYTES = 1_200_000;
+  const WEB_IMAGE_IMPORT_MAX_DIMENSION_PX = 1280;
 
   const IMPORTANCE_VALUE_MAP = Object.freeze({
     низкая: 'Низкая',
@@ -467,6 +474,81 @@ function createAiRouter(deps) {
     return getWebSourceDomain(sourceUrl) || 'Источник';
   }
 
+  function isSafePublicHttpUrl(rawValue) {
+    const raw = toTrimmedString(rawValue, WEB_IMAGE_IMPORT_URL_MAX_LENGTH);
+    if (!raw) return false;
+
+    let url;
+    try {
+      url = new URL(raw);
+    } catch {
+      return false;
+    }
+
+    if (!['http:', 'https:'].includes(url.protocol)) {
+      return false;
+    }
+
+    const hostname = String(url.hostname || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+    if (!hostname) return false;
+    if (
+      hostname === 'localhost' ||
+      hostname === '0.0.0.0' ||
+      hostname === '::1' ||
+      hostname.endsWith('.local')
+    ) {
+      return false;
+    }
+
+    if (
+      /^127\./.test(hostname) ||
+      /^10\./.test(hostname) ||
+      /^192\.168\./.test(hostname) ||
+      /^169\.254\./.test(hostname) ||
+      /^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname) ||
+      /^fc/i.test(hostname) ||
+      /^fd/i.test(hostname) ||
+      /^fe80:/i.test(hostname)
+    ) {
+      return false;
+    }
+
+    return true;
+  }
+
+  function normalizeWebSearchImages(rawValue) {
+    const source = Array.isArray(rawValue) ? rawValue : [];
+    const dedup = new Set();
+
+    return source
+      .map((item, index) => {
+        const row = toProfile(item);
+        const imageUrl = normalizeWebUrl(row.imageUrl || row.image);
+        const thumbnailUrl = normalizeWebUrl(row.thumbnailUrl || row.thumbnail || row.imageUrl || row.image);
+        if (!imageUrl || !thumbnailUrl) return null;
+        if (!isSafePublicHttpUrl(imageUrl) || !isSafePublicHttpUrl(thumbnailUrl)) return null;
+
+        const sourcePageUrl = normalizeWebUrl(row.sourcePageUrl || row.url);
+        const key = imageUrl || thumbnailUrl;
+        if (!key || dedup.has(key)) return null;
+        dedup.add(key);
+
+        const domain = getWebSourceDomain(sourcePageUrl || imageUrl);
+        return {
+          id: toTrimmedString(row.id, 80) || `image-${index + 1}`,
+          imageUrl,
+          thumbnailUrl,
+          title: buildWebSourceTitle(sourcePageUrl || imageUrl, row.title || row.source || domain),
+          domain,
+          sourcePageUrl,
+          width: Math.max(0, Number(row.width) || 0),
+          height: Math.max(0, Number(row.height) || 0),
+        };
+      })
+      .filter((item) => Boolean(item))
+      .slice(0, WEB_IMAGE_SEARCH_RESULT_LIMIT);
+  }
+
   function collectWebSearchToolSources(payload) {
     const outputs = Array.isArray(payload?.output) ? payload.output : [];
     const dedup = new Map();
@@ -705,6 +787,146 @@ function createAiRouter(deps) {
     throw lastError || Object.assign(new Error('Web search failed'), { status: 502 });
   }
 
+  async function fetchJsonWithTimeout(url, options, timeoutMs) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+      });
+      return response;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async function requestDuckDuckGoImageToken(query) {
+    const searchUrl = `https://duckduckgo.com/?q=${encodeURIComponent(query)}&iax=images&ia=images`;
+    const response = await fetchJsonWithTimeout(
+      searchUrl,
+      {
+        headers: {
+          'user-agent': 'Mozilla/5.0 (compatible; Synapse12WebImageSearch/1.0)',
+          accept: 'text/html,application/xhtml+xml',
+        },
+      },
+      WEB_IMAGE_SEARCH_TIMEOUT_MS,
+    );
+
+    if (!response.ok) {
+      throw Object.assign(new Error('Image search token request failed'), { status: response.status });
+    }
+
+    const html = await response.text();
+    const match =
+      html.match(/vqd=['"]([^'"]+)['"]/i) ||
+      html.match(/vqd=([\d-]+)\&/i);
+
+    return match?.[1] ? String(match[1]).trim() : '';
+  }
+
+  async function requestWebImageSearch(query) {
+    const normalizedQuery = toTrimmedString(query, WEB_SEARCH_MAX_QUERY_LENGTH);
+    if (!normalizedQuery) return [];
+
+    const token = await requestDuckDuckGoImageToken(normalizedQuery);
+    if (!token) return [];
+
+    const imageSearchUrl =
+      `https://duckduckgo.com/i.js?o=json&p=1&l=wt-wt&q=${encodeURIComponent(normalizedQuery)}&vqd=${encodeURIComponent(token)}`;
+    const response = await fetchJsonWithTimeout(
+      imageSearchUrl,
+      {
+        headers: {
+          accept: 'application/json, text/javascript, */*; q=0.01',
+          referer: `https://duckduckgo.com/?q=${encodeURIComponent(normalizedQuery)}&iax=images&ia=images`,
+          'user-agent': 'Mozilla/5.0 (compatible; Synapse12WebImageSearch/1.0)',
+          'x-requested-with': 'XMLHttpRequest',
+        },
+      },
+      WEB_IMAGE_SEARCH_TIMEOUT_MS,
+    );
+
+    if (!response.ok) {
+      throw Object.assign(new Error('Image search request failed'), { status: response.status });
+    }
+
+    const payload = await response.json().catch(() => ({}));
+    return normalizeWebSearchImages(Array.isArray(payload?.results) ? payload.results : []);
+  }
+
+  async function fetchRemoteImageAsDataUrl(rawUrl) {
+    const sourceUrl = normalizeWebUrl(rawUrl);
+    if (!sourceUrl || !isSafePublicHttpUrl(sourceUrl)) return '';
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), WEB_IMAGE_IMPORT_TIMEOUT_MS);
+    let response;
+
+    try {
+      response = await fetch(sourceUrl, {
+        signal: controller.signal,
+        headers: {
+          'user-agent': 'Mozilla/5.0 (compatible; Synapse12WebImageImport/1.0)',
+          accept: 'image/*,*/*;q=0.8',
+        },
+      });
+    } catch {
+      clearTimeout(timeout);
+      return '';
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    if (!response || !response.ok) return '';
+
+    const contentType = toTrimmedString(response.headers.get('content-type') || '', 120).toLowerCase();
+    if (!contentType.startsWith('image/')) return '';
+
+    const contentLength = Number(response.headers.get('content-length') || 0);
+    if (contentLength > 12_000_000) return '';
+
+    const rawBuffer = Buffer.from(await response.arrayBuffer());
+    if (!rawBuffer.length || rawBuffer.length > 12_000_000) return '';
+
+    if (sharp) {
+      try {
+        let compressed = await sharp(rawBuffer)
+          .rotate()
+          .resize(WEB_IMAGE_IMPORT_MAX_DIMENSION_PX, WEB_IMAGE_IMPORT_MAX_DIMENSION_PX, {
+            fit: 'inside',
+            withoutEnlargement: true,
+          })
+          .jpeg({ quality: 84, mozjpeg: true })
+          .toBuffer();
+
+        if (compressed.length > WEB_IMAGE_IMPORT_MAX_BYTES) {
+          compressed = await sharp(rawBuffer)
+            .rotate()
+            .resize(1024, 1024, {
+              fit: 'inside',
+              withoutEnlargement: true,
+            })
+            .jpeg({ quality: 72, mozjpeg: true })
+            .toBuffer();
+        }
+
+        if (compressed.length <= WEB_IMAGE_IMPORT_MAX_BYTES) {
+          return `data:image/jpeg;base64,${compressed.toString('base64')}`;
+        }
+      } catch {
+        // Fallback to raw image when conversion fails.
+      }
+    }
+
+    if (rawBuffer.length > WEB_IMAGE_IMPORT_MAX_BYTES) {
+      return '';
+    }
+
+    return `data:${contentType};base64,${rawBuffer.toString('base64')}`;
+  }
+
   function normalizeWebSearchCitations(rawValue) {
     const source = Array.isArray(rawValue) ? rawValue : [];
     return source
@@ -736,6 +958,7 @@ function createAiRouter(deps) {
       query: toTrimmedString(row.query, WEB_SEARCH_MAX_QUERY_LENGTH),
       summary: toTrimmedString(sanitizeWebText(row.summary), WEB_SEARCH_SUMMARY_MAX_LENGTH),
       citations: normalizeWebSearchCitations(row.citations),
+      images: normalizeWebSearchImages(row.images),
       errorMessage: toTrimmedString(row.errorMessage, 320),
       startedAt: toTrimmedString(row.startedAt, 80),
       completedAt: toTrimmedString(row.completedAt, 80),
@@ -2190,6 +2413,7 @@ function createAiRouter(deps) {
           query,
           summary: '',
           citations: [],
+          images: [],
           errorMessage: '',
           startedAt,
           completedAt: '',
@@ -2200,22 +2424,25 @@ function createAiRouter(deps) {
         },
       });
 
-      const webSearchResult = await withAiTrace({
-        label: 'web-search.query',
-        model: OPENAI_WEB_SEARCH_MODEL || OPENAI_MODEL,
-        queryLength: query.length,
-      }, async () => {
-        const response = await requestWebSearch(query);
-        return {
-          reply: buildWebSearchPayload(response.payload).answer,
-          debug: {
-            response: {
-              model: response.model,
+      const [webSearchResult, imageResults] = await Promise.all([
+        withAiTrace({
+          label: 'web-search.query',
+          model: OPENAI_WEB_SEARCH_MODEL || OPENAI_MODEL,
+          queryLength: query.length,
+        }, async () => {
+          const response = await requestWebSearch(query);
+          return {
+            reply: buildWebSearchPayload(response.payload).answer,
+            debug: {
+              response: {
+                model: response.model,
+              },
             },
-          },
-          response,
-        };
-      });
+            response,
+          };
+        }),
+        requestWebImageSearch(query).catch(() => []),
+      ]);
 
       const responsePayload = webSearchResult?.response?.payload || {};
       const normalizedPayload = buildWebSearchPayload(responsePayload);
@@ -2229,6 +2456,7 @@ function createAiRouter(deps) {
             query,
             summary: '',
             citations: [],
+            images: imageResults,
             errorMessage: 'Поиск не вернул полезных данных. Попробуйте уточнить запрос.',
             startedAt,
             completedAt: failedAt,
@@ -2252,6 +2480,7 @@ function createAiRouter(deps) {
           query,
           summary: normalizedPayload.answer,
           citations: normalizedPayload.citations,
+          images: imageResults,
           errorMessage: '',
           startedAt,
           completedAt,
@@ -2287,6 +2516,7 @@ function createAiRouter(deps) {
               query,
               summary: '',
               citations: [],
+              images: [],
               errorMessage: toTrimmedString(error?.message, 320) || 'Не удалось выполнить веб-поиск.',
               startedAt: failedAt,
               completedAt: failedAt,
@@ -2328,6 +2558,29 @@ function createAiRouter(deps) {
         const safeMessage = toTrimmedString(error?.message, 240) || 'Не удалось открыть источник';
         return res.status(422).json({ message: safeMessage });
       }
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  router.post('/web-image-import', requireAuth, async (req, res, next) => {
+    try {
+      const imageUrl = toTrimmedString(req.body?.imageUrl, WEB_IMAGE_IMPORT_URL_MAX_LENGTH);
+      const thumbnailUrl = toTrimmedString(req.body?.thumbnailUrl, WEB_IMAGE_IMPORT_URL_MAX_LENGTH);
+      if (!imageUrl && !thumbnailUrl) {
+        return res.status(400).json({ message: 'imageUrl is required' });
+      }
+
+      let image = await fetchRemoteImageAsDataUrl(imageUrl);
+      if (!image && thumbnailUrl && thumbnailUrl !== imageUrl) {
+        image = await fetchRemoteImageAsDataUrl(thumbnailUrl);
+      }
+
+      if (!image) {
+        return res.status(422).json({ message: 'Не удалось загрузить фото из веб-поиска.' });
+      }
+
+      return res.json({ image });
     } catch (error) {
       return next(error);
     }
