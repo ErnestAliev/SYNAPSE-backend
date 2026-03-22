@@ -45,6 +45,7 @@ const webSearchEntrySchema = new mongoose.Schema(
     model: { type: String, default: '', trim: true },
     sourceCount: { type: Number, default: 0 },
     searchQueries: { type: [String], default: [] },
+    fieldSuggestion: { type: mongoose.Schema.Types.Mixed, default: () => ({}) },
   },
   { _id: false },
 );

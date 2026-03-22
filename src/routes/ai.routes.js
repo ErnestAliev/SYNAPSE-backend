@@ -102,6 +102,9 @@ function createAiRouter(deps) {
     importance: { maxItems: 1, itemMaxLength: 24 },
     ignoredNoise: { maxItems: 20, itemMaxLength: 120 },
   });
+  const ENTITY_WEB_SEARCH_FIELD_KEYS = Object.freeze(
+    Object.keys(ENTITY_ANALYSIS_FIELD_CONFIGS).filter((fieldKey) => fieldKey !== 'ignoredNoise'),
+  );
   // JSON Schema for OpenAI Structured Outputs (Responses API text.format).
   //
   // IMPORTANT — Responses API uses a FLAT format, NOT the nested Chat-Completions
@@ -211,6 +214,27 @@ function createAiRouter(deps) {
       },
     },
   });
+  const WEB_SEARCH_FIELD_SUGGESTION_OUTPUT_SCHEMA = Object.freeze({
+    type: 'json_schema',
+    name: 'WebSearchFieldSuggestion',
+    strict: true,
+    schema: {
+      type: 'object',
+      required: ['fields'],
+      additionalProperties: false,
+      properties: {
+        fields: {
+          type: 'object',
+          required: ENTITY_WEB_SEARCH_FIELD_KEYS,
+          additionalProperties: false,
+          properties: ENTITY_WEB_SEARCH_FIELD_KEYS.reduce((acc, fieldKey) => {
+            acc[fieldKey] = { type: 'array', items: { type: 'string' } };
+            return acc;
+          }, {}),
+        },
+      },
+    },
+  });
   const WEB_SEARCH_TOOL_TYPES = Object.freeze(['web_search', 'web_search_preview']);
   const WEB_SEARCH_TIMEOUT_MS = 95_000;
   const WEB_SEARCH_MAX_QUERY_LENGTH = 400;
@@ -219,6 +243,8 @@ function createAiRouter(deps) {
   const WEB_PAGE_PREVIEW_URL_MAX_LENGTH = 2048;
   const WEB_SEARCH_SUMMARY_MAX_LENGTH = 12000;
   const WEB_SEARCH_HISTORY_LIMIT = 12;
+  const WEB_SEARCH_FIELD_SUGGESTION_TIMEOUT_MS = 35_000;
+  const WEB_SEARCH_FIELD_SUGGESTION_MAX_OUTPUT_TOKENS = 1200;
   const WEB_IMAGE_SEARCH_TIMEOUT_MS = 8_000;
   const WEB_IMAGE_SEARCH_RESULT_LIMIT = 10;
   const WEB_IMAGE_IMPORT_TIMEOUT_MS = 15_000;
@@ -689,6 +715,120 @@ function createAiRouter(deps) {
     };
   }
 
+  function buildEmptyWebSearchFieldSuggestion(entityType) {
+    const allowedFieldsSource =
+      typeof getEntityAnalyzerFields === 'function' ? getEntityAnalyzerFields(entityType) : [];
+    const allowedFields = Array.isArray(allowedFieldsSource) ? allowedFieldsSource : [];
+    const fields = {};
+
+    for (const fieldKey of allowedFields) {
+      fields[fieldKey] = [];
+    }
+
+    return {
+      status: 'idle',
+      fields,
+      updatedAt: '',
+      model: '',
+    };
+  }
+
+  function buildWebSearchFieldSuggestion(rawValue, entityType) {
+    const row = toProfile(rawValue);
+    const base = buildEmptyWebSearchFieldSuggestion(entityType);
+    const statusRaw = toTrimmedString(row.status, 24).toLowerCase();
+    const normalizedStatus = statusRaw === 'ready' ? 'ready' : 'idle';
+    const normalizedFields = filterToAllowedFields(entityType, row.fields);
+
+    return {
+      status: normalizedStatus,
+      fields: {
+        ...base.fields,
+        ...normalizedFields,
+      },
+      updatedAt: toTrimmedString(row.updatedAt, 80),
+      model: toTrimmedString(row.model, 120),
+    };
+  }
+
+  async function requestWebSearchFieldSuggestion({ entityType, query, summary, sources }) {
+    const allowedFieldsSource =
+      typeof getEntityAnalyzerFields === 'function' ? getEntityAnalyzerFields(entityType) : [];
+    const allowedFields = Array.isArray(allowedFieldsSource) ? allowedFieldsSource : [];
+    if (!allowedFields.length) {
+      return buildEmptyWebSearchFieldSuggestion(entityType);
+    }
+
+    const normalizedSummary = toTrimmedString(summary, WEB_SEARCH_SUMMARY_MAX_LENGTH);
+    if (!normalizedSummary) {
+      return buildEmptyWebSearchFieldSuggestion(entityType);
+    }
+
+    const compactSources = (Array.isArray(sources) ? sources : [])
+      .slice(0, 6)
+      .map((source, index) => {
+        const row = toProfile(source);
+        const title = toTrimmedString(row.title, 200) || `Источник ${index + 1}`;
+        const domain = toTrimmedString(row.domain, 120);
+        const snippet = toTrimmedString(row.snippet, WEB_SEARCH_RESULT_SNIPPET_MAX_LENGTH);
+        return [
+          `${index + 1}. ${title}${domain ? ` (${domain})` : ''}`,
+          snippet || 'Без сниппета',
+        ].join('\n');
+      })
+      .join('\n\n');
+
+    const systemPrompt = [
+      'Ты выделяешь кандидаты для полей сущности по итогам веб-поиска.',
+      'Опирайся только на переданную сводку и источники.',
+      'Не выдумывай факты и не заполняй поля догадками.',
+      'Если значение не подтверждено явно, оставь поле пустым.',
+      'Не дублируй одно и то же значение в разных полях.',
+      'Возвращай короткие, пригодные для вставки в поля сущности значения.',
+    ].join('\n');
+
+    const userPrompt = [
+      `Тип сущности: ${entityType}`,
+      `Разрешенные поля: ${allowedFields.join(', ')}`,
+      `Запрос: ${toTrimmedString(query, WEB_SEARCH_MAX_QUERY_LENGTH)}`,
+      'Сводка:',
+      normalizedSummary,
+      compactSources ? `Источники:\n${compactSources}` : '',
+      'Нужно вернуть только кандидаты для полей сущности.',
+    ].filter(Boolean).join('\n\n');
+
+    const suggestionModel = toTrimmedString(OPENAI_MODEL, 120) || OPENAI_WEB_SEARCH_MODEL || 'gpt-5';
+    const aiResponse = await aiProvider.requestOpenAiAgentReply({
+      systemPrompt,
+      userPrompt,
+      model: suggestionModel,
+      temperature: 0.1,
+      maxOutputTokens: WEB_SEARCH_FIELD_SUGGESTION_MAX_OUTPUT_TOKENS,
+      timeoutMs: WEB_SEARCH_FIELD_SUGGESTION_TIMEOUT_MS,
+      jsonSchema: WEB_SEARCH_FIELD_SUGGESTION_OUTPUT_SCHEMA,
+      allowEmptyResponse: true,
+      emptyResponseFallback: '',
+    });
+
+    if (!aiResponse.reply) {
+      return buildEmptyWebSearchFieldSuggestion(entityType);
+    }
+
+    const parsed = extractJsonObjectFromText(aiResponse.reply);
+    const normalizedFields = filterToAllowedFields(entityType, parsed?.fields);
+    const hasValues = allowedFields.some((fieldKey) => Array.isArray(normalizedFields[fieldKey]) && normalizedFields[fieldKey].length);
+
+    return {
+      status: hasValues ? 'ready' : 'idle',
+      fields: {
+        ...buildEmptyWebSearchFieldSuggestion(entityType).fields,
+        ...normalizedFields,
+      },
+      updatedAt: new Date().toISOString(),
+      model: toTrimmedString(aiResponse?.model, 120) || suggestionModel,
+    };
+  }
+
   function shouldRetryWebSearchWithLegacyTool(error) {
     const status = Number(error?.status) || 0;
     if (status < 400 || status >= 500) return false;
@@ -951,7 +1091,7 @@ function createAiRouter(deps) {
       .slice(0, 80);
   }
 
-  function buildWebSearchStateEntry(rawValue) {
+  function buildWebSearchStateEntry(rawValue, entityType = 'shape') {
     const row = toProfile(rawValue);
     const status = toTrimmedString(row.status, 24).toLowerCase();
     const normalizedStatus = ['searching', 'ready', 'failed'].includes(status) ? status : 'idle';
@@ -971,28 +1111,29 @@ function createAiRouter(deps) {
         .map((item) => toTrimmedString(item, 240))
         .filter(Boolean)
         .slice(0, 12),
+      fieldSuggestion: buildWebSearchFieldSuggestion(row.fieldSuggestion, entityType),
     };
   }
 
-  function buildWebSearchHistory(rawValue) {
+  function buildWebSearchHistory(rawValue, entityType = 'shape') {
     const source = Array.isArray(rawValue) ? rawValue : [];
     return source
-      .map((item) => buildWebSearchStateEntry(item))
+      .map((item) => buildWebSearchStateEntry(item, entityType))
       .filter((item) => item.query || item.summary || item.status !== 'idle')
       .slice(0, WEB_SEARCH_HISTORY_LIMIT);
   }
 
-  function buildEntityWebSearchStatePayload(rawValue) {
+  function buildEntityWebSearchStatePayload(rawValue, entityType = 'shape') {
     const row = toProfile(rawValue);
-    const current = buildWebSearchStateEntry(row.current || row);
+    const current = buildWebSearchStateEntry(row.current || row, entityType);
     return {
       ...current,
-      history: buildWebSearchHistory(row.history),
+      history: buildWebSearchHistory(row.history, entityType),
     };
   }
 
-  function mergeEntityWebSearchHistory(historyRaw, nextEntry) {
-    const history = buildWebSearchHistory(historyRaw);
+  function mergeEntityWebSearchHistory(historyRaw, nextEntry, entityType = 'shape') {
+    const history = buildWebSearchHistory(historyRaw, entityType);
     if (!nextEntry?.query || !['ready', 'failed'].includes(nextEntry.status)) {
       return history;
     }
@@ -1021,9 +1162,9 @@ function createAiRouter(deps) {
       throw Object.assign(new Error('Entity not found'), { status: 404 });
     }
 
-    const nextEntry = buildWebSearchStateEntry(nextState);
+    const nextEntry = buildWebSearchStateEntry(nextState, entity.type);
     const existing = await EntityWebSearch.findOne({ owner_id: ownerId, entity_id: entityId });
-    const nextHistory = mergeEntityWebSearchHistory(existing?.history, nextEntry);
+    const nextHistory = mergeEntityWebSearchHistory(existing?.history, nextEntry, entity.type);
     const normalizedProjectId = toTrimmedString(projectId, 80) || toTrimmedString(existing?.project_id, 80);
 
     const saved = await EntityWebSearch.findOneAndUpdate(
@@ -1043,7 +1184,7 @@ function createAiRouter(deps) {
       },
     );
 
-    const webSearch = buildEntityWebSearchStatePayload(saved?.toObject ? saved.toObject() : saved);
+    const webSearch = buildEntityWebSearchStatePayload(saved?.toObject ? saved.toObject() : saved, entity.type);
     broadcastEntityEvent(ownerId, 'entity.web_search.updated', {
       entityId: String(entity._id || entityId),
       projectId: normalizedProjectId,
@@ -1055,13 +1196,13 @@ function createAiRouter(deps) {
   }
 
   async function loadEntityWebSearchState({ ownerId, entityId }) {
-    const entity = await Entity.findOne({ _id: entityId, owner_id: ownerId }, { _id: 1 }).lean();
+    const entity = await Entity.findOne({ _id: entityId, owner_id: ownerId }, { _id: 1, type: 1 }).lean();
     if (!entity) {
       throw Object.assign(new Error('Entity not found'), { status: 404 });
     }
 
     const doc = await EntityWebSearch.findOne({ owner_id: ownerId, entity_id: entityId }).lean();
-    return buildEntityWebSearchStatePayload(doc || {});
+    return buildEntityWebSearchStatePayload(doc || {}, entity.type);
   }
   function normalizeProjectEnrichmentFieldValue(fieldKey, rawValue, itemMaxLength) {
     const str = typeof rawValue === 'string' ? rawValue.trim() : '';
@@ -2494,6 +2635,11 @@ function createAiRouter(deps) {
         return res.status(400).json({ message: 'query is required' });
       }
 
+      const entity = await Entity.findOne({ _id: entityId, owner_id: ownerId }, { _id: 1, type: 1 }).lean();
+      if (!entity) {
+        return res.status(404).json({ message: 'Entity not found' });
+      }
+
       const startedAt = new Date().toISOString();
       await saveEntityWebSearchState({
         ownerId,
@@ -2512,6 +2658,7 @@ function createAiRouter(deps) {
           model: OPENAI_WEB_SEARCH_MODEL || OPENAI_MODEL,
           sourceCount: 0,
           searchQueries: [],
+          fieldSuggestion: buildEmptyWebSearchFieldSuggestion(entity.type),
         },
       });
 
@@ -2537,6 +2684,37 @@ function createAiRouter(deps) {
 
       const responsePayload = webSearchResult?.response?.payload || {};
       const normalizedPayload = buildWebSearchPayload(responsePayload);
+      let fieldSuggestion = buildEmptyWebSearchFieldSuggestion(entity.type);
+      if (normalizedPayload.answer) {
+        try {
+          fieldSuggestion = await withAiTrace({
+            label: 'web-search.fields',
+            model: toTrimmedString(OPENAI_MODEL, 120) || OPENAI_WEB_SEARCH_MODEL || 'gpt-5',
+            entityId,
+            entityType: entity.type,
+            queryLength: query.length,
+          }, async () => {
+            const suggestion = await requestWebSearchFieldSuggestion({
+              entityType: entity.type,
+              query,
+              summary: normalizedPayload.answer,
+              sources: normalizedPayload.sources,
+            });
+            return {
+              reply: JSON.stringify(suggestion.fields || {}),
+              debug: {
+                response: {
+                  model: suggestion.model || OPENAI_MODEL,
+                },
+              },
+              suggestion,
+            };
+          }).then((result) => result?.suggestion || buildEmptyWebSearchFieldSuggestion(entity.type));
+        } catch {
+          fieldSuggestion = buildEmptyWebSearchFieldSuggestion(entity.type);
+        }
+      }
+
       if (!normalizedPayload.answer && !normalizedPayload.sources.length) {
         const failedAt = new Date().toISOString();
         await saveEntityWebSearchState({
@@ -2556,6 +2734,7 @@ function createAiRouter(deps) {
             model: toTrimmedString(webSearchResult?.response?.model, 120) || OPENAI_WEB_SEARCH_MODEL || OPENAI_MODEL,
             sourceCount: 0,
             searchQueries: normalizedPayload.searchQueries,
+            fieldSuggestion,
           },
         });
         return res.status(422).json({
@@ -2581,6 +2760,7 @@ function createAiRouter(deps) {
           model: toTrimmedString(webSearchResult?.response?.model, 120) || OPENAI_WEB_SEARCH_MODEL || OPENAI_MODEL,
           sourceCount: normalizedPayload.sources.length,
           searchQueries: normalizedPayload.searchQueries,
+          fieldSuggestion,
         },
       });
 
@@ -2618,6 +2798,7 @@ function createAiRouter(deps) {
               model: OPENAI_WEB_SEARCH_MODEL || OPENAI_MODEL,
               sourceCount: 0,
               searchQueries: [],
+              fieldSuggestion: buildEmptyWebSearchFieldSuggestion('shape'),
             },
           });
         } catch {
