@@ -828,6 +828,12 @@ function createAiRouter(deps) {
     };
   }
 
+  function shouldIgnoreStoredWebSearchFieldSuggestion(rawValue) {
+    const row = toProfile(rawValue);
+    const model = toTrimmedString(row.model, 120).toLowerCase();
+    return model.startsWith('heuristic:');
+  }
+
   function buildWebSearchTextCorpus(summary, sources) {
     const sourceList = Array.isArray(sources) ? sources : [];
     return [
@@ -998,55 +1004,6 @@ function createAiRouter(deps) {
       );
     }
 
-    if (allowedFieldSet.has('tags')) {
-      base.fields.tags = normalizeEntityFieldList(
-        extractWebSearchKeywordTags(corpus, summary, 6),
-        ENTITY_ANALYSIS_FIELD_CONFIGS.tags,
-      );
-    }
-
-    if (allowedFieldSet.has('roles')) {
-      base.fields.roles = normalizeEntityFieldList(
-        extractWebSearchPatternLabels(corpus, WEB_SEARCH_ROLE_PATTERNS, 6),
-        ENTITY_ANALYSIS_FIELD_CONFIGS.roles,
-      );
-    }
-
-    if (allowedFieldSet.has('skills')) {
-      base.fields.skills = normalizeEntityFieldList(
-        extractWebSearchPatternLabels(corpus, WEB_SEARCH_SKILL_PATTERNS, 6),
-        ENTITY_ANALYSIS_FIELD_CONFIGS.skills,
-      );
-    }
-
-    if (allowedFieldSet.has('industry')) {
-      base.fields.industry = normalizeEntityFieldList(
-        extractWebSearchPatternLabels(corpus, WEB_SEARCH_INDUSTRY_PATTERNS, 5),
-        ENTITY_ANALYSIS_FIELD_CONFIGS.industry,
-      );
-    }
-
-    if (allowedFieldSet.has('stage')) {
-      base.fields.stage = normalizeEntityFieldList(
-        extractWebSearchPatternLabels(corpus, WEB_SEARCH_STAGE_PATTERNS, 4),
-        ENTITY_ANALYSIS_FIELD_CONFIGS.stage,
-      );
-    }
-
-    if (allowedFieldSet.has('status')) {
-      base.fields.status = normalizeEntityFieldList(
-        extractWebSearchPatternLabels(corpus, WEB_SEARCH_STATUS_PATTERNS, 4),
-        ENTITY_ANALYSIS_FIELD_CONFIGS.status,
-      );
-    }
-
-    if (allowedFieldSet.has('date')) {
-      base.fields.date = normalizeEntityFieldList(
-        extractWebSearchDateCandidates(corpus),
-        ENTITY_ANALYSIS_FIELD_CONFIGS.date,
-      );
-    }
-
     const hasValues = allowedFields.some((fieldKey) => Array.isArray(base.fields[fieldKey]) && base.fields[fieldKey].length);
     return {
       status: hasValues ? 'ready' : 'idle',
@@ -1085,29 +1042,31 @@ function createAiRouter(deps) {
       .join('\n\n');
 
     const suggestionModel = toTrimmedString(OPENAI_MODEL, 120) || OPENAI_WEB_SEARCH_MODEL || 'gpt-5';
+    const baseEntityPrompt =
+      typeof aiPrompts?.buildEntityAnalyzerSystemPrompt === 'function'
+        ? aiPrompts.buildEntityAnalyzerSystemPrompt(entityType)
+        : '';
     const systemPrompt = [
-      'Ты извлекаешь кандидаты для полей сущности из результатов веб-поиска.',
-      'Верни только JSON по схеме { fields: ... }.',
-      `Тип сущности: ${entityType}. Разрешенные поля: ${allowedFields.join(', ')}.`,
-      'Заполняй только явно подтвержденные значения из сводки и заголовков источников.',
-      'Не оставляй поле пустым, если факт прямо присутствует в тексте.',
-      'Не выдумывай данные и не дублируй одно значение в нескольких полях.',
-      'Для tags, roles, skills, industry, stage, status и markers используй короткие значения 1-3 слова.',
-      'Для date и location допускаются короткие даты и названия мест без предложений.',
-      'phones: только телефоны. links: только валидные URL. importance: только Низкая, Средняя, Высокая.',
-      'Если значение не подтверждено, верни [] для этого поля.',
-      'Пример person: "предприниматель, CEO Tesla и SpaceX" -> roles:["предприниматель","CEO"], tags:["tesla","spacex"].',
-      'Пример company: "AI research company, Series A startup" -> industry:["искусственный интеллект"], stage:["Series A","стартап"].',
-      'Пример event: "конференция прошла 12 мая 2025 в Алматы" -> date:["12 мая 2025"], location:["Алматы"].',
-    ].join('\n');
+      baseEntityPrompt,
+      'РЕЖИМ WEB SEARCH FIELD EXTRACTION:',
+      'Ты НЕ обновляешь description и не анализируешь историю редактирования.',
+      'Считай, что краткая сводка уже собрана. Твоя задача: разложить только summary по полям fields.',
+      'Верхние поля ответа, не относящиеся к fields, можно оставлять пустыми или нейтральными, но приоритет только fields.',
+      'Не используй URL как tags, roles, skills или markers. URL допустимы только в fields.links.',
+      'Не тяни в roles длинные описания функций, черты характера и пересказ биографии. roles = короткие роли 1-3 слова.',
+      'Не превращай все summary в tags. tags = короткие темы и ярлыки; skills = только навыки; markers = только внешний контекст.',
+      'Если факт явно не следует из summary, оставь поле пустым.',
+    ].filter(Boolean).join('\n\n');
     const userPrompt = [
       `Запрос: ${toTrimmedString(query, WEB_SEARCH_MAX_QUERY_LENGTH)}`,
+      `Тип сущности: ${entityType}`,
+      `Разрешенные поля: ${allowedFields.join(', ')}`,
       `Уже подтвержденные URL: ${JSON.stringify(heuristicSuggestion.fields.links || [])}`,
       `Уже подтвержденные телефоны: ${JSON.stringify(heuristicSuggestion.fields.phones || [])}`,
-      'Сводка:',
+      'Готовая сводка для разложения по полям:',
       normalizedSummary,
       compactSources ? `Источники:\n${compactSources}` : '',
-      'Нужно вернуть только объект fields.',
+      'Нужно вернуть объект fields. Сначала опирайся на summary, источники используй только как проверку.',
     ].filter(Boolean).join('\n\n');
     const aiResponse = await aiProvider.requestOpenAiAgentReply({
       systemPrompt,
@@ -1415,10 +1374,13 @@ function createAiRouter(deps) {
     const row = toProfile(rawValue);
     const status = toTrimmedString(row.status, 24).toLowerCase();
     const normalizedStatus = ['searching', 'ready', 'failed'].includes(status) ? status : 'idle';
+    const phase = toTrimmedString(row.phase, 24).toLowerCase();
+    const normalizedPhase = ['summary', 'images', 'fields', 'ready', 'failed'].includes(phase) ? phase : '';
     const summary = toTrimmedString(sanitizeWebText(row.summary), WEB_SEARCH_SUMMARY_MAX_LENGTH);
     const citations = normalizeWebSearchCitations(row.citations);
     return {
       status: normalizedStatus,
+      phase: normalizedPhase,
       query: toTrimmedString(row.query, WEB_SEARCH_MAX_QUERY_LENGTH),
       summary,
       citations,
@@ -1435,7 +1397,9 @@ function createAiRouter(deps) {
         .slice(0, 12),
       fieldSuggestion: mergeWebSearchFieldSuggestion(
         entityType,
-        buildWebSearchFieldSuggestion(row.fieldSuggestion, entityType),
+        shouldIgnoreStoredWebSearchFieldSuggestion(row.fieldSuggestion)
+          ? buildEmptyWebSearchFieldSuggestion(entityType)
+          : buildWebSearchFieldSuggestion(row.fieldSuggestion, entityType),
         buildHeuristicWebSearchFieldSuggestion(entityType, summary, citations),
       ),
     };
@@ -2973,6 +2937,7 @@ function createAiRouter(deps) {
         projectId,
         nextState: {
           status: 'searching',
+          phase: 'summary',
           query,
           summary: '',
           citations: [],
@@ -2988,114 +2953,196 @@ function createAiRouter(deps) {
         },
       });
 
-      const [webSearchResult, imageResults] = await Promise.all([
-        withAiTrace({
-          label: 'web-search.query',
-          model: OPENAI_WEB_SEARCH_MODEL || OPENAI_MODEL,
-          queryLength: query.length,
-        }, async () => {
-          const response = await requestWebSearch(query);
-          return {
-            reply: buildWebSearchPayload(response.payload).answer,
-            debug: {
-              response: {
-                model: response.model,
-              },
-            },
-            response,
-          };
-        }),
-        requestWebImageSearch(query).catch(() => []),
-      ]);
+      void (async () => {
+        let normalizedPayload = {
+          answer: '',
+          citations: [],
+          sources: [],
+          searchQueries: [],
+        };
+        let imageResults = [];
+        let fieldSuggestion = buildEmptyWebSearchFieldSuggestion(entity.type);
+        let responseModel = OPENAI_WEB_SEARCH_MODEL || OPENAI_MODEL;
 
-      const responsePayload = webSearchResult?.response?.payload || {};
-      const normalizedPayload = buildWebSearchPayload(responsePayload);
-      let fieldSuggestion = buildEmptyWebSearchFieldSuggestion(entity.type);
-      if (normalizedPayload.answer) {
         try {
-          fieldSuggestion = await withAiTrace({
-            label: 'web-search.fields',
-            model: toTrimmedString(OPENAI_MODEL, 120) || OPENAI_WEB_SEARCH_MODEL || 'gpt-5',
-            entityId,
-            entityType: entity.type,
+          const webSearchResult = await withAiTrace({
+            label: 'web-search.query',
+            model: OPENAI_WEB_SEARCH_MODEL || OPENAI_MODEL,
             queryLength: query.length,
           }, async () => {
-            const suggestion = await requestWebSearchFieldSuggestion({
-              entityType: entity.type,
-              query,
-              summary: normalizedPayload.answer,
-              sources: normalizedPayload.sources,
-            });
+            const response = await requestWebSearch(query);
             return {
-              reply: JSON.stringify(suggestion.fields || {}),
+              reply: buildWebSearchPayload(response.payload).answer,
               debug: {
                 response: {
-                  model: suggestion.model || OPENAI_MODEL,
+                  model: response.model,
                 },
               },
-              suggestion,
+              response,
             };
-          }).then((result) => result?.suggestion || buildEmptyWebSearchFieldSuggestion(entity.type));
-        } catch {
-          fieldSuggestion = buildHeuristicWebSearchFieldSuggestion(
-            entity.type,
-            normalizedPayload.answer,
-            normalizedPayload.sources,
-          );
+          });
+
+          const responsePayload = webSearchResult?.response?.payload || {};
+          normalizedPayload = buildWebSearchPayload(responsePayload);
+          responseModel = toTrimmedString(webSearchResult?.response?.model, 120) || OPENAI_WEB_SEARCH_MODEL || OPENAI_MODEL;
+
+          if (!normalizedPayload.answer && !normalizedPayload.sources.length) {
+            const failedAt = new Date().toISOString();
+            await saveEntityWebSearchState({
+              ownerId,
+              entityId,
+              projectId,
+              nextState: {
+                status: 'failed',
+                phase: 'failed',
+                query,
+                summary: '',
+                citations: [],
+                images: [],
+                errorMessage: 'Поиск не вернул полезных данных. Попробуйте уточнить запрос.',
+                startedAt,
+                completedAt: failedAt,
+                updatedAt: failedAt,
+                model: responseModel,
+                sourceCount: 0,
+                searchQueries: normalizedPayload.searchQueries,
+                fieldSuggestion,
+              },
+            });
+            return;
+          }
+
+          const summaryAt = new Date().toISOString();
+          await saveEntityWebSearchState({
+            ownerId,
+            entityId,
+            projectId,
+            nextState: {
+              status: 'searching',
+              phase: 'images',
+              query,
+              summary: normalizedPayload.answer,
+              citations: normalizedPayload.citations,
+              images: [],
+              errorMessage: '',
+              startedAt,
+              completedAt: '',
+              updatedAt: summaryAt,
+              model: responseModel,
+              sourceCount: normalizedPayload.sources.length,
+              searchQueries: normalizedPayload.searchQueries,
+              fieldSuggestion,
+            },
+          });
+
+          imageResults = await requestWebImageSearch(query).catch(() => []);
+          const imagesAt = new Date().toISOString();
+          await saveEntityWebSearchState({
+            ownerId,
+            entityId,
+            projectId,
+            nextState: {
+              status: 'searching',
+              phase: 'fields',
+              query,
+              summary: normalizedPayload.answer,
+              citations: normalizedPayload.citations,
+              images: imageResults,
+              errorMessage: '',
+              startedAt,
+              completedAt: '',
+              updatedAt: imagesAt,
+              model: responseModel,
+              sourceCount: normalizedPayload.sources.length,
+              searchQueries: normalizedPayload.searchQueries,
+              fieldSuggestion,
+            },
+          });
+
+          if (normalizedPayload.answer) {
+            try {
+              fieldSuggestion = await withAiTrace({
+                label: 'web-search.fields',
+                model: toTrimmedString(OPENAI_MODEL, 120) || OPENAI_WEB_SEARCH_MODEL || 'gpt-5',
+                entityId,
+                entityType: entity.type,
+                queryLength: query.length,
+              }, async () => {
+                const suggestion = await requestWebSearchFieldSuggestion({
+                  entityType: entity.type,
+                  query,
+                  summary: normalizedPayload.answer,
+                  sources: normalizedPayload.sources,
+                });
+                return {
+                  reply: JSON.stringify(suggestion.fields || {}),
+                  debug: {
+                    response: {
+                      model: suggestion.model || OPENAI_MODEL,
+                    },
+                  },
+                  suggestion,
+                };
+              }).then((result) => result?.suggestion || buildEmptyWebSearchFieldSuggestion(entity.type));
+            } catch {
+              fieldSuggestion = buildHeuristicWebSearchFieldSuggestion(
+                entity.type,
+                normalizedPayload.answer,
+                normalizedPayload.sources,
+              );
+            }
+          }
+
+          const completedAt = new Date().toISOString();
+          await saveEntityWebSearchState({
+            ownerId,
+            entityId,
+            projectId,
+            nextState: {
+              status: 'ready',
+              phase: 'ready',
+              query,
+              summary: normalizedPayload.answer,
+              citations: normalizedPayload.citations,
+              images: imageResults,
+              errorMessage: '',
+              startedAt,
+              completedAt,
+              updatedAt: completedAt,
+              model: responseModel,
+              sourceCount: normalizedPayload.sources.length,
+              searchQueries: normalizedPayload.searchQueries,
+              fieldSuggestion,
+            },
+          });
+        } catch (error) {
+          const failedAt = new Date().toISOString();
+          await saveEntityWebSearchState({
+            ownerId,
+            entityId,
+            projectId,
+            nextState: {
+              status: 'failed',
+              phase: 'failed',
+              query,
+              summary: normalizedPayload.answer,
+              citations: normalizedPayload.citations,
+              images: imageResults,
+              errorMessage: toTrimmedString(error?.message, 320) || 'Не удалось выполнить веб-поиск.',
+              startedAt,
+              completedAt: failedAt,
+              updatedAt: failedAt,
+              model: responseModel,
+              sourceCount: Array.isArray(normalizedPayload.sources) ? normalizedPayload.sources.length : 0,
+              searchQueries: normalizedPayload.searchQueries,
+              fieldSuggestion,
+            },
+          });
         }
-      }
+      })();
 
-      if (!normalizedPayload.answer && !normalizedPayload.sources.length) {
-        const failedAt = new Date().toISOString();
-        await saveEntityWebSearchState({
-          ownerId,
-          entityId,
-          projectId,
-          nextState: {
-            status: 'failed',
-            query,
-            summary: '',
-            citations: [],
-            images: imageResults,
-            errorMessage: 'Поиск не вернул полезных данных. Попробуйте уточнить запрос.',
-            startedAt,
-            completedAt: failedAt,
-            updatedAt: failedAt,
-            model: toTrimmedString(webSearchResult?.response?.model, 120) || OPENAI_WEB_SEARCH_MODEL || OPENAI_MODEL,
-            sourceCount: 0,
-            searchQueries: normalizedPayload.searchQueries,
-            fieldSuggestion,
-          },
-        });
-        return res.status(422).json({
-          message: 'Поиск не вернул полезных данных. Попробуйте уточнить запрос.',
-        });
-      }
-
-      const completedAt = new Date().toISOString();
-      const savedState = await saveEntityWebSearchState({
-        ownerId,
-        entityId,
-        projectId,
-        nextState: {
-          status: 'ready',
-          query,
-          summary: normalizedPayload.answer,
-          citations: normalizedPayload.citations,
-          images: imageResults,
-          errorMessage: '',
-          startedAt,
-          completedAt,
-          updatedAt: completedAt,
-          model: toTrimmedString(webSearchResult?.response?.model, 120) || OPENAI_WEB_SEARCH_MODEL || OPENAI_MODEL,
-          sourceCount: normalizedPayload.sources.length,
-          searchQueries: normalizedPayload.searchQueries,
-          fieldSuggestion,
-        },
-      });
-
-      return res.json({
-        webSearch: savedState,
+      return res.status(202).json({
+        accepted: true,
       });
     } catch (error) {
       const ownerId = (() => {

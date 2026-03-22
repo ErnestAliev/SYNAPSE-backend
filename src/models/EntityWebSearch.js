@@ -34,6 +34,11 @@ const webSearchEntrySchema = new mongoose.Schema(
       enum: ['idle', 'searching', 'ready', 'failed'],
       default: 'idle',
     },
+    phase: {
+      type: String,
+      enum: ['', 'summary', 'images', 'fields', 'ready', 'failed'],
+      default: '',
+    },
     query: { type: String, default: '', trim: true },
     summary: { type: String, default: '', trim: true },
     citations: { type: [webSearchCitationSchema], default: [] },
