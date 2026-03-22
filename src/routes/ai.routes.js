@@ -212,10 +212,10 @@ function createAiRouter(deps) {
   const WEB_SEARCH_TOOL_TYPES = Object.freeze(['web_search', 'web_search_preview']);
   const WEB_SEARCH_TIMEOUT_MS = 95_000;
   const WEB_SEARCH_MAX_QUERY_LENGTH = 400;
-  const WEB_SEARCH_MAX_OUTPUT_TOKENS = 5200;
+  const WEB_SEARCH_MAX_OUTPUT_TOKENS = 2200;
   const WEB_SEARCH_RESULT_SNIPPET_MAX_LENGTH = 420;
   const WEB_PAGE_PREVIEW_URL_MAX_LENGTH = 2048;
-  const WEB_SEARCH_SUMMARY_MAX_LENGTH = 26000;
+  const WEB_SEARCH_SUMMARY_MAX_LENGTH = 12000;
 
   const IMPORTANCE_VALUE_MAP = Object.freeze({
     низкая: 'Низкая',
@@ -633,14 +633,13 @@ function createAiRouter(deps) {
         body: JSON.stringify({
           model: OPENAI_WEB_SEARCH_MODEL || OPENAI_MODEL,
           instructions: [
-            'Ты встроенный веб-поиск внутри сервиса для исследования компаний, людей, событий и проектов.',
+            'Ты встроенный веб-поиск внутри сервиса.',
             'Отвечай на русском языке.',
-            'Собери плотную, содержательную и полезную сводку, а не короткий ответ.',
-            'Используй абсолютные даты, когда это важно.',
+            'Сделай быструю, ясную и полезную сводку по запросу.',
             'Опирайся только на найденные веб-источники и не выдумывай факты.',
-            'Не вставляй сырые URL, домены, utm-метки и служебные хвосты в текст ответа.',
-            'Сделай единый исследовательский бриф: кто или что это, чем важно, ключевые факты, роли, связи, даты, недавние изменения, риски или спорные моменты, если они есть.',
-            'Пиши так, чтобы текст было удобно целиком копировать на канву.',
+            'Используй абсолютные даты, если в ответе есть даты.',
+            'Не вставляй в текст сырые URL, домены, utm-метки и служебные хвосты.',
+            'Пиши компактно и по делу, чтобы текст было удобно копировать на канву.',
           ].join('\n'),
           input: [
             {
@@ -656,13 +655,13 @@ function createAiRouter(deps) {
           tools: [
             {
               type: toolType,
-              search_context_size: 'high',
+              search_context_size: 'medium',
             },
           ],
           include: ['web_search_call.results', 'web_search_call.action.sources'],
           max_output_tokens: WEB_SEARCH_MAX_OUTPUT_TOKENS,
-          reasoning: { effort: 'medium' },
-          text: { verbosity: 'high' },
+          reasoning: { effort: 'low' },
+          text: { verbosity: 'low' },
         }),
         signal: controller.signal,
       });
