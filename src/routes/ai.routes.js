@@ -243,8 +243,8 @@ function createAiRouter(deps) {
   const WEB_PAGE_PREVIEW_URL_MAX_LENGTH = 2048;
   const WEB_SEARCH_SUMMARY_MAX_LENGTH = 12000;
   const WEB_SEARCH_HISTORY_LIMIT = 12;
-  const WEB_SEARCH_FIELD_SUGGESTION_TIMEOUT_MS = 35_000;
-  const WEB_SEARCH_FIELD_SUGGESTION_MAX_OUTPUT_TOKENS = 1200;
+  const WEB_SEARCH_FIELD_SUGGESTION_TIMEOUT_MS = 45_000;
+  const WEB_SEARCH_FIELD_SUGGESTION_MAX_OUTPUT_TOKENS = 1600;
   const WEB_IMAGE_SEARCH_TIMEOUT_MS = 8_000;
   const WEB_IMAGE_SEARCH_RESULT_LIMIT = 10;
   const WEB_IMAGE_IMPORT_TIMEOUT_MS = 15_000;
@@ -269,6 +269,83 @@ function createAiRouter(deps) {
     критично: 'Высокая',
     critical: 'Высокая',
   });
+  const WEB_SEARCH_KEYWORD_STOPWORDS = new Set([
+    'и', 'или', 'но', 'а', 'для', 'что', 'это', 'как', 'при', 'из', 'на', 'по', 'о', 'об', 'от', 'до', 'за',
+    'the', 'and', 'for', 'with', 'from', 'into', 'about', 'that', 'this', 'their', 'they', 'them',
+    'компания', 'человек', 'событие', 'проект', 'тема', 'источник', 'источники', 'запрос', 'сводка',
+    'search', 'result', 'results', 'information', 'photo', 'image', 'images', 'video', 'official',
+    'news', 'latest', 'today', 'page', 'pages', 'web', 'поиск',
+  ]);
+  const WEB_SEARCH_ROLE_PATTERNS = Object.freeze([
+    { label: 'CEO', patterns: ['ceo', 'chief executive officer', 'генеральный директор'] },
+    { label: 'CTO', patterns: ['cto', 'chief technology officer', 'технический директор'] },
+    { label: 'CFO', patterns: ['cfo', 'chief financial officer', 'финансовый директор'] },
+    { label: 'предприниматель', patterns: ['предприниматель', 'entrepreneur'] },
+    { label: 'основатель', patterns: ['основатель', 'founder'] },
+    { label: 'сооснователь', patterns: ['сооснователь', 'co-founder', 'cofounder'] },
+    { label: 'инвестор', patterns: ['инвестор', 'investor'] },
+    { label: 'директор', patterns: ['director', 'директор'] },
+    { label: 'разработчик', patterns: ['developer', 'разработчик'] },
+    { label: 'инженер', patterns: ['engineer', 'инженер'] },
+    { label: 'дизайнер', patterns: ['designer', 'дизайнер'] },
+    { label: 'исследователь', patterns: ['researcher', 'исследователь'] },
+    { label: 'журналист', patterns: ['journalist', 'журналист'] },
+    { label: 'политик', patterns: ['politician', 'политик'] },
+    { label: 'музыкант', patterns: ['musician', 'музыкант'] },
+    { label: 'певец', patterns: ['singer', 'певец', 'певица'] },
+    { label: 'актер', patterns: ['actor', 'актёр', 'актер', 'актриса', 'actress'] },
+    { label: 'спортсмен', patterns: ['athlete', 'спортсмен'] },
+    { label: 'блогер', patterns: ['blogger', 'блогер'] },
+  ]);
+  const WEB_SEARCH_SKILL_PATTERNS = Object.freeze([
+    { label: 'маркетинг', patterns: ['маркетинг', 'marketing'] },
+    { label: 'продажи', patterns: ['sales', 'продажи'] },
+    { label: 'аналитика', patterns: ['analytics', 'аналитика'] },
+    { label: 'переговоры', patterns: ['negotiation', 'переговоры'] },
+    { label: 'разработка', patterns: ['development', 'разработка'] },
+    { label: 'дизайн', patterns: ['design', 'дизайн'] },
+    { label: 'менеджмент', patterns: ['management', 'менеджмент', 'управление'] },
+    { label: 'исследования', patterns: ['research', 'исследования'] },
+    { label: 'финансы', patterns: ['finance', 'финансы'] },
+    { label: 'операции', patterns: ['operations', 'операции'] },
+  ]);
+  const WEB_SEARCH_INDUSTRY_PATTERNS = Object.freeze([
+    { label: 'искусственный интеллект', patterns: ['artificial intelligence', ' ai ', 'искусственный интеллект', ' ии '] },
+    { label: 'финтех', patterns: ['fintech', 'финтех'] },
+    { label: 'edtech', patterns: ['edtech'] },
+    { label: 'healthtech', patterns: ['healthtech'] },
+    { label: 'SaaS', patterns: ['saas'] },
+    { label: 'e-commerce', patterns: ['e-commerce', 'ecommerce', 'электронная коммерция'] },
+    { label: 'медиа', patterns: ['media', 'медиа'] },
+    { label: 'логистика', patterns: ['logistics', 'логистика'] },
+    { label: 'недвижимость', patterns: ['real estate', 'недвижимость'] },
+    { label: 'кибербезопасность', patterns: ['cybersecurity', 'кибербезопасность'] },
+    { label: 'образование', patterns: ['education', 'образование'] },
+    { label: 'здравоохранение', patterns: ['healthcare', 'здравоохранение'] },
+    { label: 'ритейл', patterns: ['retail', 'ритейл'] },
+  ]);
+  const WEB_SEARCH_STAGE_PATTERNS = Object.freeze([
+    { label: 'MVP', patterns: ['mvp'] },
+    { label: 'pre-seed', patterns: ['pre-seed', 'pre seed'] },
+    { label: 'seed', patterns: [' seed ', 'seed round'] },
+    { label: 'Series A', patterns: ['series a'] },
+    { label: 'Series B', patterns: ['series b'] },
+    { label: 'масштабирование', patterns: ['масштабирование', 'scaling', 'scaleup'] },
+    { label: 'запуск', patterns: ['launch', 'запуск'] },
+    { label: 'пилот', patterns: ['pilot', 'пилот'] },
+    { label: 'прототип', patterns: ['prototype', 'прототип'] },
+    { label: 'стартап', patterns: ['startup', 'стартап'] },
+  ]);
+  const WEB_SEARCH_STATUS_PATTERNS = Object.freeze([
+    { label: 'в процессе', patterns: ['in progress', 'в процессе'] },
+    { label: 'запущен', patterns: ['launched', 'запущен', 'запущена'] },
+    { label: 'активен', patterns: [' active ', 'активен', 'активная'] },
+    { label: 'закрыт', patterns: ['closed', 'закрыт', 'закрыта'] },
+    { label: 'анонсирован', patterns: ['announced', 'анонсирован', 'анонсирована'] },
+    { label: 'состоялся', patterns: ['took place', 'held on', 'состоялся', 'состоялась'] },
+    { label: 'приобретен', patterns: ['acquired', 'acquisition', 'приобретен', 'приобретена'] },
+  ]);
+  const WEB_SEARCH_MONTH_PATTERN = '(?:январ[ьяе]|феврал[ьяе]|март[ае]?|апрел[ьяе]|ма[йея]|июн[ьяе]|июл[ьяе]|август[ае]?|сентябр[ьяе]|октябр[ьяе]|ноябр[ьяе]|декабр[ьяе]|january|february|march|april|may|june|july|august|september|october|november|december)';
   const ENTITY_NAME_MODE_VALUES = new Set(['system', 'manual', 'llm']);
   const AUTO_NAME_TYPES = new Set(
     (Array.isArray(entityTypes) ? entityTypes : [])
@@ -751,6 +828,132 @@ function createAiRouter(deps) {
     };
   }
 
+  function buildWebSearchTextCorpus(summary, sources) {
+    const sourceList = Array.isArray(sources) ? sources : [];
+    return [
+      toTrimmedString(summary, WEB_SEARCH_SUMMARY_MAX_LENGTH),
+      ...sourceList.flatMap((source) => {
+        const row = toProfile(source);
+        return [
+          toTrimmedString(row.title, 200),
+          toTrimmedString(row.snippet, WEB_SEARCH_RESULT_SNIPPET_MAX_LENGTH),
+        ];
+      }),
+    ]
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  function tokenizeWebSearchText(text) {
+    return Array.from((toTrimmedString(text, 24_000) || '').matchAll(/[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9+-]{2,}/g))
+      .map((match) => toTrimmedString(match[0], 48))
+      .filter(Boolean);
+  }
+
+  function normalizeWebSearchKeywordLabel(token) {
+    const value = toTrimmedString(token, 48);
+    if (!value) return '';
+    const lower = value.toLowerCase();
+    if (lower === 'ai') return 'AI';
+    if (lower === 'saas') return 'SaaS';
+    if (lower === 'b2b') return 'B2B';
+    if (lower === 'b2c') return 'B2C';
+    return lower;
+  }
+
+  function extractWebSearchKeywordTags(text, query, limit = 6) {
+    const queryTokens = new Set(tokenizeWebSearchText(query).map((token) => normalizeWebSearchKeywordLabel(token)));
+    const counts = new Map();
+
+    for (const token of tokenizeWebSearchText(text)) {
+      const normalized = normalizeWebSearchKeywordLabel(token);
+      if (!normalized || normalized.length < 3) continue;
+      if (WEB_SEARCH_KEYWORD_STOPWORDS.has(normalized)) continue;
+      if (queryTokens.has(normalized)) continue;
+      counts.set(normalized, (counts.get(normalized) || 0) + 1);
+    }
+
+    return Array.from(counts.entries())
+      .sort((left, right) => {
+        if (right[1] !== left[1]) return right[1] - left[1];
+        return left[0].localeCompare(right[0], 'ru');
+      })
+      .slice(0, limit)
+      .map(([token]) => token);
+  }
+
+  function extractWebSearchPatternLabels(text, patternConfigs, limit = 6) {
+    const haystack = ` ${toTrimmedString(text, 24_000).toLowerCase()} `;
+    if (!haystack.trim()) return [];
+
+    const result = [];
+    for (const config of Array.isArray(patternConfigs) ? patternConfigs : []) {
+      const patterns = Array.isArray(config?.patterns) ? config.patterns : [];
+      if (patterns.some((pattern) => haystack.includes(String(pattern).toLowerCase()))) {
+        result.push(toTrimmedString(config.label, 64));
+      }
+      if (result.length >= limit) break;
+    }
+    return result.filter(Boolean);
+  }
+
+  function extractWebSearchDateCandidates(text) {
+    const value = toTrimmedString(text, 24_000);
+    if (!value) return [];
+
+    const result = [];
+    const patterns = [
+      new RegExp(`\\b\\d{1,2}\\s+${WEB_SEARCH_MONTH_PATTERN}\\s+\\d{4}\\b`, 'giu'),
+      new RegExp(`\\b${WEB_SEARCH_MONTH_PATTERN}\\s+\\d{4}\\b`, 'giu'),
+      /\b\d{4}-\d{2}-\d{2}\b/g,
+      /\b\d{1,2}\.\d{1,2}\.\d{4}\b/g,
+      /\b(19|20)\d{2}\b/g,
+    ];
+
+    for (const pattern of patterns) {
+      for (const match of value.matchAll(pattern)) {
+        const normalized = toTrimmedString(match[0], 64);
+        if (!normalized || result.includes(normalized)) continue;
+        result.push(normalized);
+        if (result.length >= 5) return result;
+      }
+    }
+
+    return result;
+  }
+
+  function mergeWebSearchFieldSuggestion(entityType, primary, fallback) {
+    const primarySuggestion = buildWebSearchFieldSuggestion(primary, entityType);
+    const fallbackSuggestion = buildWebSearchFieldSuggestion(fallback, entityType);
+    const base = buildEmptyWebSearchFieldSuggestion(entityType);
+    const allowedFieldsSource =
+      typeof getEntityAnalyzerFields === 'function' ? getEntityAnalyzerFields(entityType) : [];
+    const allowedFields = Array.isArray(allowedFieldsSource) ? allowedFieldsSource : [];
+
+    for (const fieldKey of allowedFields) {
+      const config = ENTITY_ANALYSIS_FIELD_CONFIGS[fieldKey] || ENTITY_ANALYSIS_FIELD_CONFIGS.tags;
+      const mergedValues = [
+        ...(primarySuggestion.fields[fieldKey] || []),
+        ...(fallbackSuggestion.fields[fieldKey] || []),
+      ];
+      base.fields[fieldKey] = fieldKey === 'importance'
+        ? normalizeImportanceList(mergedValues)
+        : normalizeEntityFieldList(mergedValues, config);
+    }
+
+    const hasValues = allowedFields.some((fieldKey) => Array.isArray(base.fields[fieldKey]) && base.fields[fieldKey].length);
+    return {
+      status: hasValues ? 'ready' : 'idle',
+      fields: base.fields,
+      updatedAt:
+        toTrimmedString(primarySuggestion.updatedAt, 80) ||
+        toTrimmedString(fallbackSuggestion.updatedAt, 80),
+      model:
+        toTrimmedString(primarySuggestion.model, 120) ||
+        toTrimmedString(fallbackSuggestion.model, 120),
+    };
+  }
+
   function extractWebSearchPhoneCandidates(rawText) {
     const text = toTrimmedString(rawText, 24_000);
     if (!text) return [];
@@ -774,6 +977,7 @@ function createAiRouter(deps) {
     const allowedFieldSet = new Set(allowedFields);
     const base = buildEmptyWebSearchFieldSuggestion(entityType);
     const sourceList = Array.isArray(sources) ? sources : [];
+    const corpus = buildWebSearchTextCorpus(summary, sourceList);
 
     if (allowedFieldSet.has('links')) {
       base.fields.links = normalizeEntityFieldList(
@@ -788,21 +992,58 @@ function createAiRouter(deps) {
     }
 
     if (allowedFieldSet.has('phones')) {
-      const phoneText = [
-        toTrimmedString(summary, WEB_SEARCH_SUMMARY_MAX_LENGTH),
-        ...sourceList.flatMap((source) => {
-          const row = toProfile(source);
-          return [
-            toTrimmedString(row.title, 200),
-            toTrimmedString(row.snippet, WEB_SEARCH_RESULT_SNIPPET_MAX_LENGTH),
-          ];
-        }),
-      ]
-        .filter(Boolean)
-        .join('\n');
       base.fields.phones = normalizeEntityFieldList(
-        extractWebSearchPhoneCandidates(phoneText),
+        extractWebSearchPhoneCandidates(corpus),
         ENTITY_ANALYSIS_FIELD_CONFIGS.phones,
+      );
+    }
+
+    if (allowedFieldSet.has('tags')) {
+      base.fields.tags = normalizeEntityFieldList(
+        extractWebSearchKeywordTags(corpus, summary, 6),
+        ENTITY_ANALYSIS_FIELD_CONFIGS.tags,
+      );
+    }
+
+    if (allowedFieldSet.has('roles')) {
+      base.fields.roles = normalizeEntityFieldList(
+        extractWebSearchPatternLabels(corpus, WEB_SEARCH_ROLE_PATTERNS, 6),
+        ENTITY_ANALYSIS_FIELD_CONFIGS.roles,
+      );
+    }
+
+    if (allowedFieldSet.has('skills')) {
+      base.fields.skills = normalizeEntityFieldList(
+        extractWebSearchPatternLabels(corpus, WEB_SEARCH_SKILL_PATTERNS, 6),
+        ENTITY_ANALYSIS_FIELD_CONFIGS.skills,
+      );
+    }
+
+    if (allowedFieldSet.has('industry')) {
+      base.fields.industry = normalizeEntityFieldList(
+        extractWebSearchPatternLabels(corpus, WEB_SEARCH_INDUSTRY_PATTERNS, 5),
+        ENTITY_ANALYSIS_FIELD_CONFIGS.industry,
+      );
+    }
+
+    if (allowedFieldSet.has('stage')) {
+      base.fields.stage = normalizeEntityFieldList(
+        extractWebSearchPatternLabels(corpus, WEB_SEARCH_STAGE_PATTERNS, 4),
+        ENTITY_ANALYSIS_FIELD_CONFIGS.stage,
+      );
+    }
+
+    if (allowedFieldSet.has('status')) {
+      base.fields.status = normalizeEntityFieldList(
+        extractWebSearchPatternLabels(corpus, WEB_SEARCH_STATUS_PATTERNS, 4),
+        ENTITY_ANALYSIS_FIELD_CONFIGS.status,
+      );
+    }
+
+    if (allowedFieldSet.has('date')) {
+      base.fields.date = normalizeEntityFieldList(
+        extractWebSearchDateCandidates(corpus),
+        ENTITY_ANALYSIS_FIELD_CONFIGS.date,
       );
     }
 
@@ -843,44 +1084,31 @@ function createAiRouter(deps) {
       })
       .join('\n\n');
 
-    const promptMessage = [
-      'Ниже материалы веб-поиска для предварительного заполнения полей сущности.',
-      'Нужны только подтвержденные значения. Не заполняй поля догадками.',
-      'Описание можно оставить пустым, приоритет именно у полей.',
+    const suggestionModel = toTrimmedString(OPENAI_MODEL, 120) || OPENAI_WEB_SEARCH_MODEL || 'gpt-5';
+    const systemPrompt = [
+      'Ты извлекаешь кандидаты для полей сущности из результатов веб-поиска.',
+      'Верни только JSON по схеме { fields: ... }.',
+      `Тип сущности: ${entityType}. Разрешенные поля: ${allowedFields.join(', ')}.`,
+      'Заполняй только явно подтвержденные значения из сводки и заголовков источников.',
+      'Не оставляй поле пустым, если факт прямо присутствует в тексте.',
+      'Не выдумывай данные и не дублируй одно значение в нескольких полях.',
+      'Для tags, roles, skills, industry, stage, status и markers используй короткие значения 1-3 слова.',
+      'Для date и location допускаются короткие даты и названия мест без предложений.',
+      'phones: только телефоны. links: только валидные URL. importance: только Низкая, Средняя, Высокая.',
+      'Если значение не подтверждено, верни [] для этого поля.',
+      'Пример person: "предприниматель, CEO Tesla и SpaceX" -> roles:["предприниматель","CEO"], tags:["tesla","spacex"].',
+      'Пример company: "AI research company, Series A startup" -> industry:["искусственный интеллект"], stage:["Series A","стартап"].',
+      'Пример event: "конференция прошла 12 мая 2025 в Алматы" -> date:["12 мая 2025"], location:["Алматы"].',
+    ].join('\n');
+    const userPrompt = [
       `Запрос: ${toTrimmedString(query, WEB_SEARCH_MAX_QUERY_LENGTH)}`,
+      `Уже подтвержденные URL: ${JSON.stringify(heuristicSuggestion.fields.links || [])}`,
+      `Уже подтвержденные телефоны: ${JSON.stringify(heuristicSuggestion.fields.phones || [])}`,
       'Сводка:',
       normalizedSummary,
       compactSources ? `Источники:\n${compactSources}` : '',
+      'Нужно вернуть только объект fields.',
     ].filter(Boolean).join('\n\n');
-
-    const suggestionModel = toTrimmedString(OPENAI_MODEL, 120) || OPENAI_WEB_SEARCH_MODEL || 'gpt-5';
-    const pseudoEntity = {
-      _id: `web-search-${entityType}`,
-      type: entityType,
-      name: toTrimmedString(query, 120) || 'Результат веб-поиска',
-      ai_metadata: {},
-    };
-    const systemPrompt =
-      typeof aiPrompts?.buildEntityAnalyzerSystemPrompt === 'function'
-        ? aiPrompts.buildEntityAnalyzerSystemPrompt(entityType)
-        : [
-            'Ты выделяешь кандидаты для полей сущности по итогам веб-поиска.',
-            'Опирайся только на переданную сводку и источники.',
-            'Не выдумывай факты и не заполняй поля догадками.',
-            'Если значение не подтверждено явно, оставь поле пустым.',
-          ].join('\n');
-    const userPrompt =
-      typeof aiPrompts?.buildEntityAnalyzerUserPrompt === 'function'
-        ? aiPrompts.buildEntityAnalyzerUserPrompt({
-            entity: pseudoEntity,
-            message: promptMessage,
-            history: [],
-            attachments: [],
-            currentFields: buildEntityAnalyzerCurrentFields(entityType, {}),
-            voiceInput: '',
-            documents: [],
-          })
-        : promptMessage;
     const aiResponse = await aiProvider.requestOpenAiAgentReply({
       systemPrompt,
       userPrompt,
@@ -888,7 +1116,7 @@ function createAiRouter(deps) {
       temperature: 0.1,
       maxOutputTokens: WEB_SEARCH_FIELD_SUGGESTION_MAX_OUTPUT_TOKENS,
       timeoutMs: WEB_SEARCH_FIELD_SUGGESTION_TIMEOUT_MS,
-      jsonSchema: ENTITY_ANALYSIS_OUTPUT_SCHEMA,
+      jsonSchema: WEB_SEARCH_FIELD_SUGGESTION_OUTPUT_SCHEMA,
       reasoningEffort: 'low',
       verbosity: 'low',
     });
@@ -913,17 +1141,12 @@ function createAiRouter(deps) {
       );
     }
 
-    const hasValues = allowedFields.some((fieldKey) => Array.isArray(mergedFields[fieldKey]) && mergedFields[fieldKey].length);
-    if (!hasValues) {
-      return heuristicSuggestion;
-    }
-
-    return {
+    return mergeWebSearchFieldSuggestion(entityType, {
       status: 'ready',
       fields: mergedFields,
       updatedAt: new Date().toISOString(),
       model: toTrimmedString(aiResponse?.debug?.response?.model, 120) || suggestionModel,
-    };
+    }, heuristicSuggestion);
   }
 
   function shouldRetryWebSearchWithLegacyTool(error) {
@@ -1192,11 +1415,13 @@ function createAiRouter(deps) {
     const row = toProfile(rawValue);
     const status = toTrimmedString(row.status, 24).toLowerCase();
     const normalizedStatus = ['searching', 'ready', 'failed'].includes(status) ? status : 'idle';
+    const summary = toTrimmedString(sanitizeWebText(row.summary), WEB_SEARCH_SUMMARY_MAX_LENGTH);
+    const citations = normalizeWebSearchCitations(row.citations);
     return {
       status: normalizedStatus,
       query: toTrimmedString(row.query, WEB_SEARCH_MAX_QUERY_LENGTH),
-      summary: toTrimmedString(sanitizeWebText(row.summary), WEB_SEARCH_SUMMARY_MAX_LENGTH),
-      citations: normalizeWebSearchCitations(row.citations),
+      summary,
+      citations,
       images: normalizeWebSearchImages(row.images),
       errorMessage: toTrimmedString(row.errorMessage, 320),
       startedAt: toTrimmedString(row.startedAt, 80),
@@ -1208,7 +1433,11 @@ function createAiRouter(deps) {
         .map((item) => toTrimmedString(item, 240))
         .filter(Boolean)
         .slice(0, 12),
-      fieldSuggestion: buildWebSearchFieldSuggestion(row.fieldSuggestion, entityType),
+      fieldSuggestion: mergeWebSearchFieldSuggestion(
+        entityType,
+        buildWebSearchFieldSuggestion(row.fieldSuggestion, entityType),
+        buildHeuristicWebSearchFieldSuggestion(entityType, summary, citations),
+      ),
     };
   }
 
