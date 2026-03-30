@@ -1608,7 +1608,19 @@ function createAiRouter(deps) {
     ) || message.includes('unsupported') || message.includes('invalid value');
   }
 
-  async function callOpenAiWebSearch({ query, toolType, entityType = 'shape' }) {
+  function shouldRetryWebSearchWithoutInclude(error) {
+    const status = Number(error?.status) || 0;
+    if (status < 400 || status >= 500) return false;
+    const message = toTrimmedString(error?.message, 400).toLowerCase();
+    if (!message) return false;
+    return (
+      message.includes('include=web_search_call.results') ||
+      message.includes('web_search_call.results') ||
+      message.includes('web_search_call.action.sources')
+    ) && message.includes('not enabled');
+  }
+
+  async function callOpenAiWebSearch({ query, toolType, entityType = 'shape', includeSources = true }) {
     if (!process.env.OPENAI_API_KEY) {
       throw Object.assign(new Error('OPENAI_API_KEY is not configured'), { status: 503 });
     }
@@ -1662,7 +1674,9 @@ function createAiRouter(deps) {
               search_context_size: 'high',
             },
           ],
-          include: ['web_search_call.results', 'web_search_call.action.sources'],
+          ...(includeSources
+            ? { include: ['web_search_call.results', 'web_search_call.action.sources'] }
+            : {}),
           max_output_tokens: WEB_SEARCH_MAX_OUTPUT_TOKENS,
           reasoning: { effort: 'low' },
           text: { verbosity: 'medium' },
@@ -1698,8 +1712,25 @@ function createAiRouter(deps) {
 
     for (const [index, toolType] of WEB_SEARCH_TOOL_TYPES.entries()) {
       try {
-        return await callOpenAiWebSearch({ query: searchInput, toolType, entityType });
+        return await callOpenAiWebSearch({ query: searchInput, toolType, entityType, includeSources: true });
       } catch (error) {
+        if (shouldRetryWebSearchWithoutInclude(error)) {
+          try {
+            return await callOpenAiWebSearch({
+              query: searchInput,
+              toolType,
+              entityType,
+              includeSources: false,
+            });
+          } catch (fallbackError) {
+            lastError = fallbackError;
+            if (index !== 0 || !shouldRetryWebSearchWithLegacyTool(fallbackError)) {
+              throw fallbackError;
+            }
+            continue;
+          }
+        }
+
         lastError = error;
         if (index !== 0 || !shouldRetryWebSearchWithLegacyTool(error)) {
           throw error;
