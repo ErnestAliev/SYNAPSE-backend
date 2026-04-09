@@ -24,6 +24,7 @@ const PROJECT_CHAT_ENRICHMENT_FIELDS = Object.freeze([
 ]);
 const PROJECT_CONTEXT_ENTITY_LIST_MAX_ITEMS = 12;
 const PROJECT_CONTEXT_ENTITY_SKILLS_MAX_ITEMS = 40;
+const PROJECT_CONTEXT_ENTITY_ROLES_MAX_ITEMS = 24;
 
 const PROJECT_CONTEXT_ENTITY_TYPE_SEMANTICS = Object.freeze([
   'person: конкретный человек. Это не роль и не группа. Его описание раскрывает качества, статус, мотивацию, ограничения, отношения и влияние человека.',
@@ -190,7 +191,7 @@ function createProjectEnrichmentPrompts(deps) {
         const roles = (Array.isArray(row.roles) ? row.roles : [])
           .map((item) => toTrimmedString(item, 64))
           .filter(Boolean)
-          .slice(0, PROJECT_CONTEXT_ENTITY_LIST_MAX_ITEMS);
+          .slice(0, PROJECT_CONTEXT_ENTITY_ROLES_MAX_ITEMS);
         const skills = (Array.isArray(row.skills) ? row.skills : [])
           .map((item) => toTrimmedString(item, 64))
           .filter(Boolean)
@@ -221,12 +222,26 @@ function createProjectEnrichmentPrompts(deps) {
           })
           .filter(Boolean)
           .slice(0, PROJECT_CONTEXT_ENTITY_SKILLS_MAX_ITEMS);
+        const manualRoles = (Array.isArray(row.manual_roles) ? row.manual_roles : [])
+          .map((item) => {
+            const role = toProfile(item);
+            const name = toTrimmedString(role.name, 64);
+            if (!name) return null;
+            return {
+              name,
+              category: toTrimmedString(role.category, 16).toLowerCase() === 'personal' ? 'personal' : 'professional',
+              group: toTrimmedString(role.group, 48) || 'Пользовательские',
+            };
+          })
+          .filter(Boolean)
+          .slice(0, PROJECT_CONTEXT_ENTITY_ROLES_MAX_ITEMS);
         return {
           id: toTrimmedString(row.id || row._id, 80),
           type: toTrimmedString(row.type, 24),
           name: toTrimmedString(row.name, 120),
           description: toTrimmedString(row.description || toProfile(row.ai_metadata).description, 6000),
           roles,
+          manual_roles: manualRoles,
           skills,
           manual_skills: manualSkills,
           tags,
@@ -246,6 +261,7 @@ function createProjectEnrichmentPrompts(deps) {
           entity.name
           || entity.description
           || entity.roles.length
+          || entity.manual_roles.length
           || entity.skills.length
           || entity.manual_skills.length
           || entity.tags.length
@@ -431,7 +447,10 @@ function createProjectEnrichmentPrompts(deps) {
       'На входе JSON граф проекта.',
       'Используй только данные из этого JSON.',
       'Вход содержит: project_name, author_entity_id, isolated_entity_ids, author_neighbor_entity_ids, graph_stats, entities, connections, raw_connections, groups.',
-      'У каждой сущности учитывай: id, type, name, description, roles, skills, manual_skills, tags, markers, importance, is_me, is_mine, isAuthor.',
+      'У каждой сущности учитывай: id, type, name, description, roles, manual_roles, skills, manual_skills, tags, markers, importance, is_me, is_mine, isAuthor.',
+      'manual_roles — это ручные роли пользователя в формате { name, category, group }. Для person это приоритетный источник истины по ролям.',
+      'Если у person есть manual_roles, учитывай как профессиональные, так и личные роли. Не теряй семейные и социальные роли вроде отец, муж, наставник, если они есть во входе.',
+      'Если manual_roles много, лучше описывать их блоками: личные роли и профессиональные роли.',
       'manual_skills — это ручные навыки пользователя в формате { name, level, category, group }. Для person это приоритетный источник истины по навыкам.',
       'Если у person есть manual_skills, обязательно учитывай и уровень 1..10, а не только название навыка.',
       'Не урезай manual_skills произвольно: если у person перечислено до 40 ручных навыков, сохраняй их все в compiled_context.',

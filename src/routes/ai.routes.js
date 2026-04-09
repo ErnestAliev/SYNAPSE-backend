@@ -80,6 +80,7 @@ function createAiRouter(deps) {
   });
   const PROJECT_CHAT_FIELD_KEYS = Object.freeze(Object.keys(PROJECT_CHAT_FIELD_CONFIGS));
   const PROJECT_CONTEXT_ENTITY_LIST_MAX_ITEMS = 12;
+  const PROJECT_CONTEXT_ENTITY_ROLES_MAX_ITEMS = 24;
   const PROJECT_CONTEXT_ENTITY_SKILLS_MAX_ITEMS = 40;
   const ENTITY_ANALYSIS_FIELD_CONFIGS = Object.freeze({
     tags: { maxItems: 12, itemMaxLength: 64 },
@@ -2243,6 +2244,29 @@ function createAiRouter(deps) {
     return values;
   }
 
+  function normalizeProjectContextManualRoles(rawValue, { maxItems = PROJECT_CONTEXT_ENTITY_ROLES_MAX_ITEMS } = {}) {
+    const source = Array.isArray(rawValue) ? rawValue : [];
+    const dedup = new Set();
+    const values = [];
+
+    for (const item of source) {
+      const row = toProfile(item);
+      const name = toTrimmedString(row.name, 64);
+      if (!name) continue;
+      const key = name.toLowerCase();
+      if (dedup.has(key)) continue;
+      dedup.add(key);
+      values.push({
+        name,
+        category: toTrimmedString(row.category, 16).toLowerCase() === 'personal' ? 'personal' : 'professional',
+        group: toTrimmedString(row.group, 48) || 'Пользовательские',
+      });
+      if (values.length >= maxItems) break;
+    }
+
+    return values;
+  }
+
   function extractProjectEntitySkills(meta, { maxItems = PROJECT_CONTEXT_ENTITY_SKILLS_MAX_ITEMS, itemMaxLength = 64 } = {}) {
     const aiSkills = normalizeProjectContextStringList(meta?.skills, maxItems, itemMaxLength);
     const manualSkills = normalizeProjectContextManualSkills(meta?.manual_skills, { maxItems })
@@ -2263,9 +2287,35 @@ function createAiRouter(deps) {
     return values;
   }
 
+  function extractProjectEntityRoles(meta, { maxItems = PROJECT_CONTEXT_ENTITY_ROLES_MAX_ITEMS, itemMaxLength = 64 } = {}) {
+    const aiRoles = normalizeProjectContextStringList(meta?.roles, maxItems, itemMaxLength);
+    const manualRoles = normalizeProjectContextManualRoles(meta?.manual_roles, { maxItems })
+      .map((role) => role.name);
+    const dedup = new Set();
+    const values = [];
+
+    for (const item of [...manualRoles, ...aiRoles]) {
+      const normalized = toTrimmedString(item, itemMaxLength);
+      if (!normalized) continue;
+      const key = normalized.toLowerCase();
+      if (dedup.has(key)) continue;
+      dedup.add(key);
+      values.push(normalized);
+      if (values.length >= maxItems) break;
+    }
+
+    return values;
+  }
+
   function getProjectEntityFieldValues(meta, fieldKey, config) {
     if (fieldKey === 'skills') {
       return extractProjectEntitySkills(meta, {
+        maxItems: config?.maxItems || 12,
+        itemMaxLength: config?.itemMaxLength || 64,
+      });
+    }
+    if (fieldKey === 'roles') {
+      return extractProjectEntityRoles(meta, {
         maxItems: config?.maxItems || 12,
         itemMaxLength: config?.itemMaxLength || 64,
       });
@@ -2426,6 +2476,9 @@ function createAiRouter(deps) {
         const entityId = normalizeProjectEntityId(row._id || row.id, 120);
         const name = toTrimmedString(row.name, 160);
         if (!entityId || !name) return null;
+        const manualRoles = normalizeProjectContextManualRoles(meta.manual_roles, {
+          maxItems: PROJECT_CONTEXT_ENTITY_ROLES_MAX_ITEMS,
+        });
         const manualSkills = normalizeProjectContextManualSkills(meta.manual_skills, {
           maxItems: PROJECT_CONTEXT_ENTITY_SKILLS_MAX_ITEMS,
         });
@@ -2434,7 +2487,11 @@ function createAiRouter(deps) {
           type: toTrimmedString(row.type, 24) || 'shape',
           name,
           description: toTrimmedString(meta.description || row.description, 6000),
-          roles: normalizeProjectContextStringList(meta.roles, PROJECT_CONTEXT_ENTITY_LIST_MAX_ITEMS, 64),
+          roles: extractProjectEntityRoles(meta, {
+            maxItems: PROJECT_CONTEXT_ENTITY_ROLES_MAX_ITEMS,
+            itemMaxLength: 64,
+          }),
+          manual_roles: manualRoles,
           skills: extractProjectEntitySkills(meta, {
             maxItems: PROJECT_CONTEXT_ENTITY_SKILLS_MAX_ITEMS,
             itemMaxLength: 64,
@@ -2810,6 +2867,7 @@ function createAiRouter(deps) {
       isAuthor: row.is_me === true || row.is_mine === true,
       is_me: row.is_me === true,
       is_mine: row.is_mine === true,
+      roles: extractProjectEntityRoles(meta, { maxItems: 4, itemMaxLength: 72 }),
       description: toTrimmedString(meta.description, 320),
     };
   }

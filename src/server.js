@@ -285,6 +285,7 @@ const PERSON_SKILL_LEVEL_MIN = 1;
 const PERSON_SKILL_LEVEL_MAX = 10;
 const PERSON_SKILL_DEFAULT_LEVEL = 5;
 const PERSON_SKILL_DEFAULT_GROUP = 'Пользовательские';
+const PERSON_ROLE_DEFAULT_GROUP = 'Пользовательские';
 const whatsappSessionsByOwner = new Map();
 const entityEventStreamsByOwner = new Map();
 let entityEventStreamSeq = 0;
@@ -778,6 +779,74 @@ function normalizePersonSkillGroup(value) {
   return toTrimmedString(value, 48) || PERSON_SKILL_DEFAULT_GROUP;
 }
 
+function normalizePersonRoleName(value) {
+  return toTrimmedString(value, 64);
+}
+
+function normalizePersonRoleCategory(value) {
+  return toTrimmedString(value, 16).toLowerCase() === 'personal' ? 'personal' : 'professional';
+}
+
+function normalizePersonRoleGroup(value) {
+  return toTrimmedString(value, 48) || PERSON_ROLE_DEFAULT_GROUP;
+}
+
+function normalizeManualPersonRoles(value) {
+  if (!Array.isArray(value)) return [];
+
+  const dedupe = new Set();
+  const result = [];
+
+  for (const item of value) {
+    if (typeof item === 'string') {
+      const normalizedName = normalizePersonRoleName(item);
+      if (!normalizedName) continue;
+      const key = normalizedName.toLowerCase();
+      if (dedupe.has(key)) continue;
+      dedupe.add(key);
+      result.push({
+        name: normalizedName,
+        category: 'professional',
+        group: PERSON_ROLE_DEFAULT_GROUP,
+      });
+      continue;
+    }
+
+    const row = toProfile(item);
+    const normalizedName = normalizePersonRoleName(row.name);
+    if (!normalizedName) continue;
+    const key = normalizedName.toLowerCase();
+    if (dedupe.has(key)) continue;
+    dedupe.add(key);
+    result.push({
+      name: normalizedName,
+      category: normalizePersonRoleCategory(row.category),
+      group: normalizePersonRoleGroup(row.group),
+    });
+  }
+
+  return result;
+}
+
+function mergeEntityRoleValues(aiRoles, manualRoles, maxItems = 8) {
+  const dedupe = new Set();
+  const result = [];
+  const normalizedManualRoles = normalizeManualPersonRoles(manualRoles).map((role) => role.name);
+  const normalizedAiRoles = toStringArray(aiRoles, maxItems, 64);
+
+  for (const item of [...normalizedManualRoles, ...normalizedAiRoles]) {
+    const normalized = normalizePersonRoleName(item);
+    if (!normalized) continue;
+    const key = normalized.toLowerCase();
+    if (dedupe.has(key)) continue;
+    dedupe.add(key);
+    result.push(normalized);
+    if (result.length >= maxItems) break;
+  }
+
+  return result;
+}
+
 function normalizeManualPersonSkills(value) {
   if (!Array.isArray(value)) return [];
 
@@ -1268,6 +1337,13 @@ function normalizeIncomingEntityPayload(rawPayload, options = {}) {
   }
 
   const resolvedEntityType = toTrimmedString(options.entityType || payload.type, 32);
+  if (Object.prototype.hasOwnProperty.call(metadata, 'manual_roles')) {
+    if (resolvedEntityType === 'person') {
+      metadata.manual_roles = normalizeManualPersonRoles(metadata.manual_roles);
+    } else {
+      delete metadata.manual_roles;
+    }
+  }
   if (Object.prototype.hasOwnProperty.call(metadata, 'manual_skills')) {
     if (resolvedEntityType === 'person') {
       metadata.manual_skills = normalizeManualPersonSkills(metadata.manual_skills);
@@ -1742,7 +1818,7 @@ function summarizeEntityForAgent(entity) {
     tags: toStringArray(aiMetadata.tags, 8),
     markers: toStringArray(aiMetadata.markers, 6),
     skills: toStringArray(aiMetadata.skills, 8),
-    roles: toStringArray(aiMetadata.roles, 8),
+    roles: mergeEntityRoleValues(aiMetadata.roles, aiMetadata.manual_roles, 8),
     importance: toStringArray(aiMetadata.importance, 1, 24),
     status: toStringArray(aiMetadata.status, 4),
     stage: toStringArray(aiMetadata.stage, 4),
