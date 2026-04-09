@@ -281,6 +281,10 @@ const ENTITY_VECTOR_WEIGHTS = Object.freeze({
   links: 0.05,
   nameType: 0.05,
 });
+const PERSON_SKILL_LEVEL_MIN = 1;
+const PERSON_SKILL_LEVEL_MAX = 10;
+const PERSON_SKILL_DEFAULT_LEVEL = 5;
+const PERSON_SKILL_DEFAULT_GROUP = 'Пользовательские';
 const whatsappSessionsByOwner = new Map();
 const entityEventStreamsByOwner = new Map();
 let entityEventStreamSeq = 0;
@@ -756,6 +760,63 @@ function normalizeEntityFieldArray(value, options = {}) {
   return result;
 }
 
+function normalizePersonSkillName(value) {
+  return toTrimmedString(value, 64);
+}
+
+function normalizePersonSkillLevel(value) {
+  const numeric = Math.round(Number(value));
+  if (!Number.isFinite(numeric)) return PERSON_SKILL_DEFAULT_LEVEL;
+  return Math.max(PERSON_SKILL_LEVEL_MIN, Math.min(PERSON_SKILL_LEVEL_MAX, numeric));
+}
+
+function normalizePersonSkillCategory(value) {
+  return toTrimmedString(value, 16).toLowerCase() === 'soft' ? 'soft' : 'hard';
+}
+
+function normalizePersonSkillGroup(value) {
+  return toTrimmedString(value, 48) || PERSON_SKILL_DEFAULT_GROUP;
+}
+
+function normalizeManualPersonSkills(value) {
+  if (!Array.isArray(value)) return [];
+
+  const dedupe = new Set();
+  const result = [];
+
+  for (const item of value) {
+    if (typeof item === 'string') {
+      const normalizedName = normalizePersonSkillName(item);
+      if (!normalizedName) continue;
+      const key = normalizedName.toLowerCase();
+      if (dedupe.has(key)) continue;
+      dedupe.add(key);
+      result.push({
+        name: normalizedName,
+        level: PERSON_SKILL_DEFAULT_LEVEL,
+        category: 'hard',
+        group: PERSON_SKILL_DEFAULT_GROUP,
+      });
+      continue;
+    }
+
+    const row = toProfile(item);
+    const normalizedName = normalizePersonSkillName(row.name);
+    if (!normalizedName) continue;
+    const key = normalizedName.toLowerCase();
+    if (dedupe.has(key)) continue;
+    dedupe.add(key);
+    result.push({
+      name: normalizedName,
+      level: normalizePersonSkillLevel(row.level),
+      category: normalizePersonSkillCategory(row.category),
+      group: normalizePersonSkillGroup(row.group),
+    });
+  }
+
+  return result;
+}
+
 function normalizeImportanceValue(value) {
   const directRaw = toTrimmedString(value, 24);
   if (ENTITY_IMPORTANCE_VALUES.includes(directRaw)) return directRaw;
@@ -1203,6 +1264,15 @@ function normalizeIncomingEntityPayload(rawPayload, options = {}) {
       // User changed the name manually: lock this custom name.
       metadata.name_auto = false;
       metadata.name_mode = 'manual';
+    }
+  }
+
+  const resolvedEntityType = toTrimmedString(options.entityType || payload.type, 32);
+  if (Object.prototype.hasOwnProperty.call(metadata, 'manual_skills')) {
+    if (resolvedEntityType === 'person') {
+      metadata.manual_skills = normalizeManualPersonSkills(metadata.manual_skills);
+    } else {
+      delete metadata.manual_skills;
     }
   }
 
@@ -5411,7 +5481,10 @@ app.get('/api/entities/:id', async (req, res, next) => {
 app.post('/api/entities', async (req, res, next) => {
   try {
     const ownerId = requireOwnerId(req);
-    let payload = normalizeIncomingEntityPayload(req.body, { source: 'system' });
+    let payload = normalizeIncomingEntityPayload(req.body, {
+      source: 'system',
+      entityType: req.body?.type,
+    });
     const payloadEntityType =
       typeof payload.type === 'string' && ENTITY_TYPES.has(payload.type) ? payload.type : 'shape';
     payload = normalizeMineFlagsInPayload(payload, payloadEntityType, { mode: 'create' });
@@ -5455,6 +5528,10 @@ app.put('/api/entities/:id', async (req, res, next) => {
       existingMetadata: existingEntity.ai_metadata,
       existingName: existingEntity.name,
       source: 'manual',
+      entityType:
+        typeof req.body?.type === 'string' && req.body.type.trim()
+          ? req.body.type
+          : existingEntity.type,
     });
     const payloadEntityType =
       typeof payload.type === 'string' && ENTITY_TYPES.has(payload.type) ? payload.type : existingEntity.type;
