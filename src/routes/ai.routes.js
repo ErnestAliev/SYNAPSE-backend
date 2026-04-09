@@ -2142,9 +2142,63 @@ function createAiRouter(deps) {
   }
 
   function normalizeProjectContextDescription(rawValue, fallbackValue = '') {
-    const primary = trimProjectContextAtNaturalBoundary(rawValue, 18000);
+    const primary = sanitizeProjectContextDescription(trimProjectContextAtNaturalBoundary(rawValue, 18000));
     if (primary) return primary;
-    return trimProjectContextAtNaturalBoundary(fallbackValue, 18000);
+    return sanitizeProjectContextDescription(trimProjectContextAtNaturalBoundary(fallbackValue, 18000));
+  }
+
+  const PROJECT_CONTEXT_TECHNICAL_TYPE_LABELS = Object.freeze({
+    person: 'человек',
+    company: 'компания',
+    event: 'событие',
+    resource: 'ресурс',
+    goal: 'цель',
+    result: 'результат',
+    task: 'задача',
+    project: 'проект',
+    shape: 'блок',
+  });
+
+  function sanitizeProjectContextDescription(rawValue) {
+    let value = toTrimmedString(rawValue, 40000);
+    if (!value) return '';
+
+    value = value.replace(
+      /\(\s*([^()]+?)\s*,\s*(person|company|event|resource|goal|result|task|project|shape)\s*\)/gi,
+      '($1)',
+    );
+    value = value.replace(/\b(person|company|event|resource|goal|result|task|project|shape)\s+([«"])/gi, (match, type, quote) => {
+      const label = PROJECT_CONTEXT_TECHNICAL_TYPE_LABELS[String(type).toLowerCase()] || '';
+      return label ? `${label} ${quote}` : match;
+    });
+
+    const replacements = [
+      [/\bundirected\s*,\s*relationMode\s*=\s*equivalent\b/gi, 'без явного направления'],
+      [/\brelationMode\s*=\s*equivalent\b/gi, 'без явного направления'],
+      [/\brelationMode\s*=\s*directed\b/gi, 'с явным направлением'],
+      [/\bdirection\s*=\s*source_to_target\b/gi, 'с направлением от источника к цели'],
+      [/\bdirection\s*=\s*target_to_source\b/gi, 'с обратным направлением'],
+      [/\bdirection\s*=\s*equivalent\b/gi, 'без явного направления'],
+      [/\bundirected\b/gi, 'без явного направления'],
+      [/\bbidirectional\b/gi, 'двусторонняя'],
+      [/\beffective graph\b/gi, 'структура связей проекта'],
+      [/\braw_connections\b/gi, 'связи на канве'],
+      [/\bsourceType\b/gi, 'тип источника'],
+      [/\btargetType\b/gi, 'тип цели'],
+      [/\bsourceKind\b/gi, 'источник'],
+      [/\btargetKind\b/gi, 'цель'],
+    ];
+
+    for (const [pattern, replacement] of replacements) {
+      value = value.replace(pattern, replacement);
+    }
+
+    return value
+      .replace(/без явного направления\s*,\s*без явного направления/gi, 'без явного направления')
+      .replace(/\s{2,}/g, ' ')
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
   }
 
   function normalizeProjectContextStringList(rawValues, maxItems = 8, itemMaxLength = 80) {
