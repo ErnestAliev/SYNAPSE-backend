@@ -22,6 +22,8 @@ const PROJECT_CHAT_ENRICHMENT_FIELDS = Object.freeze([
   'importance',
   'ignoredNoise',
 ]);
+const PROJECT_CONTEXT_ENTITY_LIST_MAX_ITEMS = 12;
+const PROJECT_CONTEXT_ENTITY_SKILLS_MAX_ITEMS = 40;
 
 const PROJECT_CONTEXT_ENTITY_TYPE_SEMANTICS = Object.freeze([
   'person: конкретный человек. Это не роль и не группа. Его описание раскрывает качества, статус, мотивацию, ограничения, отношения и влияние человека.',
@@ -188,19 +190,19 @@ function createProjectEnrichmentPrompts(deps) {
         const roles = (Array.isArray(row.roles) ? row.roles : [])
           .map((item) => toTrimmedString(item, 64))
           .filter(Boolean)
-          .slice(0, 6);
+          .slice(0, PROJECT_CONTEXT_ENTITY_LIST_MAX_ITEMS);
         const skills = (Array.isArray(row.skills) ? row.skills : [])
           .map((item) => toTrimmedString(item, 64))
           .filter(Boolean)
-          .slice(0, 8);
+          .slice(0, PROJECT_CONTEXT_ENTITY_SKILLS_MAX_ITEMS);
         const tags = (Array.isArray(row.tags) ? row.tags : [])
           .map((item) => toTrimmedString(item, 64))
           .filter(Boolean)
-          .slice(0, 6);
+          .slice(0, PROJECT_CONTEXT_ENTITY_LIST_MAX_ITEMS);
         const markers = (Array.isArray(row.markers) ? row.markers : [])
           .map((item) => toTrimmedString(item, 64))
           .filter(Boolean)
-          .slice(0, 6);
+          .slice(0, PROJECT_CONTEXT_ENTITY_LIST_MAX_ITEMS);
         const importance = (Array.isArray(row.importance) ? row.importance : [])
           .map((item) => toTrimmedString(item, 24))
           .filter(Boolean)
@@ -218,7 +220,7 @@ function createProjectEnrichmentPrompts(deps) {
             };
           })
           .filter(Boolean)
-          .slice(0, 8);
+          .slice(0, PROJECT_CONTEXT_ENTITY_SKILLS_MAX_ITEMS);
         return {
           id: toTrimmedString(row.id || row._id, 80),
           type: toTrimmedString(row.type, 24),
@@ -432,6 +434,9 @@ function createProjectEnrichmentPrompts(deps) {
       'У каждой сущности учитывай: id, type, name, description, roles, skills, manual_skills, tags, markers, importance, is_me, is_mine, isAuthor.',
       'manual_skills — это ручные навыки пользователя в формате { name, level, category, group }. Для person это приоритетный источник истины по навыкам.',
       'Если у person есть manual_skills, обязательно учитывай и уровень 1..10, а не только название навыка.',
+      'Не урезай manual_skills произвольно: если у person перечислено до 40 ручных навыков, сохраняй их все в compiled_context.',
+      'Если у person есть и soft, и hard навыки, отражай обе категории явно и не смешивай их в один неструктурированный обрывок.',
+      'Если manual_skills много, лучше описывать их блоками по категориям soft skills и hard skills.',
       'Когда описываешь человека, не теряй его ключевые навыки и уровни, если они важны для проекта или цели.',
       'graph.connections — это effective graph для LLM: в нем group-level связи уже развернуты на участников групп.',
       'graph.raw_connections — это физические ребра канвы в том виде, как они реально нарисованы.',

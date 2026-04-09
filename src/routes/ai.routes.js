@@ -79,6 +79,8 @@ function createAiRouter(deps) {
     ignoredNoise: { maxItems: 40, itemMaxLength: 120 },
   });
   const PROJECT_CHAT_FIELD_KEYS = Object.freeze(Object.keys(PROJECT_CHAT_FIELD_CONFIGS));
+  const PROJECT_CONTEXT_ENTITY_LIST_MAX_ITEMS = 12;
+  const PROJECT_CONTEXT_ENTITY_SKILLS_MAX_ITEMS = 40;
   const ENTITY_ANALYSIS_FIELD_CONFIGS = Object.freeze({
     tags: { maxItems: 12, itemMaxLength: 64 },
     markers: { maxItems: 12, itemMaxLength: 64 },
@@ -2201,7 +2203,7 @@ function createAiRouter(deps) {
       .trim();
   }
 
-  function normalizeProjectContextStringList(rawValues, maxItems = 8, itemMaxLength = 80) {
+  function normalizeProjectContextStringList(rawValues, maxItems = PROJECT_CONTEXT_ENTITY_LIST_MAX_ITEMS, itemMaxLength = 80) {
     const source = Array.isArray(rawValues) ? rawValues : [];
     const dedup = new Set();
     const values = [];
@@ -2217,7 +2219,7 @@ function createAiRouter(deps) {
     return values;
   }
 
-  function normalizeProjectContextManualSkills(rawValue, { maxItems = 8 } = {}) {
+  function normalizeProjectContextManualSkills(rawValue, { maxItems = PROJECT_CONTEXT_ENTITY_SKILLS_MAX_ITEMS } = {}) {
     const source = Array.isArray(rawValue) ? rawValue : [];
     const dedup = new Set();
     const values = [];
@@ -2241,7 +2243,7 @@ function createAiRouter(deps) {
     return values;
   }
 
-  function extractProjectEntitySkills(meta, { maxItems = 8, itemMaxLength = 64 } = {}) {
+  function extractProjectEntitySkills(meta, { maxItems = PROJECT_CONTEXT_ENTITY_SKILLS_MAX_ITEMS, itemMaxLength = 64 } = {}) {
     const aiSkills = normalizeProjectContextStringList(meta?.skills, maxItems, itemMaxLength);
     const manualSkills = normalizeProjectContextManualSkills(meta?.manual_skills, { maxItems })
       .map((skill) => skill.name);
@@ -2424,17 +2426,22 @@ function createAiRouter(deps) {
         const entityId = normalizeProjectEntityId(row._id || row.id, 120);
         const name = toTrimmedString(row.name, 160);
         if (!entityId || !name) return null;
-        const manualSkills = normalizeProjectContextManualSkills(meta.manual_skills, { maxItems: 8 });
+        const manualSkills = normalizeProjectContextManualSkills(meta.manual_skills, {
+          maxItems: PROJECT_CONTEXT_ENTITY_SKILLS_MAX_ITEMS,
+        });
         const normalized = {
           id: entityId,
           type: toTrimmedString(row.type, 24) || 'shape',
           name,
           description: toTrimmedString(meta.description || row.description, 6000),
-          roles: normalizeProjectContextStringList(meta.roles, 6, 64),
-          skills: extractProjectEntitySkills(meta, { maxItems: 8, itemMaxLength: 64 }),
+          roles: normalizeProjectContextStringList(meta.roles, PROJECT_CONTEXT_ENTITY_LIST_MAX_ITEMS, 64),
+          skills: extractProjectEntitySkills(meta, {
+            maxItems: PROJECT_CONTEXT_ENTITY_SKILLS_MAX_ITEMS,
+            itemMaxLength: 64,
+          }),
           manual_skills: manualSkills,
-          tags: normalizeProjectContextStringList(meta.tags, 6, 64),
-          markers: normalizeProjectContextStringList(meta.markers, 6, 64),
+          tags: normalizeProjectContextStringList(meta.tags, PROJECT_CONTEXT_ENTITY_LIST_MAX_ITEMS, 64),
+          markers: normalizeProjectContextStringList(meta.markers, PROJECT_CONTEXT_ENTITY_LIST_MAX_ITEMS, 64),
           importance: normalizeProjectContextStringList(meta.importance, 1, 24),
           is_me: row.is_me === true,
           is_mine: row.is_mine === true,
