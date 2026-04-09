@@ -185,11 +185,51 @@ function createProjectEnrichmentPrompts(deps) {
     const compactEntities = (Array.isArray(contextData?.entities) ? contextData.entities : [])
       .map((entity) => {
         const row = toProfile(entity);
+        const roles = (Array.isArray(row.roles) ? row.roles : [])
+          .map((item) => toTrimmedString(item, 64))
+          .filter(Boolean)
+          .slice(0, 6);
+        const skills = (Array.isArray(row.skills) ? row.skills : [])
+          .map((item) => toTrimmedString(item, 64))
+          .filter(Boolean)
+          .slice(0, 8);
+        const tags = (Array.isArray(row.tags) ? row.tags : [])
+          .map((item) => toTrimmedString(item, 64))
+          .filter(Boolean)
+          .slice(0, 6);
+        const markers = (Array.isArray(row.markers) ? row.markers : [])
+          .map((item) => toTrimmedString(item, 64))
+          .filter(Boolean)
+          .slice(0, 6);
+        const importance = (Array.isArray(row.importance) ? row.importance : [])
+          .map((item) => toTrimmedString(item, 24))
+          .filter(Boolean)
+          .slice(0, 1);
+        const manualSkills = (Array.isArray(row.manual_skills) ? row.manual_skills : [])
+          .map((item) => {
+            const skill = toProfile(item);
+            const name = toTrimmedString(skill.name, 64);
+            if (!name) return null;
+            return {
+              name,
+              level: Math.max(1, Math.min(10, Math.round(Number(skill.level)) || 1)),
+              category: toTrimmedString(skill.category, 16).toLowerCase() === 'soft' ? 'soft' : 'hard',
+              group: toTrimmedString(skill.group, 48) || 'Пользовательские',
+            };
+          })
+          .filter(Boolean)
+          .slice(0, 8);
         return {
           id: toTrimmedString(row.id || row._id, 80),
           type: toTrimmedString(row.type, 24),
           name: toTrimmedString(row.name, 120),
           description: toTrimmedString(row.description || toProfile(row.ai_metadata).description, 6000),
+          roles,
+          skills,
+          manual_skills: manualSkills,
+          tags,
+          markers,
+          importance,
           isAuthor: row.isAuthor === true || row.is_me === true || row.is_mine === true,
           is_me: row.is_me === true,
           is_mine: row.is_mine === true,
@@ -198,7 +238,19 @@ function createProjectEnrichmentPrompts(deps) {
             .filter(Boolean),
         };
       })
-      .filter((entity) => entity.id && (entity.name || entity.description));
+      .filter((entity) =>
+        entity.id
+        && (
+          entity.name
+          || entity.description
+          || entity.roles.length
+          || entity.skills.length
+          || entity.manual_skills.length
+          || entity.tags.length
+          || entity.markers.length
+          || entity.importance.length
+        ),
+      );
 
     const compactConnections = (Array.isArray(contextData?.connections) ? contextData.connections : [])
       .map((connection) => {
@@ -377,7 +429,10 @@ function createProjectEnrichmentPrompts(deps) {
       'На входе JSON граф проекта.',
       'Используй только данные из этого JSON.',
       'Вход содержит: project_name, author_entity_id, isolated_entity_ids, author_neighbor_entity_ids, graph_stats, entities, connections, raw_connections, groups.',
-      'У каждой сущности учитывай только: id, type, name, description, is_me, is_mine, isAuthor.',
+      'У каждой сущности учитывай: id, type, name, description, roles, skills, manual_skills, tags, markers, importance, is_me, is_mine, isAuthor.',
+      'manual_skills — это ручные навыки пользователя в формате { name, level, category, group }. Для person это приоритетный источник истины по навыкам.',
+      'Если у person есть manual_skills, обязательно учитывай и уровень 1..10, а не только название навыка.',
+      'Когда описываешь человека, не теряй его ключевые навыки и уровни, если они важны для проекта или цели.',
       'graph.connections — это effective graph для LLM: в нем group-level связи уже развернуты на участников групп.',
       'graph.raw_connections — это физические ребра канвы в том виде, как они реально нарисованы.',
       'У каждой effective связи учитывай: sourceNodeId, targetNodeId, sourceEntityId, targetEntityId, sourceTitle, targetTitle, sourceKind, targetKind, sourceType, targetType, label, description, relationType, relationMode, direction, directedFrom, directedTo.',

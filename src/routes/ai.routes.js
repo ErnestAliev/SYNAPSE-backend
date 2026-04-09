@@ -2147,6 +2147,77 @@ function createAiRouter(deps) {
     return trimProjectContextAtNaturalBoundary(fallbackValue, 18000);
   }
 
+  function normalizeProjectContextStringList(rawValues, maxItems = 8, itemMaxLength = 80) {
+    const source = Array.isArray(rawValues) ? rawValues : [];
+    const dedup = new Set();
+    const values = [];
+    for (const item of source) {
+      const value = toTrimmedString(item, itemMaxLength);
+      if (!value) continue;
+      const key = value.toLowerCase();
+      if (dedup.has(key)) continue;
+      dedup.add(key);
+      values.push(value);
+      if (values.length >= maxItems) break;
+    }
+    return values;
+  }
+
+  function normalizeProjectContextManualSkills(rawValue, { maxItems = 8 } = {}) {
+    const source = Array.isArray(rawValue) ? rawValue : [];
+    const dedup = new Set();
+    const values = [];
+
+    for (const item of source) {
+      const row = toProfile(item);
+      const name = toTrimmedString(row.name, 64);
+      if (!name) continue;
+      const key = name.toLowerCase();
+      if (dedup.has(key)) continue;
+      dedup.add(key);
+      values.push({
+        name,
+        level: Math.max(1, Math.min(10, Math.round(Number(row.level)) || 1)),
+        category: toTrimmedString(row.category, 16).toLowerCase() === 'soft' ? 'soft' : 'hard',
+        group: toTrimmedString(row.group, 48) || 'Пользовательские',
+      });
+      if (values.length >= maxItems) break;
+    }
+
+    return values;
+  }
+
+  function extractProjectEntitySkills(meta, { maxItems = 8, itemMaxLength = 64 } = {}) {
+    const aiSkills = normalizeProjectContextStringList(meta?.skills, maxItems, itemMaxLength);
+    const manualSkills = normalizeProjectContextManualSkills(meta?.manual_skills, { maxItems })
+      .map((skill) => skill.name);
+    const dedup = new Set();
+    const values = [];
+
+    for (const item of [...manualSkills, ...aiSkills]) {
+      const normalized = toTrimmedString(item, itemMaxLength);
+      if (!normalized) continue;
+      const key = normalized.toLowerCase();
+      if (dedup.has(key)) continue;
+      dedup.add(key);
+      values.push(normalized);
+      if (values.length >= maxItems) break;
+    }
+
+    return values;
+  }
+
+  function getProjectEntityFieldValues(meta, fieldKey, config) {
+    if (fieldKey === 'skills') {
+      return extractProjectEntitySkills(meta, {
+        maxItems: config?.maxItems || 12,
+        itemMaxLength: config?.itemMaxLength || 64,
+      });
+    }
+
+    return Array.isArray(meta?.[fieldKey]) ? meta[fieldKey] : [];
+  }
+
   function collectProjectAggregatedEntityFields(sourceEntities) {
     const aggregatedEntityFields = {};
     const scopeEntities = Array.isArray(sourceEntities) ? sourceEntities : [];
@@ -2157,7 +2228,7 @@ function createAiRouter(deps) {
       const values = [];
       for (const entity of scopeEntities) {
         const meta = toProfile(entity.ai_metadata);
-        const fieldValues = Array.isArray(meta[fieldKey]) ? meta[fieldKey] : [];
+        const fieldValues = getProjectEntityFieldValues(meta, fieldKey, config);
         for (const val of fieldValues) {
           const normalized = normalizeProjectEnrichmentFieldValue(fieldKey, val, config.itemMaxLength);
           if (!normalized) continue;
@@ -2299,11 +2370,18 @@ function createAiRouter(deps) {
         const entityId = normalizeProjectEntityId(row._id || row.id, 120);
         const name = toTrimmedString(row.name, 160);
         if (!entityId || !name) return null;
+        const manualSkills = normalizeProjectContextManualSkills(meta.manual_skills, { maxItems: 8 });
         const normalized = {
           id: entityId,
           type: toTrimmedString(row.type, 24) || 'shape',
           name,
           description: toTrimmedString(meta.description || row.description, 6000),
+          roles: normalizeProjectContextStringList(meta.roles, 6, 64),
+          skills: extractProjectEntitySkills(meta, { maxItems: 8, itemMaxLength: 64 }),
+          manual_skills: manualSkills,
+          tags: normalizeProjectContextStringList(meta.tags, 6, 64),
+          markers: normalizeProjectContextStringList(meta.markers, 6, 64),
+          importance: normalizeProjectContextStringList(meta.importance, 1, 24),
           is_me: row.is_me === true,
           is_mine: row.is_mine === true,
           nodeIds: Array.isArray(entityNodeIds.get(entityId)) ? entityNodeIds.get(entityId) : [],
@@ -2974,7 +3052,7 @@ function createAiRouter(deps) {
     };
   }
 
-  function buildProjectContextCanvasSignature(canvasData) {
+  function buildProjectContextCanvasSignature(canvasData, sourceEntities = [], projectValue = null) {
     const canvas = toProfile(canvasData);
     const nodes = (Array.isArray(canvas.nodes) ? canvas.nodes : [])
       .map((node) => {
@@ -3038,7 +3116,37 @@ function createAiRouter(deps) {
       .filter(Boolean)
       .sort((left, right) => String(left.id).localeCompare(String(right.id)));
 
-    return { nodes, edges, groups };
+    const entities = (Array.isArray(sourceEntities) ? sourceEntities : [])
+      .map((entity) => {
+        const row = toProfile(entity);
+        const meta = toProfile(row.ai_metadata);
+        const id = normalizeProjectEntityId(row._id || row.id, 120);
+        if (!id) return null;
+        return {
+          id,
+          type: toTrimmedString(row.type, 24),
+          name: toTrimmedString(row.name, 160),
+          description: toTrimmedString(meta.description, 6000),
+          updatedAt: toTrimmedString(row.updatedAt, 80),
+        };
+      })
+      .filter(Boolean)
+      .sort((left, right) => String(left.id).localeCompare(String(right.id)));
+
+    const project = toProfile(projectValue);
+    const projectMeta = toProfile(project.ai_metadata);
+
+    return {
+      project: {
+        id: toTrimmedString(project._id || project.id, 120),
+        name: toTrimmedString(project.name, 160),
+        description: toTrimmedString(projectMeta.description, 6000),
+      },
+      nodes,
+      edges,
+      groups,
+      entities,
+    };
   }
 
   function hashProjectContextCanvasSignature(signature) {
@@ -3051,8 +3159,8 @@ function createAiRouter(deps) {
     return `ctx-${(hash >>> 0).toString(16).padStart(8, '0')}`;
   }
 
-  function buildProjectContextSourceHash(canvasData) {
-    return hashProjectContextCanvasSignature(buildProjectContextCanvasSignature(canvasData));
+  function buildProjectContextSourceHash(canvasData, sourceEntities = [], projectValue = null) {
+    return hashProjectContextCanvasSignature(buildProjectContextCanvasSignature(canvasData, sourceEntities, projectValue));
   }
 
   function buildProjectContextBuildPreview({
@@ -3129,26 +3237,7 @@ function createAiRouter(deps) {
       currentProjectFields[fieldKey] = Array.isArray(projectMeta[fieldKey]) ? projectMeta[fieldKey] : [];
     }
 
-    const aggregatedEntityFields = {};
-    const scopeEntities = Array.isArray(sourceEntities) ? sourceEntities : [];
-    for (const fieldKey of PROJECT_CHAT_FIELD_KEYS) {
-      const config = PROJECT_CHAT_FIELD_CONFIGS[fieldKey];
-      const dedup = new Set();
-      const values = [];
-      for (const entity of scopeEntities) {
-        const meta = toProfile(entity.ai_metadata);
-        const fieldValues = Array.isArray(meta[fieldKey]) ? meta[fieldKey] : [];
-        for (const val of fieldValues) {
-          const normalized = normalizeProjectEnrichmentFieldValue(fieldKey, val, config.itemMaxLength);
-          if (!normalized) continue;
-          const key = normalized.toLowerCase();
-          if (dedup.has(key)) continue;
-          dedup.add(key);
-          values.push(normalized);
-        }
-      }
-      aggregatedEntityFields[fieldKey] = values;
-    }
+    const aggregatedEntityFields = collectProjectAggregatedEntityFields(sourceEntities);
 
     const systemPrompt = aiPrompts.buildProjectEnrichmentSystemPrompt();
     const userPrompt = aiPrompts.buildProjectEnrichmentUserPrompt({
@@ -3242,13 +3331,13 @@ function createAiRouter(deps) {
         return res.status(404).json({ message: 'Project not found' });
       }
 
-      const sourceHash = buildProjectContextSourceHash(project.canvas_data);
       const scopeContext = await resolveAgentScopeContext(ownerId, {
         type: 'project',
         projectId,
         preserveFullGraph: true,
       });
       const sourceEntities = Array.isArray(scopeContext.sourceEntities) ? scopeContext.sourceEntities : scopeContext.entities;
+      const sourceHash = buildProjectContextSourceHash(project.canvas_data, sourceEntities, project);
       const reducedContextData = buildProjectContextBuilderData({
         scopeContext,
         sourceEntities,
@@ -3288,7 +3377,6 @@ function createAiRouter(deps) {
       }
 
       const initialMeta = toProfile(project.ai_metadata);
-      const sourceHash = buildProjectContextSourceHash(project.canvas_data);
       const buildingMeta = {
         ...initialMeta,
         project_context_status: 'building',
@@ -3306,6 +3394,7 @@ function createAiRouter(deps) {
         preserveFullGraph: true,
       });
       const sourceEntities = Array.isArray(scopeContext.sourceEntities) ? scopeContext.sourceEntities : scopeContext.entities;
+      const sourceHash = buildProjectContextSourceHash(project.canvas_data, sourceEntities, project);
       const reducedContextData = buildProjectContextBuilderData({
         scopeContext,
         sourceEntities,
