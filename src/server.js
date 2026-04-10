@@ -286,6 +286,7 @@ const PERSON_SKILL_LEVEL_MAX = 10;
 const PERSON_SKILL_DEFAULT_LEVEL = 5;
 const PERSON_SKILL_DEFAULT_GROUP = 'Пользовательские';
 const PERSON_ROLE_DEFAULT_GROUP = 'Пользовательские';
+const PERSON_EMPLOYMENT_MAX_ITEMS = 12;
 const whatsappSessionsByOwner = new Map();
 const entityEventStreamsByOwner = new Map();
 let entityEventStreamSeq = 0;
@@ -791,6 +792,32 @@ function normalizePersonRoleGroup(value) {
   return toTrimmedString(value, 48) || PERSON_ROLE_DEFAULT_GROUP;
 }
 
+function normalizePersonEmploymentEntityId(value) {
+  if (typeof value === 'string') {
+    return toTrimmedString(value, 120);
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return toTrimmedString(String(value), 120);
+  }
+  if (value && typeof value === 'object' && typeof value.toString === 'function') {
+    const serialized = value.toString();
+    if (serialized && serialized !== '[object Object]') {
+      return toTrimmedString(serialized, 120);
+    }
+  }
+  return '';
+}
+
+function normalizePersonEmploymentCompanyName(value) {
+  if (typeof value !== 'string') return '';
+  return value.trim().replace(/\s+/g, ' ').slice(0, 120);
+}
+
+function normalizePersonEmploymentPosition(value) {
+  if (typeof value !== 'string') return '';
+  return value.trim().replace(/\s+/g, ' ').slice(0, 96);
+}
+
 function normalizeManualPersonRoles(value) {
   if (!Array.isArray(value)) return [];
 
@@ -884,6 +911,70 @@ function normalizeManualPersonSkills(value) {
   }
 
   return result;
+}
+
+function normalizePersonEmploymentEntries(value) {
+  if (!Array.isArray(value)) return [];
+
+  const dedupe = new Map();
+  const result = [];
+
+  for (const item of value) {
+    let normalized = null;
+
+    if (typeof item === 'string') {
+      const companyName = normalizePersonEmploymentCompanyName(item);
+      if (!companyName) continue;
+      normalized = {
+        companyEntityId: '',
+        companyName,
+        position: '',
+        current: true,
+        primary: false,
+      };
+    } else {
+      const row = toProfile(item);
+      const companyEntityId = normalizePersonEmploymentEntityId(row.companyEntityId);
+      const companyName = normalizePersonEmploymentCompanyName(row.companyName);
+      const position = normalizePersonEmploymentPosition(row.position);
+      if (!companyEntityId && !companyName && !position) continue;
+      normalized = {
+        companyEntityId,
+        companyName,
+        position,
+        current: row.current === true,
+        primary: row.primary === true,
+      };
+    }
+
+    const dedupeKey = `${(normalized.companyEntityId || normalized.companyName).toLowerCase()}|${normalized.position.toLowerCase()}`;
+    if (!dedupeKey || dedupeKey === '|') continue;
+
+    const existingIndex = dedupe.get(dedupeKey);
+    if (typeof existingIndex === 'number') {
+      result[existingIndex] = normalized;
+      continue;
+    }
+
+    dedupe.set(dedupeKey, result.length);
+    result.push(normalized);
+    if (result.length >= PERSON_EMPLOYMENT_MAX_ITEMS) break;
+  }
+
+  let primaryAssigned = false;
+  return result.map((entry) => {
+    if (entry.primary && !primaryAssigned) {
+      primaryAssigned = true;
+      return entry;
+    }
+    if (entry.primary) {
+      return {
+        ...entry,
+        primary: false,
+      };
+    }
+    return entry;
+  });
 }
 
 function normalizeImportanceValue(value) {
@@ -1349,6 +1440,13 @@ function normalizeIncomingEntityPayload(rawPayload, options = {}) {
       metadata.manual_skills = normalizeManualPersonSkills(metadata.manual_skills);
     } else {
       delete metadata.manual_skills;
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(metadata, 'employment')) {
+    if (resolvedEntityType === 'person') {
+      metadata.employment = normalizePersonEmploymentEntries(metadata.employment);
+    } else {
+      delete metadata.employment;
     }
   }
 
@@ -1819,6 +1917,10 @@ function summarizeEntityForAgent(entity) {
     markers: toStringArray(aiMetadata.markers, 6),
     skills: toStringArray(aiMetadata.skills, 8),
     roles: mergeEntityRoleValues(aiMetadata.roles, aiMetadata.manual_roles, 8),
+    employment: normalizePersonEmploymentEntries(aiMetadata.employment)
+      .map((entry) => [entry.position, entry.companyName ? `в ${entry.companyName}` : ''].filter(Boolean).join(' '))
+      .filter(Boolean)
+      .slice(0, 4),
     importance: toStringArray(aiMetadata.importance, 1, 24),
     status: toStringArray(aiMetadata.status, 4),
     stage: toStringArray(aiMetadata.stage, 4),

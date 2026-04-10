@@ -82,6 +82,7 @@ function createAiRouter(deps) {
   const PROJECT_CONTEXT_ENTITY_LIST_MAX_ITEMS = 12;
   const PROJECT_CONTEXT_ENTITY_ROLES_MAX_ITEMS = 24;
   const PROJECT_CONTEXT_ENTITY_SKILLS_MAX_ITEMS = 40;
+  const PROJECT_CONTEXT_ENTITY_EMPLOYMENT_MAX_ITEMS = 12;
   const ENTITY_ANALYSIS_FIELD_CONFIGS = Object.freeze({
     tags: { maxItems: 12, itemMaxLength: 64 },
     markers: { maxItems: 12, itemMaxLength: 64 },
@@ -2267,6 +2268,36 @@ function createAiRouter(deps) {
     return values;
   }
 
+  function normalizeProjectContextEmployment(rawValue, { maxItems = PROJECT_CONTEXT_ENTITY_EMPLOYMENT_MAX_ITEMS } = {}) {
+    const source = Array.isArray(rawValue) ? rawValue : [];
+    const dedup = new Set();
+    const values = [];
+
+    for (const item of source) {
+      const row = toProfile(item);
+      const companyEntityId = normalizeProjectEntityId(row.companyEntityId, 120);
+      const companyName = toTrimmedString(row.companyName, 120);
+      const position = toTrimmedString(row.position, 96);
+      if (!companyEntityId && !companyName && !position) continue;
+
+      const dedupeKey = `${(companyEntityId || companyName).toLowerCase()}|${position.toLowerCase()}`;
+      if (dedup.has(dedupeKey)) continue;
+      dedup.add(dedupeKey);
+
+      values.push({
+        companyEntityId,
+        companyName,
+        position,
+        current: row.current === true,
+        primary: row.primary === true,
+      });
+
+      if (values.length >= maxItems) break;
+    }
+
+    return values;
+  }
+
   function extractProjectEntitySkills(meta, { maxItems = PROJECT_CONTEXT_ENTITY_SKILLS_MAX_ITEMS, itemMaxLength = 64 } = {}) {
     const aiSkills = normalizeProjectContextStringList(meta?.skills, maxItems, itemMaxLength);
     const manualSkills = normalizeProjectContextManualSkills(meta?.manual_skills, { maxItems })
@@ -2482,6 +2513,9 @@ function createAiRouter(deps) {
         const manualSkills = normalizeProjectContextManualSkills(meta.manual_skills, {
           maxItems: PROJECT_CONTEXT_ENTITY_SKILLS_MAX_ITEMS,
         });
+        const employment = normalizeProjectContextEmployment(meta.employment, {
+          maxItems: PROJECT_CONTEXT_ENTITY_EMPLOYMENT_MAX_ITEMS,
+        });
         const normalized = {
           id: entityId,
           type: toTrimmedString(row.type, 24) || 'shape',
@@ -2497,6 +2531,7 @@ function createAiRouter(deps) {
             itemMaxLength: 64,
           }),
           manual_skills: manualSkills,
+          employment,
           tags: normalizeProjectContextStringList(meta.tags, PROJECT_CONTEXT_ENTITY_LIST_MAX_ITEMS, 64),
           markers: normalizeProjectContextStringList(meta.markers, PROJECT_CONTEXT_ENTITY_LIST_MAX_ITEMS, 64),
           importance: normalizeProjectContextStringList(meta.importance, 1, 24),
@@ -2868,6 +2903,9 @@ function createAiRouter(deps) {
       is_me: row.is_me === true,
       is_mine: row.is_mine === true,
       roles: extractProjectEntityRoles(meta, { maxItems: 4, itemMaxLength: 72 }),
+      employment: normalizeProjectContextEmployment(meta.employment, {
+        maxItems: 3,
+      }),
       description: toTrimmedString(meta.description, 320),
     };
   }
@@ -2889,12 +2927,34 @@ function createAiRouter(deps) {
     return toTrimmedString(value, 240).replace(/[.!\s]+$/g, '').trim();
   }
 
+  function buildEmploymentFragments(rawEmployment, options = {}) {
+    const employment = normalizeProjectContextEmployment(rawEmployment, {
+      maxItems: options.maxItems || 3,
+    });
+
+    return employment
+      .map((entry) => {
+        const companyName = toTrimmedString(entry.companyName, 120);
+        const position = toTrimmedString(entry.position, 96);
+        const base = [position, companyName ? (position ? `в ${companyName}` : companyName) : '']
+          .filter(Boolean)
+          .join(' ');
+        if (!base) return '';
+        const flags = [];
+        if (entry.current) flags.push('текущее');
+        if (entry.primary) flags.push('основное');
+        return flags.length ? `${base} (${flags.join(', ')})` : base;
+      })
+      .filter(Boolean);
+  }
+
   function buildEntityFocusSnippet(card) {
     const row = toProfile(card);
     const name = toTrimmedString(row.name, 120);
     if (!name) return '';
 
     const roles = Array.isArray(row.roles) ? row.roles.map((item) => toTrimmedString(item, 72)).filter(Boolean) : [];
+    const employment = buildEmploymentFragments(row.employment, { maxItems: 2 });
     const statuses = Array.isArray(row.status) ? row.status.map((item) => toTrimmedString(item, 72)).filter(Boolean) : [];
     const metrics = Array.isArray(row.metrics) ? row.metrics.map((item) => toTrimmedString(item, 96)).filter(Boolean) : [];
     const descriptionSentences = splitNarrativeSentences(row.description, 2, 200);
@@ -2906,6 +2966,7 @@ function createAiRouter(deps) {
 
     const fragments = [];
     if (roles.length) fragments.push(roles.slice(0, 2).join(', '));
+    if (employment.length) fragments.push(`занятость: ${employment.join('; ')}`);
     if (statuses.length) fragments.push(`статус: ${statuses.slice(0, 2).join(', ')}`);
     if (metrics.length) fragments.push(`метрика: ${metrics[0]}`);
     if (!fragments.length) return name;
@@ -2916,14 +2977,16 @@ function createAiRouter(deps) {
     const row = toProfile(author);
     const name = toTrimmedString(row.name, 120);
     const roles = Array.isArray(row.roles) ? row.roles.map((item) => toTrimmedString(item, 72)).filter(Boolean) : [];
+    const employment = buildEmploymentFragments(row.employment, { maxItems: 2 });
     const sentences = splitNarrativeSentences(row.description, 2, 220);
     const roleText = roles.length ? `, ${roles.slice(0, 2).join(', ')}` : '';
+    const employmentText = employment.length ? ` Его текущая занятость: ${employment.join('; ')}.` : '';
     const opening = name
       ? `В центре проекта находится ${name}${roleText}.`
       : 'В центре проекта находится автор и его операционный контур.';
 
-    if (!sentences.length) return opening;
-    return `${opening} ${trimSentenceEnding(sentences[0])}.`;
+    if (!sentences.length) return `${opening}${employmentText}`.trim();
+    return `${opening} ${trimSentenceEnding(sentences[0])}.${employmentText}`.trim();
   }
 
   function buildNarrativeRingSentence(label, cards) {

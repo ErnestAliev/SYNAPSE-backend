@@ -25,6 +25,7 @@ const PROJECT_CHAT_ENRICHMENT_FIELDS = Object.freeze([
 const PROJECT_CONTEXT_ENTITY_LIST_MAX_ITEMS = 12;
 const PROJECT_CONTEXT_ENTITY_SKILLS_MAX_ITEMS = 40;
 const PROJECT_CONTEXT_ENTITY_ROLES_MAX_ITEMS = 24;
+const PROJECT_CONTEXT_ENTITY_EMPLOYMENT_MAX_ITEMS = 12;
 
 const PROJECT_CONTEXT_ENTITY_TYPE_SEMANTICS = Object.freeze([
   'person: конкретный человек. Это не роль и не группа. Его описание раскрывает качества, статус, мотивацию, ограничения, отношения и влияние человека.',
@@ -235,6 +236,23 @@ function createProjectEnrichmentPrompts(deps) {
           })
           .filter(Boolean)
           .slice(0, PROJECT_CONTEXT_ENTITY_ROLES_MAX_ITEMS);
+        const employment = (Array.isArray(row.employment) ? row.employment : [])
+          .map((item) => {
+            const entry = toProfile(item);
+            const companyEntityId = toTrimmedString(entry.companyEntityId, 120);
+            const companyName = toTrimmedString(entry.companyName, 120);
+            const position = toTrimmedString(entry.position, 96);
+            if (!companyEntityId && !companyName && !position) return null;
+            return {
+              companyEntityId,
+              companyName,
+              position,
+              current: entry.current === true,
+              primary: entry.primary === true,
+            };
+          })
+          .filter(Boolean)
+          .slice(0, PROJECT_CONTEXT_ENTITY_EMPLOYMENT_MAX_ITEMS);
         return {
           id: toTrimmedString(row.id || row._id, 80),
           type: toTrimmedString(row.type, 24),
@@ -244,6 +262,7 @@ function createProjectEnrichmentPrompts(deps) {
           manual_roles: manualRoles,
           skills,
           manual_skills: manualSkills,
+          employment,
           tags,
           markers,
           importance,
@@ -264,6 +283,7 @@ function createProjectEnrichmentPrompts(deps) {
           || entity.manual_roles.length
           || entity.skills.length
           || entity.manual_skills.length
+          || entity.employment.length
           || entity.tags.length
           || entity.markers.length
           || entity.importance.length
@@ -447,7 +467,7 @@ function createProjectEnrichmentPrompts(deps) {
       'На входе JSON граф проекта.',
       'Используй только данные из этого JSON.',
       'Вход содержит: project_name, author_entity_id, isolated_entity_ids, author_neighbor_entity_ids, graph_stats, entities, connections, raw_connections, groups.',
-      'У каждой сущности учитывай: id, type, name, description, roles, manual_roles, skills, manual_skills, tags, markers, importance, is_me, is_mine, isAuthor.',
+      'У каждой сущности учитывай: id, type, name, description, roles, manual_roles, skills, manual_skills, employment, tags, markers, importance, is_me, is_mine, isAuthor.',
       'manual_roles — это ручные роли пользователя в формате { name, category, group }. Для person это приоритетный источник истины по ролям.',
       'Если у person есть manual_roles, учитывай как профессиональные, так и личные роли. Не теряй семейные и социальные роли вроде отец, муж, наставник, если они есть во входе.',
       'Если manual_roles много, лучше описывать их блоками: личные роли и профессиональные роли.',
@@ -456,6 +476,10 @@ function createProjectEnrichmentPrompts(deps) {
       'Не урезай manual_skills произвольно: если у person перечислено до 40 ручных навыков, сохраняй их все в compiled_context.',
       'Если у person есть и soft, и hard навыки, отражай обе категории явно и не смешивай их в один неструктурированный обрывок.',
       'Если manual_skills много, лучше описывать их блоками по категориям soft skills и hard skills.',
+      'employment — это ручные записи занятости person в формате { companyEntityId, companyName, position, current, primary }.',
+      'Если у person есть employment, отражай где и кем он работает, особенно текущую и основную занятость.',
+      'Если employment ссылается на company, которой нет среди активных сущностей графа, описывай это как фон профиля человека, а не как автоматически включенную project-сущность.',
+      'Если company из employment одновременно есть отдельной сущностью в графе, можно связать профильную занятость с этой сущностью и использовать это как часть проектного контекста.',
       'Когда описываешь человека, не теряй его ключевые навыки и уровни, если они важны для проекта или цели.',
       'graph.connections — это effective graph для LLM: в нем group-level связи уже развернуты на участников групп.',
       'graph.raw_connections — это физические ребра канвы в том виде, как они реально нарисованы.',
