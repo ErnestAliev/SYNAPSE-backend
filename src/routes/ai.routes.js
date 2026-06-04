@@ -37,6 +37,7 @@ function createAiRouter(deps) {
   } = deps;
 
   const router = express.Router();
+  const activeWebSearchRuns = new Map();
   const AGENT_CHAT_HISTORY_MESSAGE_LIMIT = Math.max(20, Number(deps.AGENT_CHAT_HISTORY_MESSAGE_LIMIT) || 140);
   const AGENT_CHAT_HISTORY_ATTACHMENT_LIMIT = Math.max(0, Number(deps.AGENT_CHAT_HISTORY_ATTACHMENT_LIMIT) || 6);
   const AGENT_CHAT_HISTORY_ATTACHMENT_DATA_MAX_LENGTH = Math.max(
@@ -523,6 +524,14 @@ function createAiRouter(deps) {
   function buildAiTraceId(label) {
     const safeLabel = toTrimmedString(label, 80) || 'ai-call';
     return `${safeLabel}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function buildWebSearchRunId() {
+    return `web-search-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  function buildWebSearchRunKey(ownerId, entityId) {
+    return `${ownerId}:${entityId}`;
   }
 
   function logAiCallStart(payload) {
@@ -1655,12 +1664,18 @@ function createAiRouter(deps) {
     ) && message.includes('not enabled');
   }
 
-  async function callOpenAiWebSearch({ query, toolType, entityType = 'shape', includeSources = true }) {
+  async function callOpenAiWebSearch({ query, toolType, entityType = 'shape', includeSources = true, signal = null }) {
     if (!process.env.OPENAI_API_KEY) {
       throw Object.assign(new Error('OPENAI_API_KEY is not configured'), { status: 503 });
     }
 
     const controller = new AbortController();
+    const abortFromParent = () => controller.abort();
+    if (signal?.aborted) {
+      controller.abort();
+    } else if (signal?.addEventListener) {
+      signal.addEventListener('abort', abortFromParent, { once: true });
+    }
     const timeout = setTimeout(() => controller.abort(), WEB_SEARCH_TIMEOUT_MS);
     try {
       const response = await fetch('https://api.openai.com/v1/responses', {
@@ -1734,21 +1749,28 @@ function createAiRouter(deps) {
       };
     } catch (error) {
       if (error?.name === 'AbortError') {
-        throw Object.assign(new Error('Web search timeout'), { status: 504 });
+        const message = signal?.aborted ? 'Web search cancelled' : 'Web search timeout';
+        throw Object.assign(new Error(message), {
+          status: signal?.aborted ? 499 : 504,
+          cancelled: Boolean(signal?.aborted),
+        });
       }
       throw error;
     } finally {
       clearTimeout(timeout);
+      if (signal?.removeEventListener) {
+        signal.removeEventListener('abort', abortFromParent);
+      }
     }
   }
 
-  async function requestWebSearch(query, { entityType = 'shape' } = {}) {
+  async function requestWebSearch(query, { entityType = 'shape', signal = null } = {}) {
     const searchInput = buildWebSearchInput(query, { entityType });
     let lastError = null;
 
     for (const [index, toolType] of WEB_SEARCH_TOOL_TYPES.entries()) {
       try {
-        return await callOpenAiWebSearch({ query: searchInput, toolType, entityType, includeSources: true });
+        return await callOpenAiWebSearch({ query: searchInput, toolType, entityType, includeSources: true, signal });
       } catch (error) {
         if (shouldRetryWebSearchWithoutInclude(error)) {
           try {
@@ -1757,6 +1779,7 @@ function createAiRouter(deps) {
               toolType,
               entityType,
               includeSources: false,
+              signal,
             });
           } catch (fallbackError) {
             lastError = fallbackError;
@@ -1970,14 +1993,15 @@ function createAiRouter(deps) {
   function buildWebSearchStateEntry(rawValue, entityType = 'shape') {
     const row = toProfile(rawValue);
     const status = toTrimmedString(row.status, 24).toLowerCase();
-    const normalizedStatus = ['searching', 'ready', 'failed'].includes(status) ? status : 'idle';
+    const normalizedStatus = ['searching', 'ready', 'failed', 'cancelled'].includes(status) ? status : 'idle';
     const phase = toTrimmedString(row.phase, 24).toLowerCase();
-    const normalizedPhase = ['summary', 'images', 'fields', 'ready', 'failed'].includes(phase) ? phase : '';
+    const normalizedPhase = ['summary', 'images', 'fields', 'ready', 'failed', 'cancelled'].includes(phase) ? phase : '';
     const summary = toTrimmedString(sanitizeWebText(row.summary), WEB_SEARCH_SUMMARY_MAX_LENGTH);
     const citations = normalizeWebSearchCitations(row.citations);
     return {
       status: normalizedStatus,
       phase: normalizedPhase,
+      runId: toTrimmedString(row.runId, 80),
       query: toTrimmedString(row.query, WEB_SEARCH_MAX_QUERY_LENGTH),
       summary,
       citations,
@@ -2021,7 +2045,7 @@ function createAiRouter(deps) {
 
   function mergeEntityWebSearchHistory(historyRaw, nextEntry, entityType = 'shape') {
     const history = buildWebSearchHistory(historyRaw, entityType);
-    if (!nextEntry?.query || !['ready', 'failed'].includes(nextEntry.status)) {
+    if (!nextEntry?.query || !['ready', 'failed', 'cancelled'].includes(nextEntry.status)) {
       return history;
     }
 
@@ -2091,6 +2115,35 @@ function createAiRouter(deps) {
     const doc = await EntityWebSearch.findOne({ owner_id: ownerId, entity_id: entityId }).lean();
     return buildEntityWebSearchStatePayload(doc || {}, entity.type);
   }
+
+  async function isWebSearchRunStillActive({ ownerId, entityId, runId }) {
+    const current = await loadEntityWebSearchState({ ownerId, entityId });
+    return current.status === 'searching' && current.runId === runId;
+  }
+
+  async function saveCancelledWebSearchState({
+    ownerId,
+    entityId,
+    projectId,
+    currentState,
+    reason = 'Поиск остановлен пользователем.',
+  }) {
+    const cancelledAt = new Date().toISOString();
+    return saveEntityWebSearchState({
+      ownerId,
+      entityId,
+      projectId,
+      nextState: {
+        ...currentState,
+        status: 'cancelled',
+        phase: 'cancelled',
+        errorMessage: reason,
+        completedAt: cancelledAt,
+        updatedAt: cancelledAt,
+      },
+    });
+  }
+
   function normalizeProjectEnrichmentFieldValue(fieldKey, rawValue, itemMaxLength) {
     const str = typeof rawValue === 'string' ? rawValue.trim() : '';
     if (!str) return '';
@@ -3776,6 +3829,37 @@ function createAiRouter(deps) {
     }
   });
 
+  router.post('/web-search/cancel', requireAuth, async (req, res, next) => {
+    try {
+      const ownerId = requireOwnerId(req);
+      const entityId = toTrimmedString(req.body?.entityId, 80);
+      if (!entityId) {
+        return res.status(400).json({ message: 'entityId is required' });
+      }
+
+      const currentState = await loadEntityWebSearchState({ ownerId, entityId });
+      if (currentState.status !== 'searching') {
+        return res.json({ cancelled: false, webSearch: currentState });
+      }
+
+      const runKey = buildWebSearchRunKey(ownerId, entityId);
+      const activeRun = activeWebSearchRuns.get(runKey);
+      if (activeRun?.controller && (!currentState.runId || activeRun.runId === currentState.runId)) {
+        activeRun.controller.abort();
+      }
+
+      const webSearch = await saveCancelledWebSearchState({
+        ownerId,
+        entityId,
+        projectId: toTrimmedString(req.body?.projectId, 80),
+        currentState,
+      });
+      return res.json({ cancelled: true, webSearch });
+    } catch (error) {
+      return next(error);
+    }
+  });
+
   router.post('/web-search', requireAuth, async (req, res, next) => {
     try {
       const ownerId = requireOwnerId(req);
@@ -3795,6 +3879,14 @@ function createAiRouter(deps) {
       }
 
       const startedAt = new Date().toISOString();
+      const runId = buildWebSearchRunId();
+      const runKey = buildWebSearchRunKey(ownerId, entityId);
+      const previousRun = activeWebSearchRuns.get(runKey);
+      if (previousRun?.controller) {
+        previousRun.controller.abort();
+      }
+      const runController = new AbortController();
+      activeWebSearchRuns.set(runKey, { runId, controller: runController });
       await saveEntityWebSearchState({
         ownerId,
         entityId,
@@ -3802,6 +3894,7 @@ function createAiRouter(deps) {
         nextState: {
           status: 'searching',
           phase: 'summary',
+          runId,
           query,
           summary: '',
           citations: [],
@@ -3827,6 +3920,20 @@ function createAiRouter(deps) {
         let imageResults = [];
         let fieldSuggestion = buildEmptyWebSearchFieldSuggestion(entity.type);
         let responseModel = OPENAI_WEB_SEARCH_MODEL || OPENAI_MODEL;
+        const ensureActive = async () => isWebSearchRunStillActive({ ownerId, entityId, runId });
+        const saveIfActive = async (nextState) => {
+          if (!(await ensureActive())) return false;
+          await saveEntityWebSearchState({
+            ownerId,
+            entityId,
+            projectId,
+            nextState: {
+              ...nextState,
+              runId,
+            },
+          });
+          return true;
+        };
 
         try {
           const webSearchResult = await withAiTrace({
@@ -3834,7 +3941,7 @@ function createAiRouter(deps) {
             model: OPENAI_WEB_SEARCH_MODEL || OPENAI_MODEL,
             queryLength: query.length,
           }, async () => {
-            const response = await requestWebSearch(query, { entityType: entity.type });
+            const response = await requestWebSearch(query, { entityType: entity.type, signal: runController.signal });
             return {
               reply: buildWebSearchPayload(response.payload).answer,
               debug: {
@@ -3847,87 +3954,75 @@ function createAiRouter(deps) {
           });
 
           const responsePayload = webSearchResult?.response?.payload || {};
+          if (!(await ensureActive())) return;
           normalizedPayload = buildWebSearchPayload(responsePayload);
           responseModel = toTrimmedString(webSearchResult?.response?.model, 120) || OPENAI_WEB_SEARCH_MODEL || OPENAI_MODEL;
 
           if (!normalizedPayload.answer && !normalizedPayload.sources.length) {
             const failedAt = new Date().toISOString();
-            await saveEntityWebSearchState({
-              ownerId,
-              entityId,
-              projectId,
-              nextState: {
-                status: 'failed',
-                phase: 'failed',
-                query,
-                summary: '',
-                citations: [],
-                images: [],
-                errorMessage: 'Поиск не вернул полезных данных. Попробуйте уточнить запрос.',
-                startedAt,
-                completedAt: failedAt,
-                updatedAt: failedAt,
-                model: responseModel,
-                sourceCount: 0,
-                searchQueries: normalizedPayload.searchQueries,
-                fieldSuggestion,
-              },
+            await saveIfActive({
+              status: 'failed',
+              phase: 'failed',
+              query,
+              summary: '',
+              citations: [],
+              images: [],
+              errorMessage: 'Поиск не вернул полезных данных. Попробуйте уточнить запрос.',
+              startedAt,
+              completedAt: failedAt,
+              updatedAt: failedAt,
+              model: responseModel,
+              sourceCount: 0,
+              searchQueries: normalizedPayload.searchQueries,
+              fieldSuggestion,
             });
             return;
           }
 
           const summaryAt = new Date().toISOString();
-          await saveEntityWebSearchState({
-            ownerId,
-            entityId,
-            projectId,
-            nextState: {
-              status: 'searching',
-              phase: 'images',
-              query,
-              summary: normalizedPayload.answer,
-              citations: normalizedPayload.citations,
-              images: [],
-              errorMessage: '',
-              startedAt,
-              completedAt: '',
-              updatedAt: summaryAt,
-              model: responseModel,
-              sourceCount: normalizedPayload.sources.length,
-              searchQueries: normalizedPayload.searchQueries,
-              fieldSuggestion,
-            },
-          });
+          if (!(await saveIfActive({
+            status: 'searching',
+            phase: 'images',
+            query,
+            summary: normalizedPayload.answer,
+            citations: normalizedPayload.citations,
+            images: [],
+            errorMessage: '',
+            startedAt,
+            completedAt: '',
+            updatedAt: summaryAt,
+            model: responseModel,
+            sourceCount: normalizedPayload.sources.length,
+            searchQueries: normalizedPayload.searchQueries,
+            fieldSuggestion,
+          }))) return;
 
           imageResults = await requestWebImageSearch(query, {
             entityType: entity.type,
             toolSearchQueries: normalizedPayload.searchQueries,
           }).catch(() => []);
+          if (!(await ensureActive())) return;
           const imagesAt = new Date().toISOString();
-          await saveEntityWebSearchState({
-            ownerId,
-            entityId,
-            projectId,
-            nextState: {
-              status: 'searching',
-              phase: 'fields',
-              query,
-              summary: normalizedPayload.answer,
-              citations: normalizedPayload.citations,
-              images: imageResults,
-              errorMessage: '',
-              startedAt,
-              completedAt: '',
-              updatedAt: imagesAt,
-              model: responseModel,
-              sourceCount: normalizedPayload.sources.length,
-              searchQueries: normalizedPayload.searchQueries,
-              fieldSuggestion,
-            },
-          });
+          if (!(await saveIfActive({
+            status: 'searching',
+            phase: 'fields',
+            query,
+            summary: normalizedPayload.answer,
+            citations: normalizedPayload.citations,
+            images: imageResults,
+            errorMessage: '',
+            startedAt,
+            completedAt: '',
+            updatedAt: imagesAt,
+            model: responseModel,
+            sourceCount: normalizedPayload.sources.length,
+            searchQueries: normalizedPayload.searchQueries,
+            fieldSuggestion,
+          }))) return;
 
           if (normalizedPayload.answer) {
             try {
+              if (!(await ensureActive())) return;
               fieldSuggestion = await withAiTrace({
                 label: 'web-search.fields',
                 model: toTrimmedString(OPENAI_MODEL, 120) || OPENAI_WEB_SEARCH_MODEL || 'gpt-5',
@@ -3960,51 +4055,60 @@ function createAiRouter(deps) {
             }
           }
 
+          if (!(await ensureActive())) return;
           const completedAt = new Date().toISOString();
-          await saveEntityWebSearchState({
-            ownerId,
-            entityId,
-            projectId,
-            nextState: {
-              status: 'ready',
-              phase: 'ready',
-              query,
-              summary: normalizedPayload.answer,
-              citations: normalizedPayload.citations,
-              images: imageResults,
-              errorMessage: '',
-              startedAt,
-              completedAt,
-              updatedAt: completedAt,
-              model: responseModel,
-              sourceCount: normalizedPayload.sources.length,
-              searchQueries: normalizedPayload.searchQueries,
-              fieldSuggestion,
-            },
+          await saveIfActive({
+            status: 'ready',
+            phase: 'ready',
+            query,
+            summary: normalizedPayload.answer,
+            citations: normalizedPayload.citations,
+            images: imageResults,
+            errorMessage: '',
+            startedAt,
+            completedAt,
+            updatedAt: completedAt,
+            model: responseModel,
+            sourceCount: normalizedPayload.sources.length,
+            searchQueries: normalizedPayload.searchQueries,
+            fieldSuggestion,
           });
         } catch (error) {
+          if (error?.cancelled || runController.signal.aborted) {
+            const currentState = await loadEntityWebSearchState({ ownerId, entityId }).catch(() => null);
+            if (currentState?.status === 'searching' && currentState.runId === runId) {
+              await saveCancelledWebSearchState({
+                ownerId,
+                entityId,
+                projectId,
+                currentState,
+              });
+            }
+            return;
+          }
+          if (!(await ensureActive())) return;
           const failedAt = new Date().toISOString();
-          await saveEntityWebSearchState({
-            ownerId,
-            entityId,
-            projectId,
-            nextState: {
-              status: 'failed',
-              phase: 'failed',
-              query,
-              summary: normalizedPayload.answer,
-              citations: normalizedPayload.citations,
-              images: imageResults,
-              errorMessage: toTrimmedString(error?.message, 320) || 'Не удалось выполнить веб-поиск.',
-              startedAt,
-              completedAt: failedAt,
-              updatedAt: failedAt,
-              model: responseModel,
-              sourceCount: Array.isArray(normalizedPayload.sources) ? normalizedPayload.sources.length : 0,
-              searchQueries: normalizedPayload.searchQueries,
-              fieldSuggestion,
-            },
+          await saveIfActive({
+            status: 'failed',
+            phase: 'failed',
+            query,
+            summary: normalizedPayload.answer,
+            citations: normalizedPayload.citations,
+            images: imageResults,
+            errorMessage: toTrimmedString(error?.message, 320) || 'Не удалось выполнить веб-поиск.',
+            startedAt,
+            completedAt: failedAt,
+            updatedAt: failedAt,
+            model: responseModel,
+            sourceCount: Array.isArray(normalizedPayload.sources) ? normalizedPayload.sources.length : 0,
+            searchQueries: normalizedPayload.searchQueries,
+            fieldSuggestion,
           });
+        } finally {
+          const activeRun = activeWebSearchRuns.get(runKey);
+          if (activeRun?.runId === runId) {
+            activeWebSearchRuns.delete(runKey);
+          }
         }
       })();
 

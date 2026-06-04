@@ -31,14 +31,15 @@ const webSearchEntrySchema = new mongoose.Schema(
   {
     status: {
       type: String,
-      enum: ['idle', 'searching', 'ready', 'failed'],
+      enum: ['idle', 'searching', 'ready', 'failed', 'cancelled'],
       default: 'idle',
     },
     phase: {
       type: String,
-      enum: ['', 'summary', 'images', 'fields', 'ready', 'failed'],
+      enum: ['', 'summary', 'images', 'fields', 'ready', 'failed', 'cancelled'],
       default: '',
     },
+    runId: { type: String, default: '', trim: true },
     query: { type: String, default: '', trim: true },
     summary: { type: String, default: '', trim: true },
     citations: { type: [webSearchCitationSchema], default: [] },
