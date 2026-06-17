@@ -251,7 +251,7 @@ function createAiRouter(deps) {
   const WEB_SEARCH_FIELD_SUGGESTION_TIMEOUT_MS = 90_000;
   const WEB_SEARCH_FIELD_SUGGESTION_MAX_OUTPUT_TOKENS = 1200;
   const WEB_IMAGE_SEARCH_TIMEOUT_MS = 8_000;
-  const WEB_IMAGE_SEARCH_QUERY_LIMIT = 6;
+  const WEB_IMAGE_SEARCH_QUERY_LIMIT = 8;
   const WEB_IMAGE_SEARCH_RESULT_LIMIT = 10;
   const WEB_IMAGE_IMPORT_TIMEOUT_MS = 15_000;
   const WEB_IMAGE_IMPORT_URL_MAX_LENGTH = 2048;
@@ -1224,6 +1224,106 @@ function createAiRouter(deps) {
     result.push(query);
   }
 
+  function webSearchTextIncludesAny(rawValue, patterns) {
+    const text = toTrimmedString(rawValue, 2000).toLowerCase();
+    if (!text) return false;
+    return patterns.some((pattern) => {
+      if (pattern instanceof RegExp) return pattern.test(text);
+      return text.includes(String(pattern).toLowerCase());
+    });
+  }
+
+  function shouldSearchLogoImages(parsedQuery, entityType) {
+    if (entityType === 'company' || entityType === 'resource' || entityType === 'project') return true;
+    const text = [
+      parsedQuery?.raw,
+      parsedQuery?.subject,
+      ...(Array.isArray(parsedQuery?.contextHints) ? parsedQuery.contextHints : []),
+    ].filter(Boolean).join(' ');
+    return webSearchTextIncludesAny(text, [
+      'company',
+      'startup',
+      'brand',
+      'logo',
+      'app',
+      'application',
+      'saas',
+      'компания',
+      'стартап',
+      'бренд',
+      'логотип',
+      'приложение',
+      'сервис',
+    ]);
+  }
+
+  function shouldSearchFounderImages(parsedQuery, entityType) {
+    if (entityType === 'person') return false;
+    const text = [
+      parsedQuery?.raw,
+      ...(Array.isArray(parsedQuery?.contextHints) ? parsedQuery.contextHints : []),
+    ].filter(Boolean).join(' ');
+    return webSearchTextIncludesAny(text, [
+      'founder',
+      'founders',
+      'co-founder',
+      'cofounder',
+      'owner',
+      'ceo',
+      'основатель',
+      'основатели',
+      'сооснователь',
+      'учредитель',
+      'владелец',
+      'гендиректор',
+    ]);
+  }
+
+  function appendSubjectVisualQueries(result, seen, parsedQuery, { subject, contextText, latinSubjectVariants, entityType }) {
+    const quotedSubject = parsedQuery.quotedSubject || subject;
+    const shouldSearchPerson = entityType === 'person';
+    const shouldSearchLogo = shouldSearchLogoImages(parsedQuery, entityType);
+    const shouldSearchFounders = shouldSearchFounderImages(parsedQuery, entityType);
+
+    if (shouldSearchPerson) {
+      appendUniqueWebImageSearchQuery(
+        result,
+        seen,
+        [quotedSubject, contextText, 'portrait'].filter(Boolean).join(' '),
+      );
+      appendUniqueWebImageSearchQuery(result, seen, `${subject} photo`);
+      for (const subjectVariant of latinSubjectVariants) {
+        appendUniqueWebImageSearchQuery(result, seen, `${subjectVariant} photo`);
+      }
+    }
+
+    if (shouldSearchLogo) {
+      appendUniqueWebImageSearchQuery(
+        result,
+        seen,
+        [quotedSubject, contextText, 'logo'].filter(Boolean).join(' '),
+      );
+      appendUniqueWebImageSearchQuery(result, seen, `${subject} logo`);
+      appendUniqueWebImageSearchQuery(result, seen, `${subject} app icon`);
+      for (const subjectVariant of latinSubjectVariants) {
+        appendUniqueWebImageSearchQuery(result, seen, `${subjectVariant} logo`);
+      }
+    }
+
+    if (shouldSearchFounders) {
+      appendUniqueWebImageSearchQuery(
+        result,
+        seen,
+        [quotedSubject, contextText, 'founder photo'].filter(Boolean).join(' '),
+      );
+      appendUniqueWebImageSearchQuery(result, seen, `${subject} founders`);
+      appendUniqueWebImageSearchQuery(result, seen, `${subject} co-founder`);
+      for (const subjectVariant of latinSubjectVariants) {
+        appendUniqueWebImageSearchQuery(result, seen, `${subjectVariant} founder photo`);
+      }
+    }
+  }
+
   function buildWebImageSearchQueries(rawQuery, { entityType = 'shape', toolSearchQueries = [] } = {}) {
     const parsedQuery = typeof rawQuery === 'string' ? parseWebSearchQuery(rawQuery) : rawQuery;
     if (!parsedQuery?.subject && !parsedQuery?.raw) return [];
@@ -1246,6 +1346,13 @@ function createAiRouter(deps) {
       if (result.length >= WEB_IMAGE_SEARCH_QUERY_LIMIT) break;
     }
 
+    appendSubjectVisualQueries(result, seen, parsedQuery, {
+      subject,
+      contextText,
+      latinSubjectVariants,
+      entityType,
+    });
+
     appendUniqueWebImageSearchQuery(result, seen, parsedQuery.disambiguatedQuery || subject);
     appendUniqueWebImageSearchQuery(result, seen, subject);
     for (const subjectVariant of latinSubjectVariants) {
@@ -1256,30 +1363,6 @@ function createAiRouter(deps) {
     for (const toolQuery of Array.isArray(toolSearchQueries) ? toolSearchQueries : []) {
       appendUniqueWebImageSearchQuery(result, seen, toolQuery);
       if (result.length >= WEB_IMAGE_SEARCH_QUERY_LIMIT) break;
-    }
-
-    if (entityType === 'person') {
-      appendUniqueWebImageSearchQuery(
-        result,
-        seen,
-        [parsedQuery.quotedSubject || subject, contextText, 'portrait'].filter(Boolean).join(' '),
-      );
-      appendUniqueWebImageSearchQuery(result, seen, `${subject} photo`);
-      for (const subjectVariant of latinSubjectVariants) {
-        appendUniqueWebImageSearchQuery(result, seen, `${subjectVariant} photo`);
-        if (result.length >= WEB_IMAGE_SEARCH_QUERY_LIMIT) break;
-      }
-    } else if (entityType === 'company') {
-      appendUniqueWebImageSearchQuery(
-        result,
-        seen,
-        [parsedQuery.quotedSubject || subject, contextText, 'logo'].filter(Boolean).join(' '),
-      );
-      appendUniqueWebImageSearchQuery(result, seen, `${subject} logo`);
-      for (const subjectVariant of latinSubjectVariants) {
-        appendUniqueWebImageSearchQuery(result, seen, `${subjectVariant} logo`);
-        if (result.length >= WEB_IMAGE_SEARCH_QUERY_LIMIT) break;
-      }
     }
 
     return result.slice(0, WEB_IMAGE_SEARCH_QUERY_LIMIT);
@@ -1875,13 +1958,32 @@ function createAiRouter(deps) {
     if (!imageQueries.length) return [];
 
     const settledResults = await Promise.all(
-      imageQueries.map((imageQuery) => requestDuckDuckGoImageSearch(imageQuery).catch(() => [])),
+      imageQueries.map((imageQuery) =>
+        requestDuckDuckGoImageSearch(imageQuery)
+          .then((images) => ({ imageQuery, images, error: null }))
+          .catch((error) => ({ imageQuery, images: [], error })),
+      ),
     );
+
+    const failedQueries = settledResults
+      .filter((item) => item.error)
+      .map((item) => ({
+        query: item.imageQuery,
+        error: toTrimmedString(item.error?.message, 160) || 'unknown',
+        status: item.error?.status || null,
+      }));
+    if (failedQueries.length) {
+      console.warn('[web-search] image search failed', {
+        query: parsedQuery.raw,
+        entityType,
+        failedQueries,
+      });
+    }
 
     const dedup = new Set();
     const merged = [];
 
-    settledResults.forEach((images, queryRank) => {
+    settledResults.forEach(({ images }, queryRank) => {
       for (const image of Array.isArray(images) ? images : []) {
         const key = toTrimmedString(image?.imageUrl || image?.thumbnailUrl || image?.sourcePageUrl, 2048);
         if (!key || dedup.has(key)) continue;
